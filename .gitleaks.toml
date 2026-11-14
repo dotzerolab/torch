@@ -1,0 +1,11 @@
+# Secret scanning: the default ruleset plus generated output and dependencies (CI job `gitleaks`, pre-commit hook in .githooks/).
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Generated output and dependencies"
+paths = [
+  '''(^|/)node_modules/''',
+  '''(^|/)dist/''',
+  '''(^|/)\.worktrees/''',
+]

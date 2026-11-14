@@ -1,0 +1,75 @@
+# Development services. Start: docker compose -f docker-compose.dev.yml up -d --wait
+# Host ports are bound to localhost and can be moved with POSTGRES_PORT, ELECTRIC_PORT, S3_PORT, S3_CONSOLE_PORT,
+# MAILPIT_SMTP_PORT, MAILPIT_UI_PORT
+# (set them in .env, which Compose reads; see .env.example). Credentials below are local development only.
+name: torch-dev
+
+services:
+  postgres:
+    image: postgres:17
+    # Both sync-engine candidates replicate from the WAL, so logical replication is mandatory.
+    command: postgres -c wal_level=logical
+    environment:
+      POSTGRES_USER: torch
+      POSTGRES_PASSWORD: torch
+      POSTGRES_DB: torch
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U torch -d torch"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Sync service (ADR 0001). The browser never talks to it: the server proxies shape requests and adds the permission
+  # filter, so the secret below stays on the server side. Electric needs a password in DATABASE_URL even with trust
+  # auth (boot crash otherwise, ADR 0001 section 9) and no TLS inside the compose network.
+  electric:
+    image: electricsql/electric:1.8.1
+    environment:
+      DATABASE_URL: postgresql://torch:torch@postgres:5432/torch?sslmode=disable
+      ELECTRIC_SECRET: ${ELECTRIC_SECRET:-dev-electric-secret}
+    ports:
+      - "127.0.0.1:${ELECTRIC_PORT:-3010}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/v1/health || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # S3-compatible object storage for attachments. RustFS (Apache-2.0) because the MinIO images are no longer
+  # published and MinIO is AGPL; the S3 API is the same on container port 9000, console on 9001.
+  s3:
+    image: rustfs/rustfs:1.0.5
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY_ID:-dev-access-key}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_ACCESS_KEY:-dev-secret-key}
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "127.0.0.1:${S3_PORT:-9000}:9000"
+      - "127.0.0.1:${S3_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - s3-data:/data
+
+  # Mail catcher: the sign-in emails land here (UI and API on container port 8025, SMTP on 1025).
+  mail:
+    image: axllent/mailpit:v1.33.1
+    ports:
+      - "127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres-data:
+  s3-data:

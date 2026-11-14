@@ -1,0 +1,9 @@
+{
+  "productName": "Acme Tasks",
+  "logoLight": "/acme/logo-light.svg",
+  "logoDark": "/acme/logo-dark.svg",
+  "favicon": "/acme/favicon.svg",
+  "accentColor": "#3366ff",
+  "emailSenderName": "Acme Tasks",
+  "emailSenderAddress": "no-reply@acme.example"
+}

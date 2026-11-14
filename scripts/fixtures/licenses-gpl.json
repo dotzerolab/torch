@@ -1,0 +1,4 @@
+{
+  "MIT": [{ "name": "left-pad-fixture", "versions": ["1.0.0"], "license": "MIT" }],
+  "GPL-3.0": [{ "name": "copyleft-fixture", "versions": ["2.1.0"], "license": "GPL-3.0" }]
+}

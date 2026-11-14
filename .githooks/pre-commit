@@ -1,0 +1,7 @@
+#!/bin/sh
+# Block secrets before they reach history. Install: see "Secret scanning" in the README.
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "gitleaks not found: brew install gitleaks (https://github.com/gitleaks/gitleaks), then commit again." >&2
+  exit 1
+fi
+exec gitleaks git --pre-commit --staged --redact --no-banner -v

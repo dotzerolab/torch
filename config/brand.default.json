@@ -1,0 +1,9 @@
+{
+  "productName": "Torch",
+  "logoLight": "/brand/logo-light.svg",
+  "logoDark": "/brand/logo-dark.svg",
+  "favicon": "/brand/favicon.svg",
+  "accentColor": "#2A5FF2",
+  "emailSenderName": "Torch",
+  "emailSenderAddress": "no-reply@example.com"
+}

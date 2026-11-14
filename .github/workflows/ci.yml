@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request replaces the run in progress (never on main: every commit there
+# keeps its own run).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  gates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    # The full stack of the dev compose on its default ports: Postgres, Electric and Mailpit. These are local
+    # development values (the same as .env.example), not secrets.
+    env:
+      DATABASE_URL: postgres://torch:torch@localhost:5432/torch
+      ELECTRIC_URL: http://localhost:3010
+      ELECTRIC_SECRET: dev-electric-secret
+      SMTP_URL: smtp://localhost:1025
+      MAILPIT_API_URL: http://localhost:8025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The pnpm version comes from "packageManager" in package.json.
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+      - name: lint
+        run: pnpm lint
+      - name: typecheck
+        run: pnpm typecheck
+      # Postgres with wal_level=logical, the Electric sync service and the Mailpit mail catcher, so the database,
+      # sync and SMTP integration tests run instead of being skipped. Object storage is not used yet.
+      - name: start the dev services
+        run: docker compose -f docker-compose.dev.yml up -d --wait postgres electric mail
+      - name: apply the database migrations
+        run: pnpm --filter @torch/server db:migrate
+      - name: unit and integration tests
+        run: pnpm test
+      - name: i18n check (no missing translation)
+        run: pnpm i18n:check
+      - name: brand-string check (product name)
+        run: pnpm brand:check
+      - name: licence check (production dependencies)
+        run: pnpm licenses:check
+      - name: build
+        run: pnpm build
+      - name: install Playwright browser
+        run: pnpm --filter @torch/web exec playwright install --with-deps chromium
+      - name: end-to-end tests
+        run: pnpm e2e
+      - name: service logs (on failure)
+        if: failure()
+        run: docker compose -f docker-compose.dev.yml logs --no-color --tail=200 postgres electric mail

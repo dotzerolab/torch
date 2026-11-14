@@ -1,0 +1,10 @@
+[
+  {
+    "name": "nodemailer",
+    "reason": "MIT-0 (MIT without the attribution clause): more permissive than MIT; approved by a maintainer on 2026-11-14."
+  },
+  {
+    "name": "fractional-indexing",
+    "reason": "CC0-1.0 (public-domain dedication), transitive via @tanstack/db; approved in ADR 0001 section 8 and by a maintainer on 2026-11-14."
+  }
+]

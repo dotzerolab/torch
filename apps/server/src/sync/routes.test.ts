@@ -1,0 +1,672 @@
+import { ELECTRIC_PROTOCOL_QUERY_PARAMS } from '@electric-sql/client';
+import type { Brand } from '@torch/shared/brand';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createApp } from '../app.ts';
+import { createDb, type Db } from '../db.ts';
+import { loadActor } from '../permissions/load-actor.ts';
+import {
+  createWorkspaceFixture,
+  type WorkspaceFixture,
+  withTempDatabase,
+} from '../test/fixtures.ts';
+import {
+  headerActorResolver,
+  TEST_APP_CONFIG,
+  TEST_MEMBER_HEADER,
+  TEST_ORIGIN,
+} from '../test/header-actor-resolver.ts';
+import { SYNC_FORWARDED_PARAMS } from './routes.ts';
+
+const databaseUrl = process.env.DATABASE_URL;
+const electricUrl = process.env.ELECTRIC_URL;
+const electricSecret = process.env.ELECTRIC_SECRET ?? 'dev-electric-secret';
+
+// Integration: needs the dev compose Postgres. Skipped, loudly, when DATABASE_URL is not set.
+if (!databaseUrl) {
+  console.warn(
+    '[sync/routes.test] SKIPPED the shape proxy tests: DATABASE_URL is not set. ' +
+      'Start `docker compose -f docker-compose.dev.yml up -d --wait postgres` and set DATABASE_URL (see .env.example).',
+  );
+}
+if (!electricUrl) {
+  console.warn(
+    '[sync/routes.test] SKIPPED the real-Electric integration test: ELECTRIC_URL is not set. ' +
+      'Start `docker compose -f docker-compose.dev.yml up -d --wait electric` and set ELECTRIC_URL (see .env.example).',
+  );
+}
+
+const brand: Brand = {
+  productName: 'Acme Tasks',
+  logoLight: '/acme/logo-light.svg',
+  logoDark: '/acme/logo-dark.svg',
+  favicon: '/acme/favicon.svg',
+  accentColor: '#3366ff',
+  emailSenderName: 'Acme Tasks',
+  emailSenderAddress: 'no-reply@acme.example',
+};
+
+const UPSTREAM = 'http://electric.test:3000';
+const SECRET = 'TOPSECRET-server-side-value';
+const UNKNOWN_UUID = '99999999-9999-4999-8999-999999999999';
+
+type Call = { url: URL; init: RequestInit | undefined };
+
+/** A stand-in for fetch that records what the proxy would send to Electric and answers with `respond`. */
+function fakeUpstream(respond: (call: Call) => Response | Promise<Response>) {
+  const calls: Call[] = [];
+  const fetchUpstream: typeof fetch = async (input, init) => {
+    const call = { url: new URL(input instanceof Request ? input.url : String(input)), init };
+    calls.push(call);
+    return respond(call);
+  };
+  return { calls, fetchUpstream };
+}
+
+const emptyShape = () =>
+  new Response('[{"headers":{"control":"up-to-date"}}]', {
+    status: 200,
+    headers: { 'content-type': 'application/json', 'electric-handle': 'h-1' },
+  });
+
+function buildApp(db: Db, fetchUpstream?: typeof fetch) {
+  return createApp({
+    brand,
+    db,
+    electric: { url: UPSTREAM, secret: SECRET },
+    auth: headerActorResolver(db.orm),
+    config: TEST_APP_CONFIG,
+    fetchUpstream,
+  });
+}
+
+const as = (memberId: string | undefined, init: RequestInit = {}): RequestInit => ({
+  ...init,
+  headers: { ...(memberId ? { [TEST_MEMBER_HEADER]: memberId } : {}), ...init.headers },
+});
+
+const issuesPath = (f: WorkspaceFixture, team: 'eng' | 'ops') =>
+  `/api/sync/w/${f.workspaceId}/teams/${f.teams[team].id}/issues`;
+const get = (app: ReturnType<typeof createApp>, path: string, init?: RequestInit) =>
+  app.fetch(new Request(`http://localhost${path}`, init));
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe.skipIf(!databaseUrl)('GET /api/sync (shape proxy, fake Electric)', () => {
+  it('does not mount the sync routes without electric and auth', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const app = createApp({ brand, db });
+
+      const res = await get(app, issuesPath(f, 'eng'), as(f.members.owner.id));
+
+      expect(res.status).toBe(404);
+    });
+  });
+
+  it('client table, where, columns, params[1] and secret never reach Electric', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const hostile = new URLSearchParams({
+        offset: '-1',
+        handle: 'h-0',
+        live: 'true',
+        cursor: 'c-0',
+        // Everything below is ours to decide, not the client's.
+        table: 'member',
+        where: '1=1',
+        columns: 'description',
+        secret: 'hunter2',
+        'params[1]': 'evil',
+        'params[2]': 'evil2',
+        params: '{"1":"evil"}',
+        replica: 'full',
+        subset__where: "description like 'a%'",
+        subset__params: '{}',
+        subset__limit: '1',
+      });
+
+      const res = await get(
+        app,
+        `${issuesPath(f, 'eng')}?${hostile}`,
+        as(f.members.member.id, {
+          headers: { cookie: 'sid=session-cookie', authorization: 'Bearer abc' },
+        }),
+      );
+
+      expect(res.status).toBe(200);
+      expect(upstream.calls).toHaveLength(1);
+      // The caller's credentials stay with us: Electric gets none of the request headers.
+      expect(JSON.stringify(upstream.calls[0]?.init?.headers ?? {})).not.toMatch(
+        /cookie|authorization|session-cookie/i,
+      );
+      const sent = upstream.calls[0]?.url;
+      expect(`${sent?.origin}${sent?.pathname}`).toBe(`${UPSTREAM}/v1/shape`);
+      const q = sent?.searchParams;
+      // Protocol parameters travel through.
+      expect(q?.get('offset')).toBe('-1');
+      expect(q?.get('handle')).toBe('h-0');
+      expect(q?.get('live')).toBe('true');
+      expect(q?.get('cursor')).toBe('c-0');
+      // Server-owned parameters are the server's values, exactly once.
+      expect(q?.getAll('table')).toEqual(['issue']);
+      expect(q?.getAll('where')).toEqual(['team_id = $1']);
+      expect(q?.getAll('params[1]')).toEqual([f.teams.eng.id]);
+      expect(q?.getAll('secret')).toEqual([SECRET]);
+      expect(q?.getAll('columns')).toHaveLength(1);
+      expect(q?.get('columns')).not.toContain('description');
+      // Nothing else the client sent survives: no second param, no JSON params, no replica, no subset queries.
+      expect(q?.has('params[2]')).toBe(false);
+      expect(q?.has('params')).toBe(false);
+      expect(q?.has('replica')).toBe(false);
+      expect([...(q?.keys() ?? [])].filter((k) => k.startsWith('subset__'))).toEqual([]);
+      expect(sent?.href).not.toContain('evil');
+      expect(sent?.href).not.toContain('hunter2');
+    });
+  });
+
+  it('the teams shape for a member is built from the server-side actor, not from the request', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const res = await get(
+        app,
+        `/api/sync/w/${f.workspaceId}/teams?offset=-1&where=true&params[2]=${UNKNOWN_UUID}`,
+        as(f.members.outsider.id),
+      );
+
+      expect(res.status).toBe(200);
+      const q = upstream.calls[0]?.url.searchParams;
+      expect(q?.get('table')).toBe('team');
+      expect(q?.get('where')).toBe('workspace_id = $1 AND (private = false OR id IN ($2))');
+      expect(q?.get('params[1]')).toBe(f.workspaceId);
+      // The outsider belongs to no team: the nil uuid, not the client's value.
+      expect(q?.get('params[2]')).toBe('00000000-0000-0000-0000-000000000000');
+      expect(q?.has('params[3]')).toBe(false);
+    });
+  });
+
+  it('serves workflow states per team', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const res = await get(
+        app,
+        `/api/sync/w/${f.workspaceId}/teams/${f.teams.eng.id}/workflow-states?offset=-1`,
+        as(f.members.guest.id),
+      );
+
+      expect(res.status).toBe(200);
+      const q = upstream.calls[0]?.url.searchParams;
+      expect(q?.get('table')).toBe('workflow_state');
+      expect(q?.get('params[1]')).toBe(f.teams.eng.id);
+    });
+  });
+
+  it('guest and outsider get 404 for OPS issues; member gets the OPS shape with params[1] = OPS id', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      for (const who of ['guest', 'outsider'] as const) {
+        const res = await get(app, `${issuesPath(f, 'ops')}?offset=-1`, as(f.members[who].id));
+        expect(res.status, who).toBe(404);
+        expect(await res.json()).toEqual({ error: 'not_found' });
+      }
+      expect(upstream.calls).toHaveLength(0);
+
+      for (const who of ['member', 'owner'] as const) {
+        const res = await get(app, `${issuesPath(f, 'ops')}?offset=-1`, as(f.members[who].id));
+        expect(res.status, who).toBe(200);
+      }
+      expect(upstream.calls).toHaveLength(2);
+      for (const call of upstream.calls) {
+        expect(call.url.searchParams.get('params[1]')).toBe(f.teams.ops.id);
+      }
+    });
+  });
+
+  it('a team or workspace id from another workspace -> 404, identical body to an unknown team', async () => {
+    await withTempDatabase(async (db) => {
+      const a = await createWorkspaceFixture(db.orm);
+      const b = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const actorA = as(a.members.owner.id);
+
+      // Control: the same caller reaches their own team, so the 404s below are decisions, not missing routes.
+      expect((await get(app, issuesPath(a, 'eng'), actorA)).status).toBe(200);
+      upstream.calls.length = 0;
+
+      const unknownTeam = await get(
+        app,
+        `/api/sync/w/${a.workspaceId}/teams/${UNKNOWN_UUID}/issues`,
+        actorA,
+      );
+      const foreignTeam = await get(
+        app,
+        `/api/sync/w/${a.workspaceId}/teams/${b.teams.eng.id}/issues`,
+        actorA,
+      );
+      const malformedTeam = await get(
+        app,
+        `/api/sync/w/${a.workspaceId}/teams/not-a-uuid/issues`,
+        actorA,
+      );
+      const foreignWorkspace = await get(app, issuesPath(b, 'eng'), actorA);
+      const unknownWorkspace = await get(
+        app,
+        `/api/sync/w/${UNKNOWN_UUID}/teams/${a.teams.eng.id}/issues`,
+        actorA,
+      );
+
+      expect([unknownTeam.status, foreignTeam.status, malformedTeam.status]).toEqual([
+        404, 404, 404,
+      ]);
+      const body = await unknownTeam.text();
+      expect(await foreignTeam.text()).toBe(body);
+      expect(await malformedTeam.text()).toBe(body);
+      // A workspace the caller has no session in answers like a workspace that does not exist.
+      expect(foreignWorkspace.status).toBe(unknownWorkspace.status);
+      expect(await foreignWorkspace.text()).toBe(await unknownWorkspace.text());
+      expect(upstream.calls).toHaveLength(0);
+    });
+  });
+
+  it('an upper-case or mixed-case team or workspace id -> 404 and no new shape: one id, one spelling, one shape', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const guest = as(f.members.guest.id);
+      const mixed = (id: string) =>
+        [...id].map((ch, index) => (index % 2 === 0 ? ch.toUpperCase() : ch)).join('');
+      const team = f.teams.eng.id;
+      expect(mixed(team)).not.toBe(team);
+
+      // Control: the canonical spelling reaches Electric with exactly the DB id.
+      expect((await get(app, issuesPath(f, 'eng'), guest)).status).toBe(200);
+      expect(upstream.calls.map((call) => call.url.searchParams.get('params[1]'))).toEqual([team]);
+      upstream.calls.length = 0;
+
+      const paths = [
+        `/api/sync/w/${f.workspaceId}/teams/${mixed(team)}/issues`,
+        `/api/sync/w/${f.workspaceId}/teams/${team.toUpperCase()}/issues`,
+        `/api/sync/w/${f.workspaceId}/teams/${mixed(team)}/workflow-states`,
+        `/api/sync/w/${mixed(f.workspaceId)}/teams/${team}/issues`,
+        `/api/sync/w/${f.workspaceId.toUpperCase()}/teams`,
+      ];
+      for (const path of paths) {
+        const res = await get(app, `${path}?offset=-1`, guest);
+        expect(res.status, path).toBe(404);
+      }
+      expect(upstream.calls).toHaveLength(0);
+    });
+  });
+
+  it('no actor -> 401, and Electric is never called', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const paths = [
+        `/api/sync/w/${f.workspaceId}/teams`,
+        issuesPath(f, 'eng'),
+        `/api/sync/w/${f.workspaceId}/teams/${f.teams.eng.id}/workflow-states`,
+      ];
+      for (const path of paths) {
+        const res = await get(app, path);
+        expect(res.status, path).toBe(401);
+        expect(await res.json()).toEqual({ error: 'unauthenticated' });
+      }
+      expect(upstream.calls).toHaveLength(0);
+    });
+  });
+
+  it('response drops content-encoding and content-length, cache-control is private, Vary includes Cookie', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(
+        () =>
+          new Response('[{"headers":{"control":"up-to-date"}}]', {
+            status: 200,
+            headers: {
+              'content-type': 'application/json',
+              'content-encoding': 'gzip',
+              'content-length': '999',
+              'cache-control': 'public, max-age=60, stale-while-revalidate=300',
+              vary: 'Accept-Encoding',
+              'electric-handle': 'h-77',
+              'electric-offset': '0_0',
+              'electric-schema': '{"id":{"type":"uuid"}}',
+              'electric-up-to-date': '',
+              // Electric answers every origin; behind our proxy only the same origin may read the response.
+              'access-control-allow-origin': '*',
+              'access-control-expose-headers': 'electric-handle',
+            },
+          }),
+      );
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const res = await get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.member.id));
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-encoding')).toBeNull();
+      expect(res.headers.get('content-length')).toBeNull();
+      expect(res.headers.get('cache-control')).toBe(
+        'private, max-age=60, stale-while-revalidate=300',
+      );
+      expect(res.headers.get('vary')?.split(/\s*,\s*/)).toEqual(
+        expect.arrayContaining(['Accept-Encoding', 'Cookie']),
+      );
+      // The sync protocol headers the client needs are relayed untouched.
+      expect(res.headers.get('electric-handle')).toBe('h-77');
+      expect(res.headers.get('electric-offset')).toBe('0_0');
+      expect(res.headers.get('electric-schema')).toBe('{"id":{"type":"uuid"}}');
+      // Electric's wildcard CORS headers are dropped: the browser reads the proxy same-origin.
+      expect([...res.headers.keys()].filter((h) => h.startsWith('access-control-'))).toEqual([]);
+    });
+  });
+
+  it('a response without cache-control is still not publicly cacheable', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const res = await get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.member.id));
+
+      expect(res.headers.get('cache-control')).toBe('private');
+      expect(res.headers.get('vary')).toContain('Cookie');
+    });
+  });
+
+  it('upstream status codes the sync protocol relies on (409 must-refetch) pass through with their body', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(
+        () =>
+          new Response('[{"headers":{"control":"must-refetch"}}]', {
+            status: 409,
+            headers: { 'content-type': 'application/json', 'electric-handle': 'h-new' },
+          }),
+      );
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const res = await get(
+        app,
+        `${issuesPath(f, 'eng')}?offset=5_1&handle=h-old`,
+        as(f.members.member.id),
+      );
+
+      expect(res.status).toBe(409);
+      expect(res.headers.get('electric-handle')).toBe('h-new');
+      expect(await res.json()).toEqual([{ headers: { control: 'must-refetch' } }]);
+    });
+  });
+
+  it('upstream down -> 502 sync_unavailable without upstream detail', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const failures = [
+        async () => {
+          throw new Error(
+            `connect ECONNREFUSED 10.9.8.7:3000 ${UPSTREAM}/v1/shape?secret=${SECRET}`,
+          );
+        },
+        async () => new Response(`internal: pg connection ${SECRET}`, { status: 500 }),
+        async () => new Response('bad gateway', { status: 503 }),
+      ];
+      for (const failure of failures) {
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const app = buildApp(db, failure as unknown as typeof fetch);
+
+        const res = await get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.member.id));
+
+        expect(res.status).toBe(502);
+        expect(await res.json()).toEqual({ error: 'sync_unavailable' });
+        // The log carries the category, never the secret or the upstream URL.
+        const logged = JSON.stringify(errors.mock.calls);
+        expect(logged).not.toContain(SECRET);
+        expect(logged).not.toContain('secret=');
+        errors.mockRestore();
+      }
+    });
+  });
+
+  it('an upstream auth failure (wrong ELECTRIC_SECRET) is a 502, never a 401 that signs the user out', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      for (const status of [401, 403, 404, 429]) {
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const upstream = fakeUpstream(
+          () =>
+            new Response('{"message":"Unauthorized - Invalid API secret"}', {
+              status,
+              headers: { 'content-type': 'application/json' },
+            }),
+        );
+        const app = buildApp(db, upstream.fetchUpstream);
+
+        const res = await get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.member.id));
+
+        expect(res.status, String(status)).toBe(502);
+        expect(await res.json()).toEqual({ error: 'sync_unavailable' });
+        // The operator sees which status Electric answered; the secret and the upstream body stay out.
+        const logged = JSON.stringify(errors.mock.calls);
+        expect(logged).toContain(String(status));
+        expect(logged).not.toContain(SECRET);
+        expect(logged).not.toContain('Invalid API secret');
+        errors.mockRestore();
+      }
+    });
+  });
+
+  it('the statuses of the sync protocol (200, 204, 304, 400, 409) still reach the client unchanged', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      for (const status of [200, 204, 304, 400, 409]) {
+        const upstream = fakeUpstream(
+          () => new Response(status === 204 || status === 304 ? null : '[]', { status }),
+        );
+        const app = buildApp(db, upstream.fetchUpstream);
+
+        const res = await get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.member.id));
+
+        expect(res.status).toBe(status);
+      }
+    });
+  });
+
+  it("passes the request's abort signal to Electric", async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const controller = new AbortController();
+
+      await get(
+        app,
+        `${issuesPath(f, 'eng')}?offset=-1`,
+        as(f.members.member.id, { signal: controller.signal }),
+      );
+      const signal = upstream.calls[0]?.init?.signal;
+
+      expect(signal).toBeDefined();
+      expect(signal?.aborted).toBe(false);
+      controller.abort();
+      expect(signal?.aborted).toBe(true);
+    });
+  });
+
+  it('an actor of another workspace returned by the resolver is not trusted (401, Electric not called)', async () => {
+    await withTempDatabase(async (db) => {
+      const a = await createWorkspaceFixture(db.orm);
+      const b = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const wrongWorkspaceResolver = {
+        // A buggy resolver that ignores the workspace in the URL.
+        resolveActor: async () => loadActor(db.orm, b.workspaceId, b.members.owner.id),
+      };
+      const app = createApp({
+        brand,
+        db,
+        electric: { url: UPSTREAM, secret: SECRET },
+        auth: wrongWorkspaceResolver,
+        config: TEST_APP_CONFIG,
+        fetchUpstream: upstream.fetchUpstream,
+      });
+
+      const teams = await get(app, `/api/sync/w/${a.workspaceId}/teams?offset=-1`);
+      const issues = await get(app, `${issuesPath(a, 'eng')}?offset=-1`);
+
+      expect([teams.status, issues.status]).toEqual([401, 401]);
+      expect(upstream.calls).toHaveLength(0);
+    });
+  });
+
+  it('forwards only protocol parameters Electric 1.8 defines, and never subset queries', () => {
+    const forwarded = [...SYNC_FORWARDED_PARAMS];
+    // Drift guard: every name we forward is still a protocol parameter of the pinned client.
+    for (const name of forwarded) expect(ELECTRIC_PROTOCOL_QUERY_PARAMS).toContain(name);
+    // The only protocol parameters we deliberately drop are the client-supplied subset queries.
+    const dropped = (ELECTRIC_PROTOCOL_QUERY_PARAMS as readonly string[]).filter(
+      (name) => !forwarded.includes(name),
+    );
+    expect(dropped.every((name) => name.startsWith('subset__'))).toBe(true);
+    for (const owned of ['table', 'where', 'columns', 'secret', 'params', 'replica']) {
+      expect(forwarded).not.toContain(owned);
+    }
+  });
+
+  it('only GET is served', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      expect((await get(app, issuesPath(f, 'eng'), as(f.members.owner.id))).status).toBe(200);
+      upstream.calls.length = 0;
+
+      const res = await get(
+        app,
+        issuesPath(f, 'eng'),
+        as(f.members.owner.id, { method: 'DELETE', headers: { origin: TEST_ORIGIN } }),
+      );
+
+      expect(res.status).toBeGreaterThanOrEqual(404);
+      expect(upstream.calls).toHaveLength(0);
+    });
+  });
+});
+
+// Real Electric reads the dev database (`torch`) itself, so these tests create their fixture THERE (not in a
+// temp database) and remove it again afterwards.
+describe.skipIf(!databaseUrl || !electricUrl)('GET /api/sync (real Electric)', () => {
+  type Message = {
+    key?: string;
+    value?: Record<string, unknown>;
+    headers: Record<string, unknown>;
+  };
+
+  async function removeWorkspace(db: Db, workspaceId: string) {
+    for (const table of ['issue', 'workflow_state', 'team_member', 'team', 'member']) {
+      await db.pool.query(`delete from ${table} where workspace_id = $1`, [workspaceId]);
+    }
+    await db.pool.query('delete from workspace where id = $1', [workspaceId]);
+  }
+
+  async function withDevWorkspace(fn: (db: Db, f: WorkspaceFixture) => Promise<void>) {
+    const db = createDb(databaseUrl as string);
+    const f = await createWorkspaceFixture(db.orm);
+    try {
+      await fn(db, f);
+    } finally {
+      await removeWorkspace(db, f.workspaceId);
+      await db.close();
+    }
+  }
+
+  async function rows(res: Response): Promise<Record<string, unknown>[]> {
+    expect(res.status).toBe(200);
+    const messages = (await res.json()) as Message[];
+    return messages.filter((m) => m.value).map((m) => m.value as Record<string, unknown>);
+  }
+
+  const realApp = (db: Db) =>
+    createApp({
+      brand,
+      db,
+      electric: { url: electricUrl as string, secret: electricSecret },
+      auth: headerActorResolver(db.orm),
+      config: TEST_APP_CONFIG,
+    });
+
+  it('real Electric returns only ENG rows for the ENG shape, without description', async () => {
+    await withDevWorkspace(async (db, f) => {
+      const app = realApp(db);
+
+      const res = await get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.member.id));
+      const issues = await rows(res);
+
+      expect(issues).toHaveLength(f.issues.eng.length);
+      expect(new Set(issues.map((i) => i.id))).toEqual(new Set(f.issues.eng.map((i) => i.id)));
+      for (const issue of issues) {
+        expect(issue.team_id).toBe(f.teams.eng.id);
+        expect(issue.workspace_id).toBe(f.workspaceId);
+        expect(Object.keys(issue)).not.toContain('description');
+      }
+      expect(res.headers.get('cache-control') ?? '').not.toContain('public');
+    });
+  }, 30_000);
+
+  it('real Electric: the OPS shape serves members and nobody else; states come with the team', async () => {
+    await withDevWorkspace(async (db, f) => {
+      const app = realApp(db);
+
+      const asMember = await get(app, `${issuesPath(f, 'ops')}?offset=-1`, as(f.members.member.id));
+      const asGuest = await get(app, `${issuesPath(f, 'ops')}?offset=-1`, as(f.members.guest.id));
+      const states = await get(
+        app,
+        `/api/sync/w/${f.workspaceId}/teams/${f.teams.ops.id}/workflow-states?offset=-1`,
+        as(f.members.member.id),
+      );
+
+      expect(new Set((await rows(asMember)).map((i) => i.id))).toEqual(
+        new Set(f.issues.ops.map((i) => i.id)),
+      );
+      expect(asGuest.status).toBe(404);
+      const stateRows = await rows(states);
+      expect(stateRows).toHaveLength(Object.keys(f.states.ops).length);
+      expect(stateRows.every((s) => s.team_id === f.teams.ops.id)).toBe(true);
+    });
+  }, 30_000);
+
+  it('real Electric: the teams shape lists exactly the teams the actor may see', async () => {
+    await withDevWorkspace(async (db, f) => {
+      const app = realApp(db);
+      const keysFor = async (who: keyof WorkspaceFixture['members']) => {
+        const res = await get(
+          app,
+          `/api/sync/w/${f.workspaceId}/teams?offset=-1`,
+          as(f.members[who].id),
+        );
+        return (await rows(res)).map((t) => t.id).sort();
+      };
+
+      expect(await keysFor('owner')).toEqual([f.teams.eng.id, f.teams.ops.id].sort());
+      expect(await keysFor('member')).toEqual([f.teams.eng.id, f.teams.ops.id].sort());
+      expect(await keysFor('guest')).toEqual([f.teams.eng.id]);
+      expect(await keysFor('outsider')).toEqual([f.teams.eng.id]);
+    });
+  }, 30_000);
+});
