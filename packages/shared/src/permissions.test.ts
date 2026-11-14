@@ -6,7 +6,9 @@ import {
   canDeactivateMember,
   canEditIssues,
   canGrantRole,
+  canInvite,
   canListPrivateTeams,
+  canManageInvite,
   canManageMembers,
   canManageTeamMembership,
   canManageTeams,
@@ -175,6 +177,49 @@ describe('canGrantRole', () => {
 
   it.each(TABLE)('%s grants %s -> %s', (actorRole, granted, expected) => {
     expect(canGrantRole(actor(actorRole, []), granted)).toBe(expected);
+  });
+});
+
+describe('canInvite (create an invite; a deactivated member the invite brings back counts too)', () => {
+  it.each([
+    ['owner', 'owner', undefined, true],
+    ['owner', 'guest', 'owner', true],
+    ['admin', 'member', undefined, true],
+    ['admin', 'guest', 'member', true],
+    ['admin', 'guest', 'guest', true],
+    ['admin', 'member', 'admin', false],
+    ['admin', 'member', 'owner', false],
+    ['admin', 'admin', undefined, false],
+    ['member', 'guest', undefined, false],
+    ['guest', 'guest', undefined, false],
+  ] as const)('%s invites a %s (returning role %s): %s', (actorRole, role, returning, expected) => {
+    expect(canInvite(actor(actorRole, []), role, returning)).toBe(expected);
+  });
+});
+
+describe('canManageInvite (resend or revoke)', () => {
+  it.each([
+    ['owner', 'owner', true],
+    ['owner', 'admin', true],
+    ['admin', 'member', true],
+    ['admin', 'guest', true],
+    ['admin', 'admin', false],
+    ['admin', 'owner', false],
+    ['member', 'guest', false],
+    ['guest', 'guest', false],
+  ] as const)('%s on an invite for %s: %s', (actorRole, inviteRole, expected) => {
+    expect(
+      canManageInvite(actor(actorRole, []), { workspaceId: WORKSPACE, role: inviteRole }),
+    ).toBe(expected);
+  });
+
+  it('an invite of another workspace is closed to every role', () => {
+    for (const role of ['owner', 'admin', 'member', 'guest'] as const) {
+      expect(
+        canManageInvite(actor(role, []), { workspaceId: OTHER_WORKSPACE, role: 'guest' }),
+        role,
+      ).toBe(false);
+    }
   });
 });
 

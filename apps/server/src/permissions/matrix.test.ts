@@ -12,7 +12,9 @@ import {
   canDeactivateMember,
   canEditIssues,
   canGrantRole,
+  canInvite,
   canListPrivateTeams,
+  canManageInvite,
   canManageMembers,
   canManageTeamMembership,
   canManageTeams,
@@ -93,6 +95,30 @@ export const MATRIX: Record<ObjectType, MatrixRow[]> = {
     row('create member', true, true, false, false),
     row('create admin', true, false, false, false),
     row('create owner', true, false, false, false),
+    // An invite for the address of a DEACTIVATED member brings that person back (a reactivation), so it also needs the
+    // right to grant the role they have now: an admin never reactivates an admin or an owner, by any route.
+    row('create for a deactivated member', true, true, false, false),
+    row('create for a deactivated guest', true, true, false, false),
+    row('create for a deactivated admin', true, false, false, false),
+    row('create for a deactivated owner', true, false, false, false),
+    // Resend and revoke follow the role the invite carries, like creating it; an invite of another workspace is
+    // closed to everybody.
+    row('resend a guest invite', true, true, false, false),
+    row('resend a member invite', true, true, false, false),
+    row('resend an admin invite', true, false, false, false),
+    row('resend an owner invite', true, false, false, false),
+    NOBODY('resend a guest invite', 'other workspace'),
+    NOBODY('resend a member invite', 'other workspace'),
+    NOBODY('resend an admin invite', 'other workspace'),
+    NOBODY('resend an owner invite', 'other workspace'),
+    row('revoke a guest invite', true, true, false, false),
+    row('revoke a member invite', true, true, false, false),
+    row('revoke an admin invite', true, false, false, false),
+    row('revoke an owner invite', true, false, false, false),
+    NOBODY('revoke a guest invite', 'other workspace'),
+    NOBODY('revoke a member invite', 'other workspace'),
+    NOBODY('revoke an admin invite', 'other workspace'),
+    NOBODY('revoke an owner invite', 'other workspace'),
   ],
   team: [
     // Public teams are visible to everyone except guests who are not in them; private ones only to members.
@@ -180,6 +206,19 @@ const deactivate =
   (targetRole: Role): Evaluate =>
   (s, relation) =>
     canDeactivateMember(s.actor, targetMember(targetRole, relation));
+/** Resend or revoke: an invite carrying `role`, in the actor's workspace or (adversarially) in another one. */
+const manageInvite =
+  (role: Role): Evaluate =>
+  (s, relation) =>
+    canManageInvite(s.actor, {
+      workspaceId: relation === 'other workspace' ? OTHER_WORKSPACE : WORKSPACE,
+      role,
+    });
+/** An invite for a member role `member` for the address of a deactivated member who has the role `returning`. */
+const inviteReturning =
+  (returning: Role): Evaluate =>
+  (s) =>
+    canInvite(s.actor, 'member', returning);
 
 /** How each row is asked of the real module. One evaluator per action name, keyed by object. */
 const EVALUATORS: Record<ObjectType, Record<string, Evaluate>> = {
@@ -217,6 +256,18 @@ const EVALUATORS: Record<ObjectType, Record<string, Evaluate>> = {
     'create member': (s) => canManageMembers(s.actor) && canGrantRole(s.actor, 'member'),
     'create admin': (s) => canManageMembers(s.actor) && canGrantRole(s.actor, 'admin'),
     'create owner': (s) => canManageMembers(s.actor) && canGrantRole(s.actor, 'owner'),
+    'create for a deactivated member': inviteReturning('member'),
+    'create for a deactivated guest': inviteReturning('guest'),
+    'create for a deactivated admin': inviteReturning('admin'),
+    'create for a deactivated owner': inviteReturning('owner'),
+    'resend a guest invite': manageInvite('guest'),
+    'resend a member invite': manageInvite('member'),
+    'resend an admin invite': manageInvite('admin'),
+    'resend an owner invite': manageInvite('owner'),
+    'revoke a guest invite': manageInvite('guest'),
+    'revoke a member invite': manageInvite('member'),
+    'revoke an admin invite': manageInvite('admin'),
+    'revoke an owner invite': manageInvite('owner'),
   },
   team: {
     view: (s) => canSeeTeam(s.actor, s.team),
@@ -247,6 +298,10 @@ const ROLE_ONLY = new Set([
   'invite: create member',
   'invite: create admin',
   'invite: create owner',
+  'invite: create for a deactivated member',
+  'invite: create for a deactivated guest',
+  'invite: create for a deactivated admin',
+  'invite: create for a deactivated owner',
   'team: create',
   'team: list private directory',
 ]);

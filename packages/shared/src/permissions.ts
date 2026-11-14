@@ -70,6 +70,26 @@ export function canGrantRole(actor: Actor, role: Role): boolean {
   return false;
 }
 
+/** An invite as the rules see it. */
+export type InviteAccess = { workspaceId: string; role: Role };
+
+/**
+ * Create an invite for `role`: the right to manage members and to grant that role. `returningRole` is the role of a
+ * DEACTIVATED member who has the invited address: the invite brings them back with the invited role, which is a
+ * reactivation, so it also needs the right to grant the role they have now (an admin never reactivates an admin or an
+ * owner, by any route).
+ */
+export function canInvite(actor: Actor, role: Role, returningRole?: Role): boolean {
+  if (!canManageMembers(actor) || !canGrantRole(actor, role)) return false;
+  return returningRole === undefined || canGrantRole(actor, returningRole);
+}
+
+/** Resend or revoke an invite: one of the actor's own workspace, whose role the actor may grant. */
+export function canManageInvite(actor: Actor, invite: InviteAccess): boolean {
+  if (invite.workspaceId !== actor.workspaceId) return false;
+  return canManageMembers(actor) && canGrantRole(actor, invite.role);
+}
+
 /**
  * Change another member's role. Both the role they have and the role they get must be grantable by the actor, so
  * an admin can neither promote to admin or owner nor demote an admin or an owner; nobody changes their own role.

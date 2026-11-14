@@ -6,12 +6,13 @@
 // first one go on. With the wrong lock modes this reproduces the exact cycle every time (`40P01`, "deadlock
 // detected"); with the right ones the second call simply waits for the first.
 import { member, session, teamMember } from '@torch/shared/db/schema';
+import { slugifyHandle } from '@torch/shared/mutations/admin';
 import { and, eq, isNull } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { consumeMagicLink, issueMagicLink } from '../auth/magic-link.ts';
 import type { Db } from '../db.ts';
 import { acceptInvite, createInvite } from '../invites/service.ts';
-import { changeMemberRole, setMemberActive } from '../members/service.ts';
+import { changeMemberRole, setMemberActive, updateOwnProfile } from '../members/service.ts';
 import { addTeamMember, removeTeamMember } from '../teams/service.ts';
 import type { ServiceResult } from '../util/result.ts';
 import { actorOf, auditRows, successOf } from './admin-helpers.ts';
@@ -30,7 +31,10 @@ if (!databaseUrl) {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Makes every INSERT statement into `table` sleep half a second before it touches the table (and its foreign keys). */
-async function slowInserts(db: Db, table: 'audit_log' | 'team_member' | 'session'): Promise<void> {
+async function slowInserts(
+  db: Db,
+  table: 'audit_log' | 'team_member' | 'session' | 'member',
+): Promise<void> {
   await db.pool.query(
     `create function slow_insert() returns trigger language plpgsql as
      $$ begin perform pg_sleep(0.5); return null; end $$`,
@@ -246,3 +250,48 @@ describe.skipIf(!databaseUrl)('row locks: a sign-in never outlives a deactivatio
     });
   });
 });
+
+describe.skipIf(!databaseUrl)(
+  'handles: an accept never answers 500 for a handle taken a moment ago',
+  () => {
+    it('a member who takes the handle the accept just picked makes it use the next one', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const owner = await actorOf(db, f.workspaceId, f.members.owner.id);
+        const other = await actorOf(db, f.workspaceId, f.members.member.id);
+        const now = new Date();
+        const created = successOf(
+          await createInvite(
+            db.orm,
+            owner,
+            { email: `handle-${Date.now()}@example.test`, role: 'member', teamIds: [] },
+            { now },
+          ),
+        );
+        const base = slugifyHandle('Race Handle');
+        await slowInserts(db, 'member');
+
+        const running = acceptInvite(db.orm, {
+          token: created.token,
+          name: 'Race Handle',
+          now,
+          userAgent: null,
+        });
+        running.catch(() => undefined);
+        // The accept has picked `base` as free and sleeps before the insert; a profile edit takes it meanwhile.
+        await waitUntilAsleep(db);
+        const taken = await updateOwnProfile(db.orm, other, { handle: base });
+        const [settled] = await Promise.allSettled([running]);
+
+        expect(taken.ok).toBe(true);
+        if (settled?.status !== 'fulfilled')
+          throw new Error(`the accept threw: ${outcome(settled)}`);
+        const accepted = successOf(settled.value);
+        const [fresh] = await db.orm.select().from(member).where(eq(member.id, accepted.memberId));
+        expect(fresh?.handle).toBe(`${base}-2`);
+        const [kept] = await db.orm.select().from(member).where(eq(member.id, f.members.member.id));
+        expect(kept?.handle).toBe(base);
+      });
+    });
+  },
+);
