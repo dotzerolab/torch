@@ -51,45 +51,71 @@ Checked at 96, 32 and 16 px, light and dark.
 
 ## 4. Colour
 
-One accent, `#2A5FF2`; neutrals for everything else. The mark uses a deeper blue for the left half and a brighter one
-for the right half, lifted in the dark palette.
+One accent, `#2A5FF2`; neutrals for everything else. The right half of the flame **is** the accent: `#2A5FF2` on light,
+its tint `#5C8CFD` on dark. The left half is the same hue one step deeper. The palette was built in OKLCH (lightness,
+chroma, hue), not picked by eye, and checked against WCAG 2.2, APCA and colour-vision simulations.
 
-| Token | Light | Dark | Role |
-|---|---|---|---|
-| Accent | `#2A5FF2` | `#2A5FF2` | Brand accent in `config/brand.default.json` (focus, selection, large UI) |
-| Mark, left half | `#1A2FB5` | `#3552E8` | The flame, left of the slit |
-| Mark, right half | `#2F6BFF` | `#4F82FF` | The flame, right of the slit (lifted) |
-| Caret | `#DDF6FF` | `#E8F8FF` | The caret ^ |
-| Surface | `#F6FAFF` | `#080A11` | Page background |
-| Ink | `#080A11` | `#F6FAFF` | Wordmark and text |
-| Icon tile | `#090D22` | `#090D22` | Background of every icon file |
+| Token | Light | Dark | OKLCH (light / dark) | Role |
+|---|---|---|---|---|
+| Accent | `#2A5FF2` | `#5C8CFD` | 0.546 · 0.228 · 264.6° / 0.661 · 0.176 · 264.7° | Brand accent in `config/brand.default.json` (focus, selection, links, large UI); also the right half |
+| Mark, left half | `#0D048F` | `#2A4AE5` | 0.301 · 0.199 · 267.1° / 0.498 · 0.235 · 267.1° | The flame, left of the slit: the accent one step deeper, 2.5° towards indigo |
+| Mark, right half | `#2A5FF2` | `#5C8CFD` | as the accent | The flame, right of the slit (lifted) |
+| Caret | `#F4FBFF` | `#F4FBFF` | 0.984 · 0.009 · 232.4° | The caret ^ |
+| Surface | `#F6FAFF` | `#080A11` | | Page background |
+| Ink | `#080A11` | `#F6FAFF` | | Wordmark and text |
+| Icon tile | `#03081F` | `#03081F` | 0.146 · 0.051 · 266.7° | Background of every icon file (icons use the dark palette) |
 
-Contrast (WCAG 2.2; text 4.5:1, graphics 3:1; computed by `node docs/brand/build.ts --contrast`):
+`config/brand.default.json` keeps `accentColor` at `#2A5FF2`, the light value. The configuration has one accent today;
+a dark theme takes `#5C8CFD` as its accent (6.24:1 as text on the dark surface).
 
-| Mode | Pair | Foreground | Background | Ratio | Needs |
-|---|---|---|---|---|---|
-| Light | Wordmark and text | `#080A11` | `#F6FAFF` | 18.87:1 | 4.5:1 |
-| Light | Left half on the surface | `#1A2FB5` | `#F6FAFF` | 9.46:1 | 3:1 |
-| Light | Right half on the surface | `#2F6BFF` | `#F6FAFF` | 4.29:1 | 3:1 |
-| Light | Brand accent on the surface | `#2A5FF2` | `#F6FAFF` | 4.99:1 | 3:1 |
-| Light | White text on the brand accent | `#FFFFFF` | `#2A5FF2` | 5.23:1 | 4.5:1 |
-| Light | Caret on the left half | `#DDF6FF` | `#1A2FB5` | 8.83:1 | 3:1 |
-| Light | Caret on the right half | `#DDF6FF` | `#2F6BFF` | 4.01:1 | 3:1 |
-| Light | Right half against the left half (the slit separates them) | `#2F6BFF` | `#1A2FB5` | 2.20:1 | info |
-| Dark | Wordmark and text | `#F6FAFF` | `#080A11` | 18.87:1 | 4.5:1 |
-| Dark | Left half on the surface | `#3552E8` | `#080A11` | 3.32:1 | 3:1 |
-| Dark | Right half on the surface | `#4F82FF` | `#080A11` | 5.62:1 | 3:1 |
-| Dark | Brand accent on the surface | `#2A5FF2` | `#080A11` | 3.78:1 | 3:1 |
-| Dark | Caret on the left half | `#E8F8FF` | `#3552E8` | 5.48:1 | 3:1 |
-| Dark | Caret on the right half | `#E8F8FF` | `#4F82FF` | 3.23:1 | 3:1 |
-| Dark | Right half against the left half (the slit separates them) | `#4F82FF` | `#3552E8` | 1.69:1 | info |
-| Tile | Left half on the icon tile | `#3552E8` | `#090D22` | 3.23:1 | 3:1 |
-| Tile | Right half on the icon tile | `#4F82FF` | `#090D22` | 5.47:1 | 3:1 |
-| Tile | Caret on the icon tile | `#E8F8FF` | `#090D22` | 17.67:1 | 3:1 |
+Contrast (WCAG 2.2: text 4.5:1, graphics 3:1; APCA Lc is the absolute lightness contrast; the 2:1 gap between the two
+halves is a target of the brand, not a WCAG rule; computed by `node docs/brand/build.ts --contrast`):
 
-Rules: the accent is for shapes and large UI on dark surfaces (3.78:1), never for small text there; use a lighter tint
-of the same hue for text. The two halves are only 1.69:1 (dark) and 2.20:1 (light) apart, so the slit between them must
-stay open. No gradients, shadows or other effects.
+| Mode | Pair | Foreground | Background | WCAG | Needs | APCA Lc |
+|---|---|---|---|---|---|---|
+| Light | Wordmark and text | `#080A11` | `#F6FAFF` | 18.87:1 | 4.5:1 | 103 |
+| Light | Left half on the surface | `#0D048F` | `#F6FAFF` | 14.00:1 | 3:1 | 96 |
+| Light | Right half = brand accent, on the surface (also as text) | `#2A5FF2` | `#F6FAFF` | 4.99:1 | 4.5:1 | 72 |
+| Light | White text on the brand accent | `#FFFFFF` | `#2A5FF2` | 5.23:1 | 4.5:1 | 81 |
+| Light | Caret on the left half | `#F4FBFF` | `#0D048F` | 14.04:1 | 3:1 | 99 |
+| Light | Caret on the right half | `#F4FBFF` | `#2A5FF2` | 5.00:1 | 3:1 | 77 |
+| Light | Right half against the left half (the slit separates them) | `#2A5FF2` | `#0D048F` | 2.81:1 | 2:1 | 21 |
+| Dark | Wordmark and text | `#F6FAFF` | `#080A11` | 18.87:1 | 4.5:1 | 104 |
+| Dark | Left half on the surface | `#2A4AE5` | `#080A11` | 3.02:1 | 3:1 | 20 |
+| Dark | Right half = accent tint, on the surface (also as text) | `#5C8CFD` | `#080A11` | 6.24:1 | 4.5:1 | 43 |
+| Dark | Dark text on the accent tint | `#080A11` | `#5C8CFD` | 6.24:1 | 4.5:1 | 45 |
+| Dark | Caret on the left half | `#F4FBFF` | `#2A4AE5` | 6.26:1 | 3:1 | 83 |
+| Dark | Caret on the right half | `#F4FBFF` | `#5C8CFD` | 3.03:1 | 3:1 | 61 |
+| Dark | Right half against the left half (the slit separates them) | `#5C8CFD` | `#2A4AE5` | 2.06:1 | 2:1 | 22 |
+| Tile | Left half on the icon tile | `#2A4AE5` | `#03081F` | 3.03:1 | 3:1 | 20 |
+| Tile | Right half on the icon tile | `#5C8CFD` | `#03081F` | 6.26:1 | 3:1 | 43 |
+| Tile | Caret on the icon tile | `#F4FBFF` | `#03081F` | 18.98:1 | 3:1 | 104 |
+
+Notes
+- **Gap between the two blues.** 2.81:1 on light (ΔE<sub>OK</sub> 24.7) and 2.06:1 on dark (ΔE<sub>OK</sub> 17.4). **2:1 is the ceiling in the dark theme:** the left half must stay at least 3:1 on the
+  near-black surface (it is 3.02:1) and the caret at least 3:1 on the right half (3.03:1), which caps the right half's
+  brightness. There is no slack on either side; even a pure-white caret would lift the ceiling only to 2.17:1. Do not
+  lighten the right half, darken the left half or tint the caret darker without re-checking both.
+- **APCA.** On the dark surface the left half scores Lc 20 and the right half Lc 43; APCA is strict on dark blue over
+  near-black. Lc 45 for the left half needs an OKLCH lightness of 0.675, brighter than the right half's ceiling, so the
+  two halves would merge into one blue. The WCAG 1.4.11 target (3:1) is the one the brand keeps; the two halves are
+  large shapes and the wordmark carries the name.
+- **Colour-vision deficiency** (simulated with the Machado 2009 matrices at full severity, plus greyscale). The halves
+  stay two halves in every simulation; ratio between them and ΔE<sub>OK</sub>:
+
+| Simulation | Light ratio | Light ΔE | Dark ratio | Dark ΔE |
+|---|---|---|---|---|
+| Normal vision | 2.81:1 | 24.7 | 2.06:1 | 17.4 |
+| Protanopia | 2.71:1 | 23.7 | 1.79:1 | 14.7 |
+| Deuteranopia | 2.52:1 | 22.4 | 1.84:1 | 14.5 |
+| Tritanopia | 2.84:1 | 24.8 | 1.80:1 | 14.5 |
+| Greyscale | 2.81:1 | 25.4 | 2.09:1 | 17.8 |
+
+- **Icon tile.** It is a night blue no brighter than the dark surface. A brighter tile such as `#090D22` would put the
+  dark left half at 2.94:1 on it, under 3:1.
+
+Rules: use the accent for shapes, focus rings and large UI; on the dark surface use `#5C8CFD`, never `#2A5FF2` for small
+text (3.78:1). The slit between the two halves must stay open. No gradients, shadows or other effects.
 
 ## 5. Wordmark
 

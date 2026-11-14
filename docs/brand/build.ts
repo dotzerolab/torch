@@ -21,9 +21,13 @@ const p = (n: number) => 100 / PHI ** n; // A / phi^n with A = 100
 // ---- palette --------------------------------------------------------------------------------------------------
 
 type Colours = { left: string; right: string; caret: string; ink: string };
-const LIGHT: Colours = { left: '#1A2FB5', right: '#2F6BFF', caret: '#DDF6FF', ink: '#080A11' };
-const DARK: Colours = { left: '#3552E8', right: '#4F82FF', caret: '#E8F8FF', ink: '#F6FAFF' };
-const TILE = '#090D22'; // icon tile: the dark palette on a night-blue square
+// Built in OKLCH from the brand accent #2A5FF2 (L 0.546, C 0.228, h 264.6): the right half IS the accent on light, its tint
+// on dark; the left half is one lightness step deeper (-0.245 on light) with a 2.5 degree drift towards indigo.
+const ACCENT = '#2A5FF2';
+const LIGHT: Colours = { left: '#0D048F', right: ACCENT, caret: '#F4FBFF', ink: '#080A11' };
+const DARK: Colours = { left: '#2A4AE5', right: '#5C8CFD', caret: '#F4FBFF', ink: '#F6FAFF' };
+// icon tile: a night blue no brighter than the dark surface, so a half keeps its ratio on the tile
+const TILE = '#03081F';
 const SURFACE = { light: '#F6FAFF', dark: '#080A11' };
 
 // ---- geometry -------------------------------------------------------------------------------------------------
@@ -285,31 +289,42 @@ const ratio = (a: string, b: string) => {
   const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x) as [number, number];
   return (hi + 0.05) / (lo + 0.05);
 };
+// APCA-W3 0.1.9 (SAPC 0.98G-4g) lightness contrast Lc of text on a background, absolute value
+const apca = (text: string, bg: string) => {
+  const y = (hex: string) => {
+    const [r, g, b] = [1, 3, 5].map((i) => Number.parseInt(hex.slice(i, i + 2), 16) / 255) as [number, number, number];
+    const v = 0.2126729 * r ** 2.4 + 0.7151522 * g ** 2.4 + 0.072175 * b ** 2.4;
+    return v < 0.022 ? v + (0.022 - v) ** 1.414 : v;
+  };
+  const [yt, yb] = [y(text), y(bg)];
+  if (Math.abs(yb - yt) < 0.0005) return 0;
+  const s = yb > yt ? (yb ** 0.56 - yt ** 0.57) * 1.14 : (yb ** 0.65 - yt ** 0.62) * 1.14;
+  return Math.abs(s) < 0.1 ? 0 : (Math.abs(s) - 0.027) * 100;
+};
 function contrastTable(): string {
   const rows: [string, string, string, number][] = [
     ['Light', 'Wordmark and text', `${LIGHT.ink}|${SURFACE.light}`, 4.5],
     ['Light', 'Left half on the surface', `${LIGHT.left}|${SURFACE.light}`, 3],
-    ['Light', 'Right half on the surface', `${LIGHT.right}|${SURFACE.light}`, 3],
-    ['Light', 'Brand accent on the surface', `#2A5FF2|${SURFACE.light}`, 3],
-    ['Light', 'White text on the brand accent', `#FFFFFF|#2A5FF2`, 4.5],
+    ['Light', 'Right half = brand accent, on the surface (also as text)', `${LIGHT.right}|${SURFACE.light}`, 4.5],
+    ['Light', 'White text on the brand accent', `#FFFFFF|${ACCENT}`, 4.5],
     ['Light', 'Caret on the left half', `${LIGHT.caret}|${LIGHT.left}`, 3],
     ['Light', 'Caret on the right half', `${LIGHT.caret}|${LIGHT.right}`, 3],
-    ['Light', 'Right half against the left half (the slit separates them)', `${LIGHT.right}|${LIGHT.left}`, 0],
+    ['Light', 'Right half against the left half (the slit separates them)', `${LIGHT.right}|${LIGHT.left}`, 2],
     ['Dark', 'Wordmark and text', `${DARK.ink}|${SURFACE.dark}`, 4.5],
     ['Dark', 'Left half on the surface', `${DARK.left}|${SURFACE.dark}`, 3],
-    ['Dark', 'Right half on the surface', `${DARK.right}|${SURFACE.dark}`, 3],
-    ['Dark', 'Brand accent on the surface', `#2A5FF2|${SURFACE.dark}`, 3],
+    ['Dark', 'Right half = accent tint, on the surface (also as text)', `${DARK.right}|${SURFACE.dark}`, 4.5],
+    ['Dark', 'Dark text on the accent tint', `${SURFACE.dark}|${DARK.right}`, 4.5],
     ['Dark', 'Caret on the left half', `${DARK.caret}|${DARK.left}`, 3],
     ['Dark', 'Caret on the right half', `${DARK.caret}|${DARK.right}`, 3],
-    ['Dark', 'Right half against the left half (the slit separates them)', `${DARK.right}|${DARK.left}`, 0],
+    ['Dark', 'Right half against the left half (the slit separates them)', `${DARK.right}|${DARK.left}`, 2],
     ['Tile', 'Left half on the icon tile', `${DARK.left}|${TILE}`, 3],
     ['Tile', 'Right half on the icon tile', `${DARK.right}|${TILE}`, 3],
     ['Tile', 'Caret on the icon tile', `${DARK.caret}|${TILE}`, 3],
   ];
-  const lines = ['| Mode | Pair | Foreground | Background | Ratio | Needs |', '|---|---|---|---|---|---|'];
+  const lines = ['| Mode | Pair | Foreground | Background | WCAG | Needs | APCA Lc |', '|---|---|---|---|---|---|---|'];
   for (const [mode, use, pair, min] of rows) {
     const [fg, bg] = pair.split('|') as [string, string];
-    lines.push(`| ${mode} | ${use} | \`${fg}\` | \`${bg}\` | ${ratio(fg, bg).toFixed(2)}:1 | ${min ? `${min}:1` : 'info'} |`);
+    lines.push(`| ${mode} | ${use} | \`${fg}\` | \`${bg}\` | ${ratio(fg, bg).toFixed(2)}:1 | ${min}:1 | ${apca(fg, bg).toFixed(0)} |`);
   }
   return lines.join('\n');
 }
