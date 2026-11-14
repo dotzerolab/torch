@@ -1,5 +1,6 @@
 import type { Brand } from '@torch/shared/brand';
 import { detectLocale, type Locale, t } from '@torch/shared/i18n';
+import { readableForeground } from '@torch/shared/theme/contrast';
 import { useEffect, useState } from 'react';
 import { LoginPage } from './auth/LoginPage.tsx';
 import { useSession } from './auth/useSession.ts';
@@ -18,6 +19,8 @@ async function fetchBrand(signal: AbortSignal): Promise<Brand> {
 function applyBrand(brand: Brand) {
   document.title = brand.productName;
   document.documentElement.style.setProperty('--accent', brand.accentColor);
+  // The text on an accent surface flips to near-black when the brand's accent is pale.
+  document.documentElement.style.setProperty('--accent-fg', readableForeground(brand.accentColor));
   let icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
   if (!icon) {
     icon = document.createElement('link');
