@@ -18,11 +18,9 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 
-export const MEMBER_ROLES = ['owner', 'admin', 'member', 'guest'] as const;
-export type MemberRole = (typeof MEMBER_ROLES)[number];
+import { MEMBER_LOCALES, MEMBER_ROLES } from './enums.ts';
 
-export const MEMBER_LOCALES = ['en', 'it'] as const;
-export type MemberLocale = (typeof MEMBER_LOCALES)[number];
+export { MEMBER_LOCALES, MEMBER_ROLES, type MemberLocale, type MemberRole } from './enums.ts';
 
 export const WORKFLOW_STATE_TYPES = [
   'triage',

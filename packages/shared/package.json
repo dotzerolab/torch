@@ -12,7 +12,8 @@
     "./db/schema": "./src/db/schema.ts",
     "./permissions": "./src/permissions.ts",
     "./db/workflow-defaults": "./src/db/workflow-defaults.ts",
-    "./mutations/issue": "./src/mutations/issue.ts"
+    "./mutations/issue": "./src/mutations/issue.ts",
+    "./mutations/admin": "./src/mutations/admin.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p ."
