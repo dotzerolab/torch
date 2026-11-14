@@ -2,13 +2,19 @@
 import type { Brand } from '@torch/shared/brand';
 import type { Context } from 'hono';
 import { Hono } from 'hono';
-import { deleteCookie, setCookie } from 'hono/cookie';
+import { deleteCookie } from 'hono/cookie';
 import type { Orm } from '../db.ts';
 import { renderMagicLinkEmail } from '../mail/magic-link-email.ts';
 import type { Mailer } from '../mail/mailer.ts';
-import { consumeMagicLink, issueMagicLink, LOGIN_TOKEN_TTL_MS } from './magic-link.ts';
-import { clientIp, createRateLimiter } from './rate-limit.ts';
 import {
+  consumeMagicLink,
+  issueMagicLink,
+  LOGIN_TOKEN_TTL_MS,
+  previewMagicLink,
+} from './magic-link.ts';
+import { clientIp, createRateLimiter, type RateLimitResult } from './rate-limit.ts';
+import {
+  buildSessionCookie,
   isSecureUrl,
   listSessionWorkspaces,
   liveSessionExpiry,
@@ -30,6 +36,10 @@ export type AuthDeps = {
 
 const IP_LIMIT = 20;
 const IP_WINDOW_MS = 15 * 60 * 1000;
+// Opening a link is two calls (preview, then verify) and a page can be reloaded, so this is looser than asking for
+// links; a token cannot be guessed anyway (256 random bits), the limit only bounds the load one address can cause.
+const LINK_LIMIT = 60;
+const LINK_WINDOW_MS = 15 * 60 * 1000;
 const MAX_EMAIL_LENGTH = 254;
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -47,27 +57,33 @@ async function readJson(req: Request): Promise<Record<string, unknown>> {
 export function createAuthRoutes(deps: AuthDeps) {
   const now = deps.now ?? (() => new Date());
   const cookieName = sessionCookieName(deps.appUrl);
-  const secure = isSecureUrl(deps.appUrl);
   const baseUrl = deps.appUrl.replace(/\/+$/, '');
   const ipLimiter = createRateLimiter({
     limit: IP_LIMIT,
     windowMs: IP_WINDOW_MS,
     now: () => now().getTime(),
   });
+  // One budget per address for both calls the link page makes.
+  const linkLimiter = createRateLimiter({
+    limit: LINK_LIMIT,
+    windowMs: LINK_WINDOW_MS,
+    now: () => now().getTime(),
+  });
   const app = new Hono();
+
+  const tooManyRequests = (c: Context, limited: Extract<RateLimitResult, { allowed: false }>) =>
+    c.json({ error: 'rate_limited', message: 'Too many requests. Try again later.' }, 429, {
+      'Retry-After': String(limited.retryAfterSeconds),
+    });
+  const invalidLink = (c: Context) =>
+    c.json({ error: 'invalid_or_expired', message: 'This sign-in link is not valid.' }, 400);
 
   // The cookie ends when the session row does. Sent at sign-in and again by every GET /session, whose touch slides
   // the row, so a browser in use stays signed in up to the 90-day ceiling instead of dropping at day 30.
   async function sendSessionCookie(c: Context, token: string, at: Date): Promise<void> {
     const expiresAt = await liveSessionExpiry(deps.orm, token, at);
     if (!expiresAt) return;
-    setCookie(c, cookieName, token, {
-      httpOnly: true,
-      secure,
-      sameSite: 'Lax',
-      path: '/',
-      maxAge: Math.max(1, Math.floor((expiresAt.getTime() - at.getTime()) / 1000)),
-    });
+    c.header('Set-Cookie', buildSessionCookie(deps.appUrl, token, expiresAt, at), { append: true });
   }
 
   // Every response here is personal or secret-bearing: nothing may be cached by a browser or a proxy.
@@ -79,13 +95,7 @@ export function createAuthRoutes(deps: AuthDeps) {
   app.post('/magic-link', async (c) => {
     const ip = clientIp(c.req.raw, c.env, deps.trustProxy);
     const limited = ipLimiter.hit(ip);
-    if (!limited.allowed) {
-      return c.json(
-        { error: 'rate_limited', message: 'Too many requests. Try again later.' },
-        429,
-        { 'Retry-After': String(limited.retryAfterSeconds) },
-      );
-    }
+    if (!limited.allowed) return tooManyRequests(c, limited);
 
     const body = await readJson(c.req.raw);
     const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
@@ -95,7 +105,9 @@ export function createAuthRoutes(deps: AuthDeps) {
 
     const issued = await issueMagicLink(deps.orm, { email, now: now() });
     if (issued) {
-      const link = `${baseUrl}/auth/verify?token=${issued.token}`;
+      // The token sits in the fragment: a browser never sends it to a server, so it stays out of access logs,
+      // proxy logs and the Referer header. The page reads it from `location.hash` and removes it.
+      const link = `${baseUrl}/auth/verify#token=${issued.token}`;
       const message = {
         to: email,
         ...renderMagicLinkEmail({
@@ -120,17 +132,39 @@ export function createAuthRoutes(deps: AuthDeps) {
     return c.json({ status: 'sent' }, 202);
   });
 
+  // Who a link would sign in, shown on the Continue page before anything is used up. POST only, like verify: the
+  // token travels in the body, never in a URL.
+  app.post('/preview', async (c) => {
+    const limited = linkLimiter.hit(clientIp(c.req.raw, c.env, deps.trustProxy));
+    if (!limited.allowed) return tooManyRequests(c, limited);
+
+    const body = await readJson(c.req.raw);
+    if (!isWellFormedToken(body.token)) return invalidLink(c);
+    const email = await previewMagicLink(deps.orm, { token: body.token, now: now() });
+    if (!email) return invalidLink(c);
+    return c.json({ email });
+  });
+
   // POST only: a mail scanner that opens the link with GET must not burn it (the web page shows a button).
   app.post('/verify', async (c) => {
+    const limited = linkLimiter.hit(clientIp(c.req.raw, c.env, deps.trustProxy));
+    if (!limited.allowed) return tooManyRequests(c, limited);
+
     const body = await readJson(c.req.raw);
-    const invalid = () =>
-      c.json({ error: 'invalid_or_expired', message: 'This sign-in link is not valid.' }, 400);
-    if (!isWellFormedToken(body.token)) return invalid();
+    if (!isWellFormedToken(body.token)) return invalidLink(c);
 
     const at = now();
     const userAgent = c.req.header('user-agent')?.slice(0, 255) ?? null;
-    const result = await consumeMagicLink(deps.orm, { token: body.token, now: at, userAgent });
-    if (!result) return invalid();
+    // A browser that is already signed in keeps nothing of the old sign-in: its sessions end in the same
+    // transaction that opens the new ones (a link that fails changes nothing). A cookie that is not a token, or
+    // names no session, simply revokes nothing.
+    const result = await consumeMagicLink(deps.orm, {
+      token: body.token,
+      now: at,
+      userAgent,
+      revokeSessionToken: readSessionToken(c.req.raw, deps.appUrl),
+    });
+    if (!result) return invalidLink(c);
 
     await sendSessionCookie(c, result.sessionToken, at);
     const workspaces = await listSessionWorkspaces(deps.orm, result.sessionToken, at);
@@ -152,7 +186,7 @@ export function createAuthRoutes(deps: AuthDeps) {
   app.post('/logout', async (c) => {
     const token = readSessionToken(c.req.raw, deps.appUrl);
     if (token) await revokeSessions(deps.orm, token, now());
-    deleteCookie(c, cookieName, { path: '/', secure });
+    deleteCookie(c, cookieName, { path: '/', secure: isSecureUrl(deps.appUrl) });
     return c.body(null, 204);
   });
 

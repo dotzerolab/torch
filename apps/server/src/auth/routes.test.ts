@@ -2,8 +2,10 @@ import { createHash } from 'node:crypto';
 import { loginToken, member, session } from '@torch/shared/db/schema';
 import { eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { Db } from '../db.ts';
 import { createAuthTestApp } from '../test/auth-app.ts';
 import { createWorkspaceFixture, withTempDatabase } from '../test/fixtures.ts';
+import { generateToken } from './tokens.ts';
 
 const databaseUrl = process.env.DATABASE_URL;
 
@@ -19,6 +21,8 @@ const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
 const unique = () => crypto.randomUUID().slice(0, 8);
+const requestWith = (cookie: string) =>
+  new Request('http://app.example.test/api/x', { headers: { cookie } });
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -53,9 +57,33 @@ describe.skipIf(!databaseUrl)('POST /api/auth/magic-link', () => {
       expect(t.mailer.sent).toHaveLength(1);
       const mail = t.mailer.sent[0];
       expect(mail?.to).toBe(email);
-      expect(mail?.text).toContain(`${t.appUrl}/auth/verify?token=`);
-      expect(mail?.html).toContain(`${t.appUrl}/auth/verify?token=`);
+      expect(mail?.text).toContain(`${t.appUrl}/auth/verify#token=`);
+      expect(mail?.html).toContain(`${t.appUrl}/auth/verify#token=`);
       expect(mail?.subject).toBe('Sign in to Acme Tasks');
+    });
+  });
+
+  it('the sign-in mail carries the token in the URL fragment and in no query string', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `owner-${unique()}@example.test`;
+      await createWorkspaceFixture(db.orm, { email: { owner: email } });
+      const t = createAuthTestApp(db);
+
+      await t.post('/api/auth/magic-link', { email });
+      await t.waitForMail(1);
+
+      const mail = t.mailer.sent[0];
+      for (const part of [mail?.text ?? '', mail?.html ?? '']) {
+        expect(part).toContain('#token=');
+        expect(part).not.toContain('?token');
+        expect(part).not.toMatch(/[?&]token=/);
+      }
+      // The whole link is `APP_URL/auth/verify#token=<43 characters>`: nothing after the token reaches a server.
+      const link = /https?:\/\/[^\s"<]+/.exec(mail?.text ?? '')?.[0] ?? '';
+      const parsed = new URL(link);
+      expect(parsed.pathname).toBe('/auth/verify');
+      expect(parsed.search).toBe('');
+      expect(parsed.hash).toBe(`#token=${t.tokenOf(0)}`);
     });
   });
 
@@ -436,6 +464,341 @@ describe.skipIf(!databaseUrl)('POST /api/auth/verify', () => {
       expect(header).toContain('Path=/');
       expect(header).toContain('Secure');
       expect(header).not.toContain('Domain');
+    });
+  });
+});
+
+describe.skipIf(!databaseUrl)('POST /api/auth/verify with a cookie already present', () => {
+  const sessionsOf = async (db: Db, cookieValue: string) =>
+    (await db.orm.select().from(session)).filter((row) => row.tokenHash === sha256(cookieValue));
+
+  it("signing in again revokes the previous cookie's sessions; the new cookie works", async () => {
+    await withTempDatabase(async (db) => {
+      const email = `shared-${unique()}@example.test`;
+      const a = await createWorkspaceFixture(db.orm, { email: { owner: email } });
+      const b = await createWorkspaceFixture(db.orm, { email: { admin: email } });
+      const t = createAuthTestApp(db);
+      const first = await t.signIn(email);
+
+      const second = await t.signIn(email, { cookie: first.cookie });
+
+      expect(second.verified.status).toBe(200);
+      expect(second.cookieValue).not.toBe(first.cookieValue);
+      const old = await sessionsOf(db, first.cookieValue);
+      expect(old).toHaveLength(2);
+      expect(old.every((row) => row.revokedAt !== null)).toBe(true);
+      const fresh = await sessionsOf(db, second.cookieValue);
+      expect(fresh).toHaveLength(2);
+      expect(fresh.every((row) => row.revokedAt === null)).toBe(true);
+      for (const workspaceId of [a.workspaceId, b.workspaceId]) {
+        expect(await t.auth.resolveActor(requestWith(first.cookie), workspaceId)).toBeNull();
+        expect(await t.auth.resolveActor(requestWith(second.cookie), workspaceId)).not.toBeNull();
+      }
+      expect((await t.get('/api/auth/session', { cookie: first.cookie })).status).toBe(401);
+      expect((await t.get('/api/auth/session', { cookie: second.cookie })).status).toBe(200);
+    });
+  });
+
+  it('the previous cookie may belong to another person: it is revoked all the same', async () => {
+    await withTempDatabase(async (db) => {
+      const mine = `owner-${unique()}@example.test`;
+      const theirs = `member-${unique()}@example.test`;
+      const f = await createWorkspaceFixture(db.orm, { email: { owner: mine, member: theirs } });
+      const t = createAuthTestApp(db);
+      const attacker = await t.signIn(mine);
+
+      // A victim's browser holds the attacker's cookie and then opens its own link.
+      const victim = await t.signIn(theirs, { cookie: attacker.cookie });
+
+      expect(victim.verified.status).toBe(200);
+      expect(await t.auth.resolveActor(requestWith(attacker.cookie), f.workspaceId)).toBeNull();
+      expect((await t.auth.resolveActor(requestWith(victim.cookie), f.workspaceId))?.memberId).toBe(
+        f.members.member.id,
+      );
+    });
+  });
+
+  it('without a cookie nothing else is revoked: another browser keeps its session', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `owner-${unique()}@example.test`;
+      await createWorkspaceFixture(db.orm, { email: { owner: email } });
+      const t = createAuthTestApp(db);
+      const laptop = await t.signIn(email);
+
+      const phone = await t.signIn(email);
+
+      expect(phone.verified.status).toBe(200);
+      expect((await sessionsOf(db, laptop.cookieValue)).every((r) => r.revokedAt === null)).toBe(
+        true,
+      );
+      expect((await t.get('/api/auth/session', { cookie: laptop.cookie })).status).toBe(200);
+    });
+  });
+
+  it('a garbage or unknown cookie is ignored: the sign-in works and no row is revoked', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `owner-${unique()}@example.test`;
+      await createWorkspaceFixture(db.orm, { email: { owner: email } });
+      const t = createAuthTestApp(db);
+      const other = await t.signIn(email);
+
+      for (const cookie of ['sid=garbage', `sid=${generateToken()}`, 'sid=', 'other=1']) {
+        const res = await t.signIn(email, { cookie });
+
+        expect(res.verified.status, cookie).toBe(200);
+      }
+
+      expect((await sessionsOf(db, other.cookieValue)).every((r) => r.revokedAt === null)).toBe(
+        true,
+      );
+      const revoked = (await db.orm.select().from(session)).filter((r) => r.revokedAt !== null);
+      expect(revoked).toHaveLength(0);
+    });
+  });
+
+  it('a link that fails leaves the cookie signed in (invalid token, used token)', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `owner-${unique()}@example.test`;
+      await createWorkspaceFixture(db.orm, { email: { owner: email } });
+      const t = createAuthTestApp(db);
+      const current = await t.signIn(email);
+
+      const unknown = await t.post(
+        '/api/auth/verify',
+        { token: generateToken() },
+        { cookie: current.cookie },
+      );
+      const replay = await t.post(
+        '/api/auth/verify',
+        { token: current.token },
+        { cookie: current.cookie },
+      );
+
+      expect(unknown.status).toBe(400);
+      expect(replay.status).toBe(400);
+      expect(unknown.headers.getSetCookie()).toHaveLength(0);
+      expect((await t.get('/api/auth/session', { cookie: current.cookie })).status).toBe(200);
+    });
+  });
+
+  it('a link whose members were all deactivated fails and leaves the cookie signed in', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `owner-${unique()}@example.test`;
+      const keep = `member-${unique()}@example.test`;
+      const f = await createWorkspaceFixture(db.orm, { email: { owner: email, member: keep } });
+      const t = createAuthTestApp(db);
+      const current = await t.signIn(keep);
+      await t.post('/api/auth/magic-link', { email });
+      await t.waitForMail(2);
+      await db.orm
+        .update(member)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(member.id, f.members.owner.id));
+
+      const res = await t.post(
+        '/api/auth/verify',
+        { token: t.tokenOf(1) },
+        { cookie: current.cookie },
+      );
+
+      expect(res.status).toBe(400);
+      expect(
+        (await t.auth.resolveActor(requestWith(current.cookie), f.workspaceId))?.memberId,
+      ).toBe(f.members.member.id);
+    });
+  });
+
+  it('two concurrent verifies of two links with the same old cookie leave exactly the new ones live', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `owner-${unique()}@example.test`;
+      await createWorkspaceFixture(db.orm, { email: { owner: email } });
+      const t = createAuthTestApp(db);
+      const old = await t.signIn(email);
+      await t.post('/api/auth/magic-link', { email });
+      await t.post('/api/auth/magic-link', { email });
+      await t.waitForMail(3);
+
+      const [x, y] = await Promise.all([
+        t.post('/api/auth/verify', { token: t.tokenOf(1) }, { cookie: old.cookie }),
+        t.post('/api/auth/verify', { token: t.tokenOf(2) }, { cookie: old.cookie }),
+      ]);
+
+      expect([x.status, y.status]).toEqual([200, 200]);
+      expect((await sessionsOf(db, old.cookieValue)).every((r) => r.revokedAt !== null)).toBe(true);
+      const live = (await db.orm.select().from(session)).filter((r) => r.revokedAt === null);
+      expect(live).toHaveLength(2);
+    });
+  });
+});
+
+describe.skipIf(!databaseUrl)('POST /api/auth/preview', () => {
+  const issue = async (t: ReturnType<typeof createAuthTestApp>, email: string, index = 0) => {
+    await t.post('/api/auth/magic-link', { email });
+    await t.waitForMail(index + 1);
+    return t.tokenOf(index);
+  };
+
+  it('a valid link: 200 with the normalised email, nothing consumed, the link still signs in', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `owner-${unique()}@example.test`;
+      await createWorkspaceFixture(db.orm, { email: { owner: email } });
+      const t = createAuthTestApp(db);
+      await t.post('/api/auth/magic-link', { email: `  ${email.toUpperCase()} ` });
+      await t.waitForMail(1);
+      const token = t.tokenOf(0);
+
+      const first = await t.post('/api/auth/preview', { token });
+      const second = await t.post('/api/auth/preview', { token });
+
+      expect(first.status).toBe(200);
+      expect(await first.json()).toEqual({ email });
+      expect(second.status).toBe(200);
+      expect(first.headers.getSetCookie()).toHaveLength(0);
+      expect(first.headers.get('cache-control')).toBe('no-store');
+      const rows = await db.orm.select().from(loginToken);
+      expect(rows.every((row) => row.usedAt === null)).toBe(true);
+      expect(await db.orm.select().from(session)).toHaveLength(0);
+      expect((await t.post('/api/auth/verify', { token })).status).toBe(200);
+    });
+  });
+
+  it('a link that covers two workspaces answers with the one email', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `shared-${unique()}@example.test`;
+      await createWorkspaceFixture(db.orm, { email: { owner: email } });
+      await createWorkspaceFixture(db.orm, { email: { admin: email } });
+      const t = createAuthTestApp(db);
+      const token = await issue(t, email);
+
+      const res = await t.post('/api/auth/preview', { token });
+
+      expect(await res.json()).toEqual({ email });
+    });
+  });
+
+  it('a used link → 400 invalid_or_expired', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `owner-${unique()}@example.test`;
+      await createWorkspaceFixture(db.orm, { email: { owner: email } });
+      const t = createAuthTestApp(db);
+      const token = await issue(t, email);
+      await t.post('/api/auth/verify', { token });
+
+      const res = await t.post('/api/auth/preview', { token });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: 'invalid_or_expired' });
+    });
+  });
+
+  it('an expired link → 400, a link 14 minutes old → 200', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `owner-${unique()}@example.test`;
+      await createWorkspaceFixture(db.orm, { email: { owner: email } });
+      const t = createAuthTestApp(db);
+      const token = await issue(t, email);
+
+      t.clock.current = new Date(t.clock.current.getTime() + 14 * MINUTE);
+      expect((await t.post('/api/auth/preview', { token })).status).toBe(200);
+      t.clock.current = new Date(t.clock.current.getTime() + 2 * MINUTE);
+      const stale = await t.post('/api/auth/preview', { token });
+
+      expect(stale.status).toBe(400);
+      expect(await stale.json()).toMatchObject({ error: 'invalid_or_expired' });
+    });
+  });
+
+  it('unknown and malformed tokens → 400 invalid_or_expired, never an email', async () => {
+    await withTempDatabase(async (db) => {
+      const t = createAuthTestApp(db);
+
+      for (const body of [
+        {},
+        { token: 5 },
+        { token: 'short' },
+        { token: 'A'.repeat(43) },
+        { token: generateToken() },
+        'nope{',
+      ]) {
+        const res = await t.post('/api/auth/preview', body);
+
+        expect(res.status, JSON.stringify(body)).toBe(400);
+        expect(await res.json()).toMatchObject({ error: 'invalid_or_expired' });
+      }
+    });
+  });
+
+  it('a link whose members were all deactivated → 400 (it would not sign anyone in)', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `owner-${unique()}@example.test`;
+      const f = await createWorkspaceFixture(db.orm, { email: { owner: email } });
+      const t = createAuthTestApp(db);
+      const token = await issue(t, email);
+      await db.orm
+        .update(member)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(member.id, f.members.owner.id));
+
+      expect((await t.post('/api/auth/preview', { token })).status).toBe(400);
+    });
+  });
+
+  it('a GET on the preview path answers no email (POST only)', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `owner-${unique()}@example.test`;
+      await createWorkspaceFixture(db.orm, { email: { owner: email } });
+      const t = createAuthTestApp(db);
+      const token = await issue(t, email);
+
+      const res = await t.get(`/api/auth/preview?token=${token}`);
+
+      expect([404, 405]).toContain(res.status);
+    });
+  });
+
+  it('61st call from one IP answers 429 with Retry-After; another IP is unaffected', async () => {
+    await withTempDatabase(async (db) => {
+      const t = createAuthTestApp(db);
+      const ask = (ip: string) => t.post('/api/auth/preview', { token: generateToken() }, { ip });
+
+      for (let i = 1; i <= 60; i++) expect((await ask('203.0.113.7')).status).toBe(400);
+      const blocked = await ask('203.0.113.7');
+
+      expect(blocked.status).toBe(429);
+      const retryAfter = Number(blocked.headers.get('retry-after'));
+      expect(Number.isInteger(retryAfter)).toBe(true);
+      expect(retryAfter).toBeGreaterThan(0);
+      expect(retryAfter).toBeLessThanOrEqual(900);
+      expect((await ask('203.0.113.8')).status).toBe(400);
+    });
+  });
+
+  it('preview and verify share the 60 per 15 minutes of one IP', async () => {
+    await withTempDatabase(async (db) => {
+      const t = createAuthTestApp(db);
+      const body = () => ({ token: generateToken() });
+
+      for (let i = 1; i <= 30; i++) {
+        expect((await t.post('/api/auth/preview', body(), { ip: '203.0.113.9' })).status).toBe(400);
+        expect((await t.post('/api/auth/verify', body(), { ip: '203.0.113.9' })).status).toBe(400);
+      }
+
+      expect((await t.post('/api/auth/verify', body(), { ip: '203.0.113.9' })).status).toBe(429);
+      expect((await t.post('/api/auth/preview', body(), { ip: '203.0.113.9' })).status).toBe(429);
+      expect((await t.post('/api/auth/magic-link', { email: 'a@example.test' })).status).toBe(202);
+    });
+  });
+
+  it('the limit is open again after 15 minutes', async () => {
+    await withTempDatabase(async (db) => {
+      const t = createAuthTestApp(db);
+      const ask = () => t.post('/api/auth/preview', { token: generateToken() });
+      for (let i = 1; i <= 60; i++) await ask();
+      expect((await ask()).status).toBe(429);
+
+      t.clock.current = new Date(t.clock.current.getTime() + 15 * MINUTE + 1000);
+
+      expect((await ask()).status).toBe(400);
     });
   });
 });

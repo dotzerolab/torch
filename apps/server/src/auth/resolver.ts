@@ -4,12 +4,23 @@ import type { Orm } from '../db.ts';
 import { type ActorResolver, loadActor } from '../permissions/load-actor.ts';
 import { findSession, readSessionToken, TOUCH_INTERVAL_MS, touchSessions } from './sessions.ts';
 
+/**
+ * An actor resolver that also remembers, per request, when the session it slid now ends: `touchedExpiry` is
+ * set only when `resolveActor` rewrote the session row for that very request object. The cookie refresh
+ * middleware reads it after the handler ran.
+ */
+export type SessionResolver = ActorResolver & { touchedExpiry(req: Request): Date | undefined };
+
+export const isSessionResolver = (resolver: ActorResolver): resolver is SessionResolver =>
+  typeof (resolver as Partial<SessionResolver>).touchedExpiry === 'function';
+
 export function createSessionActorResolver(deps: {
   orm: Orm;
   appUrl: string;
   now?: () => Date;
-}): ActorResolver {
+}): SessionResolver {
   const now = deps.now ?? (() => new Date());
+  const touched = new WeakMap<Request, Date>();
   return {
     async resolveActor(req, workspaceId) {
       const token = readSessionToken(req, deps.appUrl);
@@ -22,9 +33,11 @@ export function createSessionActorResolver(deps: {
       if (!actor) return null;
       // Most requests skip this: the row is only rewritten when it was last touched over an hour ago.
       if (at.getTime() - row.lastSeenAt.getTime() >= TOUCH_INTERVAL_MS) {
-        await touchSessions(deps.orm, token, at);
+        const expiresAt = await touchSessions(deps.orm, token, at);
+        if (expiresAt) touched.set(req, expiresAt);
       }
       return actor;
     },
+    touchedExpiry: (req) => touched.get(req),
   };
 }

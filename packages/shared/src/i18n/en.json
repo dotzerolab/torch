@@ -17,6 +17,8 @@
   "auth.login.error": "Something went wrong. Try again.",
   "auth.verify.title": "Finish signing in",
   "auth.verify.intro": "Continue to sign in to {brand}.",
+  "auth.verify.signingInAs": "Signing in as {email}",
+  "auth.verify.unavailable": "Could not check this link right now. Reload the page in a few minutes.",
   "auth.verify.continue": "Continue",
   "auth.verify.invalid": "This sign-in link is not valid or has expired.",
   "auth.verify.requestNew": "Request a new link",
