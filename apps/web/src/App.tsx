@@ -1,11 +1,13 @@
 import type { Brand } from '@torch/shared/brand';
 import { detectLocale, type Locale, t } from '@torch/shared/i18n';
+import { readableForeground } from '@torch/shared/theme/contrast';
 import { useEffect, useState } from 'react';
 import { LoginPage } from './auth/LoginPage.tsx';
 import { useSession } from './auth/useSession.ts';
 import { VerifyPage } from './auth/VerifyPage.tsx';
 import { navigate, usePathname } from './navigation.ts';
 import { Workspace } from './screens/Workspace.tsx';
+import { AppShell } from './shell/AppShell.tsx';
 
 type State = { status: 'loading' } | { status: 'ready'; brand: Brand } | { status: 'error' };
 
@@ -18,6 +20,8 @@ async function fetchBrand(signal: AbortSignal): Promise<Brand> {
 function applyBrand(brand: Brand) {
   document.title = brand.productName;
   document.documentElement.style.setProperty('--accent', brand.accentColor);
+  // The text on an accent surface flips to near-black when the brand's accent is pale.
+  document.documentElement.style.setProperty('--accent-fg', readableForeground(brand.accentColor));
   let icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
   if (!icon) {
     icon = document.createElement('link');
@@ -33,7 +37,7 @@ function applyBrand(brand: Brand) {
 }
 
 // `/` is the signed-in page: without a session it sends the visitor to /login.
-function Home({ locale }: { locale: Locale }) {
+function Home({ brand, locale }: { brand: Brand; locale: Locale }) {
   const session = useSession();
   useEffect(() => {
     if (session.status === 'signed-out') navigate('/login', { replace: true });
@@ -44,7 +48,11 @@ function Home({ locale }: { locale: Locale }) {
   if (session.status === 'error') {
     return <main role="alert">{t(locale, 'workspace.sessionError')}</main>;
   }
-  return <Workspace workspaces={session.workspaces} locale={locale} />;
+  return (
+    <AppShell brand={brand} workspaces={session.workspaces} locale={locale}>
+      <Workspace locale={locale} />
+    </AppShell>
+  );
 }
 
 export function App() {
@@ -89,5 +97,5 @@ export function App() {
       </main>
     );
   }
-  return <Home locale={locale} />;
+  return <Home brand={state.brand} locale={locale} />;
 }

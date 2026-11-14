@@ -1,0 +1,61 @@
+/* The issue list of the signed-in page. A plain placeholder until the issue screens replace it: hairline rows, the
+   identifier in monospace, the title as a quiet field. */
+.issues__note,
+.issues__error {
+  margin: 0;
+  padding: var(--space-4);
+}
+.issues__error {
+  border-bottom: 1px solid var(--border);
+  color: var(--danger);
+}
+.issue-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.issue-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--space-3);
+  height: var(--row-height);
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--border);
+  transition: background var(--duration-fast) var(--ease);
+}
+.issue-row:hover,
+.issue-row:focus-within {
+  background: var(--bg-hover);
+}
+.issue-row__id {
+  color: var(--fg-subtle);
+  font: var(--id-font);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.issue-row__title {
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  text-overflow: ellipsis;
+}
+.issue-row__title:focus-visible {
+  outline-offset: -2px;
+}
+.issue-row__priority {
+  color: var(--fg-subtle);
+  font: var(--count-font);
+  white-space: nowrap;
+}
+@media (max-width: 767px) {
+  .issue-row {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+  .issue-row__priority {
+    display: none;
+  }
+}

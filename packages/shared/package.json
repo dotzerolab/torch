@@ -8,6 +8,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./brand": "./src/brand.ts",
+    "./theme/contrast": "./src/theme/contrast.ts",
     "./i18n": "./src/i18n/index.ts",
     "./db/schema": "./src/db/schema.ts",
     "./permissions": "./src/permissions.ts",

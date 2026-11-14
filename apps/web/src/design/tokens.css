@@ -1,0 +1,199 @@
+/*
+ * Design tokens. One block per theme (colours) plus one block for everything that does not change with the theme.
+ * White-label brands override --accent and --accent-fg at runtime (see applyBrand); every component reads these
+ * properties and never a literal colour. Colours are 6-digit hex because the contrast tests parse them.
+ *
+ * Direction: quiet grid. Calm slate neutrals, system sans for text, monospace for identifiers, dates, counts and
+ * keys, hairline borders, 30 px rows. The blueprint motif tokens (grid lines, hatch, annotations) are reserved
+ * for the dashboard screen.
+ */
+
+:root {
+  /* type: text in the system sans, technical values in the system monospace */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-serif: ui-serif, Georgia, serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --text-xs: 11.5px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-lg: 15px;
+  --text-xl: 20px;
+  --id-font: 12px var(--font-mono);
+  --count-font: 11.5px var(--font-mono);
+  --title-font: 600 18px / 1.3 var(--font-sans);
+  --crumb-font: 600 14px var(--font-sans);
+
+  /* spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  /* shape and density */
+  --radius-sm: 3px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+  --row-height: 30px;
+  --group-height: 32px;
+  --bar-height: 48px;
+  --status-height: 28px;
+  --control-height: 32px;
+  --sidebar-width: 230px;
+
+  /* motion: short, ease-out, almost no travel */
+  --duration-fast: 100ms;
+  --duration-base: 100ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+  --travel: 2px;
+
+  /* focus: the same ring everywhere, drawn outside the control */
+  --focus-ring: 2px solid var(--accent);
+  --focus-offset: 2px;
+
+  /* blueprint motif (dashboard): hatch spacing and width, gutter between panels, margin of the sheet, annotations */
+  --hatch-step: 6px;
+  --hatch-width: 1px;
+  --grid-gap: 20px;
+  --sheet-pad: 24px;
+  --note-font: 500 11px / 12px var(--font-mono);
+  --note-letter-spacing: 0.05em;
+  --note-case: uppercase;
+}
+
+:root[data-theme="light"],
+:root:not([data-theme]) {
+  --bg: #fafbfc;
+  --bg-subtle: #f3f5f7;
+  --bg-elevated: #ffffff;
+  --bg-hover: #ebeef2;
+  --bg-selected: #e6ecfb;
+
+  --fg: #14181f;
+  --fg-muted: #485160;
+  --fg-subtle: #69717f;
+  --border: #e2e5ea;
+  --border-strong: #c9cfd8;
+
+  --accent: #2a5ff2;
+  --accent-fg: #ffffff;
+  --accent-subtle: #e3eafd;
+  --accent-text: #1b49cf;
+
+  --danger: #d42c3e;
+  --warning: #a9500a;
+  --success: #15803d;
+
+  --state-backlog: #7a828e;
+  --state-unstarted: #5c6573;
+  --state-started: #b45f06;
+  --state-completed: #15803d;
+  --state-canceled: #7a828e;
+
+  --priority-urgent: #d42c3e;
+  --priority-high: #c2540a;
+  --priority-medium: #8f6a05;
+  --priority-low: #5c6573;
+
+  --scrim: rgba(14, 18, 26, 0.34);
+  --shadow-popover: 0 16px 40px -10px rgba(14, 18, 26, 0.28), 0 0 0 1px rgba(14, 18, 26, 0.04);
+  --shadow-drag: 0 10px 24px -6px rgba(14, 18, 26, 0.28);
+  --seg-shadow: 0 1px 2px rgba(14, 18, 26, 0.1);
+
+  /* board: active card and drop target stay quiet (a tint and a hairline, never a full accent surface) */
+  --active-border: #8fa3d6;
+  --over-bg: #edf1fa;
+  --drop-line: #5f7cd0;
+
+  /* blueprint motif */
+  --grid-line: #dde1e8;
+  --grid-line-strong: #c4cbd6;
+  --hatch: #e4e8ee;
+  --note: #5f6773;
+
+  /* avatar tints: eight hues, background and initials */
+  --avatar-1-bg: #dee6f2;
+  --avatar-1-fg: #294265;
+  --avatar-2-bg: #def2ed;
+  --avatar-2-fg: #296556;
+  --avatar-3-bg: #f2e7de;
+  --avatar-3-fg: #654529;
+  --avatar-4-bg: #eadef2;
+  --avatar-4-fg: #4c2965;
+  --avatar-5-bg: #f2dee5;
+  --avatar-5-fg: #65293d;
+  --avatar-6-bg: #deeef2;
+  --avatar-6-fg: #295b65;
+  --avatar-7-bg: #f2eede;
+  --avatar-7-fg: #655929;
+  --avatar-8-bg: #e5f2de;
+  --avatar-8-fg: #3d6529;
+}
+
+:root[data-theme="dark"] {
+  --bg: #0e1013;
+  --bg-subtle: #13161a;
+  --bg-elevated: #1a1d22;
+  --bg-hover: #1d2128;
+  --bg-selected: #17223f;
+
+  --fg: #e7eaee;
+  --fg-muted: #a0a8b3;
+  --fg-subtle: #707883;
+  --border: #21252b;
+  --border-strong: #343a43;
+
+  --accent: #2a5ff2;
+  --accent-fg: #ffffff;
+  --accent-subtle: #13203f;
+  --accent-text: #7fa2ff;
+
+  --danger: #f26d7b;
+  --warning: #e2a13c;
+  --success: #4cc27f;
+
+  --state-backlog: #707883;
+  --state-unstarted: #a0a8b3;
+  --state-started: #e2a13c;
+  --state-completed: #4cc27f;
+  --state-canceled: #707883;
+
+  --priority-urgent: #f26d7b;
+  --priority-high: #f08a45;
+  --priority-medium: #d9b43f;
+  --priority-low: #9aa3af;
+
+  --scrim: rgba(4, 6, 9, 0.6);
+  --shadow-popover: 0 20px 48px -10px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --shadow-drag: 0 12px 28px -6px rgba(0, 0, 0, 0.7);
+  --seg-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+
+  --active-border: #3a4e80;
+  --over-bg: #131b2a;
+  --drop-line: #4a6bbd;
+
+  --grid-line: #1f242b;
+  --grid-line-strong: #30363f;
+  --hatch: #1a1f26;
+  --note: #8d95a1;
+
+  --avatar-1-bg: #233957;
+  --avatar-1-fg: #c5d3e7;
+  --avatar-2-bg: #23574a;
+  --avatar-2-fg: #c5e7df;
+  --avatar-3-bg: #573b23;
+  --avatar-3-fg: #e7d5c5;
+  --avatar-4-bg: #412357;
+  --avatar-4-fg: #d9c5e7;
+  --avatar-5-bg: #572335;
+  --avatar-5-fg: #e7c5d0;
+  --avatar-6-bg: #234e57;
+  --avatar-6-fg: #c5e2e7;
+  --avatar-7-bg: #574d23;
+  --avatar-7-fg: #e7e0c5;
+  --avatar-8-bg: #355723;
+  --avatar-8-fg: #d0e7c5;
+}

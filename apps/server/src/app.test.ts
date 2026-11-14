@@ -37,6 +37,21 @@ describe('GET /api/brand', () => {
   });
 });
 
+describe('GET /api/manifest.webmanifest', () => {
+  it('serves the manifest of the instance brand without authentication, never cached', async () => {
+    const app = createApp({ brand });
+
+    const res = await app.fetch(new Request('http://localhost/api/manifest.webmanifest'));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(/^application\/manifest\+json/);
+    expect(res.headers.get('cache-control')).toBe('no-cache');
+    const manifest = (await res.json()) as { name: string; theme_color: string };
+    expect(manifest.name).toBe('Acme Tasks');
+    expect(manifest.theme_color).toBe('#3366ff');
+  });
+});
+
 describe('GET /health/db', () => {
   const get = (app: ReturnType<typeof createApp>) =>
     app.fetch(new Request('http://localhost/health/db'));

@@ -1,0 +1,112 @@
+import type { Brand } from '@torch/shared/brand';
+import { Inbox, LogOut, Settings, UserRound } from 'lucide-react';
+import type { MouseEvent, ReactNode } from 'react';
+import { type SessionWorkspace, signOut } from '../auth/useSession.ts';
+import { Button } from '../design/components/Button.tsx';
+import { useT } from '../design/locale.tsx';
+import type { ResolvedTheme } from '../design/theme.ts';
+import { navigate } from '../navigation.ts';
+import type { SyncedTeam } from '../sync/collections.ts';
+import { WorkspaceSwitcher } from './WorkspaceSwitcher.tsx';
+
+/** An entry whose screen does not exist yet: shown, announced as disabled, not focusable. */
+function Placeholder({ icon, children }: { icon: ReactNode; children: ReactNode }) {
+  return (
+    <li>
+      <span className="sidebar__item sidebar__item--disabled" aria-disabled="true">
+        {icon}
+        {children}
+      </span>
+    </li>
+  );
+}
+
+function isPlainClick(event: MouseEvent) {
+  return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
+}
+
+/** The sidebar body, shared by the fixed sidebar (desktop) and the drawer (phone). */
+export function Sidebar({
+  brand,
+  theme,
+  workspaces,
+  workspace,
+  onSelectWorkspace,
+  teams,
+  activeTeamKey,
+  onNavigate,
+}: {
+  brand: Brand;
+  theme: ResolvedTheme;
+  workspaces: SessionWorkspace[];
+  workspace: SessionWorkspace;
+  onSelectWorkspace: (workspaceId: string) => void;
+  teams: SyncedTeam[];
+  activeTeamKey: string | null;
+  /** Called after a link was followed, so a drawer can close. */
+  onNavigate?: () => void;
+}) {
+  const t = useT();
+  return (
+    <nav className="sidebar" aria-label={t('shell.sidebar')}>
+      <WorkspaceSwitcher
+        brand={brand}
+        theme={theme}
+        workspaces={workspaces}
+        currentId={workspace.id}
+        onSelect={onSelectWorkspace}
+      />
+      <ul className="sidebar__list">
+        <Placeholder icon={<UserRound size={16} aria-hidden="true" />}>
+          {t('shell.myIssues')}
+        </Placeholder>
+        <Placeholder icon={<Inbox size={16} aria-hidden="true" />}>{t('shell.inbox')}</Placeholder>
+      </ul>
+      <p className="sidebar__group" id="sidebar-teams">
+        {t('shell.teams')}
+      </p>
+      <ul className="sidebar__list" aria-labelledby="sidebar-teams">
+        {teams.map((team) => {
+          const href = `/teams/${team.key}`;
+          return (
+            <li key={team.id}>
+              <a
+                className="sidebar__item"
+                href={href}
+                data-testid={`team-${team.key}`}
+                aria-current={team.key === activeTeamKey ? 'page' : undefined}
+                onClick={(event) => {
+                  if (!isPlainClick(event)) return;
+                  event.preventDefault();
+                  navigate(href);
+                  onNavigate?.();
+                }}
+              >
+                <span className="sidebar__team-badge" aria-hidden="true">
+                  {Array.from(team.name)[0]?.toUpperCase()}
+                </span>
+                {team.name}
+              </a>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="sidebar__footer">
+        <ul className="sidebar__list">
+          <Placeholder icon={<Settings size={16} aria-hidden="true" />}>
+            {t('shell.settings')}
+          </Placeholder>
+        </ul>
+        <Button
+          variant="ghost"
+          className="sidebar__signout"
+          data-testid="sign-out"
+          onClick={() => void signOut()}
+        >
+          <LogOut size={16} aria-hidden="true" />
+          {t('workspace.signOut')}
+        </Button>
+      </div>
+    </nav>
+  );
+}

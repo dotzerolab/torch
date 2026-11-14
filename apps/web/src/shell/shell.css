@@ -1,0 +1,265 @@
+/*
+ * App shell: sidebar, header, page region, status line. Tokens only. On a desktop the sidebar sits at the left and
+ * can be collapsed; below 768 px it is a drawer opened from the header.
+ */
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--bg-subtle);
+}
+.shell[data-collapsed="true"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+.shell__sidebar {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+.shell__column {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+.shell__main {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+}
+.shell__main:focus-visible {
+  outline-offset: -2px;
+}
+
+.skip-link {
+  position: absolute;
+  z-index: 100;
+  top: var(--space-2);
+  left: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  transform: translateY(calc(-100% - var(--space-4)));
+}
+.skip-link:focus {
+  transform: none;
+}
+
+/* sidebar */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 100%;
+  padding: var(--space-2);
+}
+.sidebar__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sidebar__group {
+  margin: 0;
+  padding: var(--space-4) var(--space-2) var(--space-1);
+  color: var(--fg-subtle);
+  font-size: var(--text-xs);
+}
+.sidebar__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--control-height);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-md);
+  color: var(--fg-muted);
+  text-decoration: none;
+  transition:
+    background var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+a.sidebar__item:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.sidebar__item[aria-current="page"] {
+  background: var(--bg-selected);
+  color: var(--fg);
+}
+.sidebar__item--disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.sidebar__team-badge {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+  font: 600 10px var(--font-sans);
+}
+.sidebar__footer {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: auto;
+  padding-top: var(--space-3);
+}
+.sidebar__signout {
+  justify-content: flex-start;
+  width: 100%;
+  padding: 0 var(--space-2);
+}
+.switcher {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 40px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--fg-muted);
+}
+.switcher--button {
+  width: 100%;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease);
+}
+.switcher--button:hover {
+  background: var(--bg-hover);
+}
+.shell-logo {
+  display: block;
+  width: auto;
+  height: 20px;
+}
+.menu__icon-gap {
+  display: inline-block;
+  width: 14px;
+}
+
+/* header */
+.shell-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--bar-height);
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.crumb {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 1;
+}
+.crumb__workspace {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  color: var(--fg-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.crumb__separator {
+  color: var(--fg-subtle);
+}
+.crumb__title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font: var(--crumb-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shell-header__tools {
+  display: flex;
+  flex: none;
+  gap: var(--space-2);
+}
+
+/* status line */
+.shell-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  height: var(--status-height);
+  padding: 0 var(--space-4);
+  overflow: hidden;
+  border-top: 1px solid var(--border);
+  background: var(--bg-subtle);
+  color: var(--fg-subtle);
+  font: 11px var(--font-mono);
+  white-space: nowrap;
+}
+.shell-status > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.shell-status kbd {
+  padding: 2px 4px;
+  font-size: 10.5px;
+}
+.shell-status__sync {
+  margin-left: auto;
+  gap: 7px;
+  color: var(--fg-muted);
+}
+.dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--fg-subtle);
+}
+.dot--ok {
+  background: var(--success);
+}
+
+/* shortcut help */
+.shortcut-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.shortcut-list__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-height: var(--control-height);
+  border-bottom: 1px solid var(--border);
+}
+.shortcut-list__item:last-child {
+  border-bottom: 0;
+}
+
+/* phone: the sidebar lives in the drawer, the status line is dropped */
+@media (max-width: 767px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .shell__sidebar,
+  .shell-status {
+    display: none;
+  }
+  .shell-header {
+    padding: 0 var(--space-3);
+  }
+}
