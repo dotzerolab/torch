@@ -31,7 +31,8 @@ import type { Orm, Tx } from '../db.ts';
 import { currentTxid } from '../mutations/txid.ts';
 import { currentActor } from '../permissions/current-actor.ts';
 import { isUniqueViolation } from '../util/pg-error.ts';
-import { refuse, type ServiceResult, succeed } from '../util/result.ts';
+import { refuse, succeed } from '../util/refusal.ts';
+import type { ServiceResult } from '../util/result.ts';
 import { isUuid } from '../util/uuid.ts';
 
 export type MemberListItem = {

@@ -1,9 +1,10 @@
-import { auditLog, member, session } from '@torch/shared/db/schema';
+import { auditLog, member, session, teamMember } from '@torch/shared/db/schema';
 import type { Actor } from '@torch/shared/permissions';
 import { and, eq, isNull } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { createSessionActorResolver } from '../auth/resolver.ts';
 import type { Db } from '../db.ts';
+import { loadActor } from '../permissions/load-actor.ts';
 import {
   actorOf,
   auditRows,
@@ -341,6 +342,29 @@ describe.skipIf(!databaseUrl)('setMemberActive', () => {
         f.workspaceId,
       );
       expect(actor).toBeNull();
+    });
+  });
+
+  it('deactivation keeps the team memberships (co-members still resolve their name); reactivation restores access with them', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const owner = await actorOf(db, f.workspaceId, f.members.owner.id);
+      const teamsOf = async () =>
+        (await db.orm.select().from(teamMember).where(eq(teamMember.memberId, f.members.member.id)))
+          .map((row) => row.teamId)
+          .sort();
+      const before = await teamsOf();
+      expect(before).toEqual([f.teams.eng.id, f.teams.ops.id].sort());
+
+      txidOf(await setMemberActive(db.orm, owner, f.members.member.id, false));
+
+      expect(await teamsOf()).toEqual(before);
+      expect(await loadActor(db.orm, f.workspaceId, f.members.member.id)).toBeNull();
+
+      txidOf(await setMemberActive(db.orm, owner, f.members.member.id, true));
+
+      const restored = await loadActor(db.orm, f.workspaceId, f.members.member.id);
+      expect([...(restored?.teamIds ?? [])].sort()).toEqual(before);
     });
   });
 
