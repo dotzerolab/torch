@@ -132,17 +132,15 @@ export async function createInvite(
     }
 
     const [existing] = await tx
-      .select({ id: member.id })
+      .select({ role: member.role, deactivatedAt: member.deactivatedAt })
       .from(member)
-      .where(
-        and(
-          eq(member.workspaceId, actor.workspaceId),
-          eq(member.email, email),
-          isNull(member.deactivatedAt),
-        ),
-      )
+      .where(and(eq(member.workspaceId, actor.workspaceId), eq(member.email, email)))
       .limit(1);
-    if (existing) return refuse('already_member', 409);
+    if (existing && !existing.deactivatedAt) return refuse('already_member', 409);
+    // A deactivated member comes back through the invite, with the invited role: that is a reactivation, and it
+    // follows the rule of reactivating (`canDeactivateMember`): whoever may not grant the role the person has now
+    // (an admin, for a deactivated admin or owner) may not bring them back this way either.
+    if (existing && !canGrantRole(actor, existing.role)) return refuse('forbidden', 403);
 
     // Row locks: a resend of the same invite waits here and the decision below sees its new expiry.
     const pendingForEmail = await tx
@@ -408,6 +406,16 @@ export async function previewInvite(
     ? { role: row.inviterRole, deactivatedAt: row.inviterDeactivatedAt }
     : undefined;
   if (!inviterMayGrant(row.workspaceId, row.invitedBy, inviter, row.role)) return null;
+  const [returning] = await orm
+    .select({ role: member.role, deactivatedAt: member.deactivatedAt })
+    .from(member)
+    .where(and(eq(member.workspaceId, row.workspaceId), eq(member.email, row.email)));
+  if (
+    returning?.deactivatedAt &&
+    !inviterMayGrant(row.workspaceId, row.invitedBy, inviter, returning.role)
+  ) {
+    return null;
+  }
 
   const teams = await orm
     .select({ key: team.key, name: team.name })
@@ -514,7 +522,7 @@ export async function acceptInvite(
       }
 
       const [existing] = await tx
-        .select({ id: member.id, deactivatedAt: member.deactivatedAt })
+        .select({ id: member.id, role: member.role, deactivatedAt: member.deactivatedAt })
         .from(member)
         .where(and(eq(member.workspaceId, workspaceId), eq(member.email, consumed.email)))
         .for('no key update');
@@ -523,6 +531,11 @@ export async function acceptInvite(
       const reactivated = existing !== undefined;
       if (existing) {
         if (!existing.deactivatedAt) throw new Abort(refuse('already_member', 409));
+        // The person may have been promoted to admin or owner (and deactivated) since the invite was made: whoever made
+        // it must still be allowed to reactivate that role, exactly as at creation.
+        if (!inviterMayGrant(workspaceId, consumed.invitedBy, inviter, existing.role)) {
+          throw new Abort(refuse('invite_invalid', 400));
+        }
         // The same row, the invited role. Team memberships become exactly the invited teams (least privilege: a
         // returning guest never keeps access this invite does not grant). Deactivation keeps the old rows, so they are
         // deleted before the invited ones go in, in this transaction with the member row locked.

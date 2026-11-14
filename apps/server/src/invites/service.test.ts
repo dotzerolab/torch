@@ -10,7 +10,7 @@ import {
 } from '@torch/shared/db/schema';
 import type { InviteCreateInput } from '@torch/shared/mutations/admin';
 import type { Actor } from '@torch/shared/permissions';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { createSessionsForMembers, listSessionWorkspaces } from '../auth/sessions.ts';
 import { generateToken, hashToken } from '../auth/tokens.ts';
@@ -331,6 +331,66 @@ describe.skipIf(!databaseUrl)('invite service (Postgres)', () => {
       );
 
       expect(created.ok).toBe(true);
+    });
+
+    it('an admin cannot bring back a deactivated admin or owner through an invite, at any role (403)', async () => {
+      const { db, f, admin } = await setup();
+      const gone = await addMember(db.orm, f.workspaceId, 'admin');
+      const goneOwner = await addMember(db.orm, f.workspaceId, 'owner');
+      await db.orm
+        .update(member)
+        .set({ deactivatedAt: new Date() })
+        .where(inArray(member.id, [gone.id, goneOwner.id]));
+
+      for (const target of [gone, goneOwner]) {
+        for (const role of ['member', 'guest'] as const) {
+          const created = await createInvite(
+            db.orm,
+            admin,
+            input({ email: target.email, role, teamIds: [f.teams.eng.id] }),
+            { now: new Date() },
+          );
+          expect(refusal(created), `${target.role} as ${role}`).toEqual({
+            code: 'forbidden',
+            status: 403,
+          });
+        }
+      }
+      expect(
+        await db.orm.select().from(invite).where(eq(invite.workspaceId, f.workspaceId)),
+      ).toEqual([]);
+    });
+
+    it('an owner can invite a deactivated admin or owner again; an admin can invite a deactivated member or guest', async () => {
+      const { db, f, owner, admin } = await setup();
+      const goneAdmin = await addMember(db.orm, f.workspaceId, 'admin');
+      const goneOwner = await addMember(db.orm, f.workspaceId, 'owner');
+      const goneMember = await addMember(db.orm, f.workspaceId, 'member');
+      const goneGuest = await addMember(db.orm, f.workspaceId, 'guest');
+      await db.orm
+        .update(member)
+        .set({ deactivatedAt: new Date() })
+        .where(inArray(member.id, [goneAdmin.id, goneOwner.id, goneMember.id, goneGuest.id]));
+      const now = new Date();
+
+      for (const target of [goneAdmin, goneOwner]) {
+        const created = await createInvite(
+          db.orm,
+          owner,
+          input({ email: target.email, role: 'member' }),
+          { now },
+        );
+        expect(created.ok, `owner re-invites ${target.role}`).toBe(true);
+      }
+      for (const target of [goneMember, goneGuest]) {
+        const created = await createInvite(
+          db.orm,
+          admin,
+          input({ email: target.email, role: 'member' }),
+          { now },
+        );
+        expect(created.ok, `admin re-invites ${target.role}`).toBe(true);
+      }
     });
 
     it('a second pending invite for the same email is 409 invite_pending, another workspace is fine', async () => {
@@ -1350,6 +1410,48 @@ describe.skipIf(!databaseUrl)('invite service (Postgres)', () => {
       expect(refusal(gone)).toEqual({ code: 'invite_invalid', status: 400 });
       expect(refusal(demoted)).toEqual({ code: 'invite_invalid', status: 400 });
       expect((await inviteRow(db, fromGone.inviteId)).acceptedAt).toBeNull();
+    });
+
+    it('an admin-made invite is not accepted once its target is a deactivated admin; an owner-made one is', async () => {
+      const s = await setup();
+      const { db, f, admin, owner } = s;
+      const email = `rank-${unique()}@example.test`;
+      const before = await addMember(db.orm, f.workspaceId, 'member', { email });
+      await db.orm
+        .update(member)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(member.id, before.id));
+      const now = new Date();
+      // Made while the person is a deactivated plain member, which an admin may do.
+      const fromAdmin = value(await createInvite(db.orm, admin, input({ email }), { now }));
+      // Then an owner makes the deactivated member an admin.
+      await db.orm.update(member).set({ role: 'admin' }).where(eq(member.id, before.id));
+
+      const refused = await acceptInvite(db.orm, {
+        token: fromAdmin.token,
+        name: 'Back',
+        now,
+        userAgent: null,
+      });
+
+      expect(refusal(refused)).toEqual({ code: 'invite_invalid', status: 400 });
+      expect(await previewInvite(db.orm, fromAdmin.token, now)).toBeNull();
+      // Nothing changed: still a deactivated admin, the invite still pending, nothing audited.
+      const [stillGone] = await db.orm.select().from(member).where(eq(member.id, before.id));
+      expect(stillGone?.deactivatedAt).not.toBeNull();
+      expect(stillGone?.role).toBe('admin');
+      expect((await inviteRow(db, fromAdmin.inviteId)).acceptedAt).toBeNull();
+      expect(await auditRows(db, f.workspaceId, 'member.reactivated')).toHaveLength(0);
+
+      // The same person invited by an owner comes back with the invited role.
+      await db.orm.update(invite).set({ revokedAt: now }).where(eq(invite.id, fromAdmin.inviteId));
+      const fromOwner = value(await createInvite(db.orm, owner, input({ email }), { now }));
+      const accepted = value(
+        await acceptInvite(db.orm, { token: fromOwner.token, name: 'Back', now, userAgent: null }),
+      );
+      expect(accepted.memberId).toBe(before.id);
+      const [back] = await db.orm.select().from(member).where(eq(member.id, before.id));
+      expect(back).toMatchObject({ role: 'member', deactivatedAt: null });
     });
 
     it('an invite for the owner role made by an owner is accepted', async () => {
