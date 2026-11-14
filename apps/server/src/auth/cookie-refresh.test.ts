@@ -1,7 +1,8 @@
 import { session } from '@torch/shared/db/schema';
 import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
-import { createAuthTestApp } from '../test/auth-app.ts';
+import { createApp } from '../app.ts';
+import { createAuthTestApp, testBrand } from '../test/auth-app.ts';
 import { createWorkspaceFixture, withTempDatabase } from '../test/fixtures.ts';
 import { refreshSessionCookie } from './cookie-refresh.ts';
 
@@ -186,6 +187,41 @@ describe.skipIf(!databaseUrl)('refreshSessionCookie', () => {
       );
 
       expect(res.status).toBe(404);
+      const header = res.headers.getSetCookie()[0] ?? '';
+      expect(header).toContain(`sid=${cookieValue};`);
+      expect(maxAge(header)).toBe(30 * 86_400);
+    });
+  });
+
+  it('through the real app: the shape proxy, which streams its body, refreshes too', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `member-${unique()}@example.test`;
+      const f = await createWorkspaceFixture(db.orm, { email: { member: email } });
+      const t = createAuthTestApp(db);
+      const { cookie, cookieValue } = await t.signIn(email);
+      const app = createApp({
+        brand: testBrand,
+        db,
+        config: { appUrl: t.appUrl, trustProxy: false },
+        auth: t.auth,
+        electric: { url: 'http://electric.test:3000', secret: 'test-secret' },
+        fetchUpstream: async () =>
+          new Response('[{"headers":{"control":"up-to-date"}}]', {
+            status: 200,
+            headers: { 'content-type': 'application/json', 'electric-handle': 'h-1' },
+          }),
+        now: t.now,
+      });
+      t.clock.current = new Date(t.clock.current.getTime() + 2 * HOUR);
+
+      const res = await app.fetch(
+        new Request(`${t.origin}/api/sync/w/${f.workspaceId}/teams?offset=-1`, {
+          headers: { cookie },
+        }),
+      );
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain('up-to-date');
       const header = res.headers.getSetCookie()[0] ?? '';
       expect(header).toContain(`sid=${cookieValue};`);
       expect(maxAge(header)).toBe(30 * 86_400);
