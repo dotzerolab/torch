@@ -27,7 +27,7 @@ import {
   type Role,
   type TeamAccess,
 } from '@torch/shared/permissions';
-import { and, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNull, notExists, sql } from 'drizzle-orm';
 import { recordAudit } from '../audit/log.ts';
 import { createSessionsForMembers, revokeSessions } from '../auth/sessions.ts';
 import { generateToken, hashToken, isWellFormedToken } from '../auth/tokens.ts';
@@ -537,6 +537,30 @@ async function availableHandle(tx: Tx, workspaceId: string, base: string): Promi
   throw new Error('no free handle');
 }
 
+/** Which of these teams are private and have no member left. Call after the memberships were changed. */
+async function emptiedPrivateTeams(
+  tx: Tx,
+  workspaceId: string,
+  teamIds: readonly string[],
+): Promise<string[]> {
+  if (teamIds.length === 0) return [];
+  const rows = await tx
+    .select({ id: team.id })
+    .from(team)
+    .where(
+      and(
+        eq(team.workspaceId, workspaceId),
+        inArray(team.id, [...teamIds]),
+        eq(team.private, true),
+        notExists(
+          tx.select({ one: sql`1` }).from(teamMember).where(eq(teamMember.teamId, team.id)),
+        ),
+      ),
+    )
+    .orderBy(team.id);
+  return rows.map((row) => row.id);
+}
+
 /**
  * Accepts an invite: burns the token with one conditional UPDATE (of any number of concurrent calls exactly one
  * gets the row), then in the same transaction creates the member (or reactivates a deactivated one with the same
@@ -612,6 +636,7 @@ export async function acceptInvite(
       if (!allowed) throw new Abort(refuse('invite_invalid', 400));
 
       let memberId: string;
+      let droppedTeamIds: string[] = [];
       const reactivated = existing !== undefined;
       if (existing) {
         // The same row, the invited role. Team memberships become exactly the invited teams (least privilege: a
@@ -621,11 +646,11 @@ export async function acceptInvite(
           .update(member)
           .set({ deactivatedAt: null, role: consumed.role, name })
           .where(and(eq(member.workspaceId, workspaceId), eq(member.id, existing.id)));
-        await tx
+        const dropped = await tx
           .delete(teamMember)
-          .where(
-            and(eq(teamMember.workspaceId, workspaceId), eq(teamMember.memberId, existing.id)),
-          );
+          .where(and(eq(teamMember.workspaceId, workspaceId), eq(teamMember.memberId, existing.id)))
+          .returning({ teamId: teamMember.teamId });
+        droppedTeamIds = dropped.map((row) => row.teamId);
         memberId = existing.id;
       } else {
         const [created] = await tx
@@ -675,6 +700,19 @@ export async function acceptInvite(
           targetId: memberId,
           metadata: { role: consumed.role, via: 'invite' },
         });
+        // Replacing the memberships can leave a private team with nobody in it. That is accepted (the invite grants
+        // exactly what it names; the team stays reachable for owners and admins through the private-team directory),
+        // but it is never silent: one entry per such team.
+        for (const teamId of await emptiedPrivateTeams(tx, workspaceId, droppedTeamIds)) {
+          await recordAudit(tx, {
+            workspaceId,
+            actorMemberId: memberId,
+            action: 'team.emptied',
+            targetType: 'team',
+            targetId: teamId,
+            metadata: { member_id: memberId, via: 'invite' },
+          });
+        }
       }
 
       // Signing in with an invite is signing in with the address it was mailed to: every workspace where that

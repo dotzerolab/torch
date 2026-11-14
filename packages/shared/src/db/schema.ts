@@ -49,6 +49,7 @@ export const AUDIT_ACTIONS = [
   'team.member_added',
   'team.member_removed',
   'team.admin_joined',
+  'team.emptied',
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

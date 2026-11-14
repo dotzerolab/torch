@@ -16,8 +16,15 @@ import { describe, expect, it } from 'vitest';
 import { createSessionsForMembers, listSessionWorkspaces } from '../auth/sessions.ts';
 import { generateToken, hashToken } from '../auth/tokens.ts';
 import type { Db } from '../db.ts';
+import { setMemberActive } from '../members/service.ts';
 import { loadActor } from '../permissions/load-actor.ts';
-import { actorOf } from '../test/admin-helpers.ts';
+import {
+  addTeamMember,
+  createTeam as createTeamService,
+  listPrivateTeamDirectory,
+  removeTeamMember,
+} from '../teams/service.ts';
+import { actorOf, successOf, txidOf } from '../test/admin-helpers.ts';
 import { addMember, createWorkspaceFixture } from '../test/fixtures.ts';
 import { useSharedDatabase } from '../test/shared-database.ts';
 import type { ServiceResult } from '../util/result.ts';
@@ -1529,6 +1536,86 @@ describe.skipIf(!databaseUrl)('invite service (Postgres)', () => {
       expect(accepted.memberId).toBe(before.id);
       const [back] = await db.orm.select().from(member).where(eq(member.id, before.id));
       expect(back).toMatchObject({ role: 'member', deactivatedAt: null });
+    });
+
+    describe('a returning member and the private teams they were in', () => {
+      /** A private team whose only member is a deactivated returning member, plus an invite to that member's address. */
+      async function soloTeam(s: Awaited<ReturnType<typeof setup>>, key: string) {
+        const { db, f, owner } = s;
+        const returning = await addMember(db.orm, f.workspaceId, 'member');
+        const created = successOf(
+          await createTeamService(db.orm, owner, { key, name: `Team ${key}`, private: true }),
+        );
+        txidOf(await addTeamMember(db.orm, owner, created.teamId, returning.id));
+        txidOf(await removeTeamMember(db.orm, owner, created.teamId, f.members.owner.id));
+        txidOf(await setMemberActive(db.orm, owner, returning.id, false));
+        return { returning, teamId: created.teamId };
+      }
+
+      it('may leave a private team with nobody in it: audited, and the team stays reachable through the directory', async () => {
+        const s = await setup();
+        const { db, f, owner } = s;
+        const { returning, teamId } = await soloTeam(s, 'SOLO');
+        const now = new Date();
+        const created = value(
+          await createInvite(db.orm, owner, input({ email: returning.email, teamIds: [] }), {
+            now,
+          }),
+        );
+
+        const accepted = value(
+          await acceptInvite(db.orm, { token: created.token, name: 'Back', now, userAgent: null }),
+        );
+
+        // Decision: the invite replaces the memberships (least privilege) even when that empties a private team.
+        expect(accepted.memberId).toBe(returning.id);
+        expect(await db.orm.select().from(teamMember).where(eq(teamMember.teamId, teamId))).toEqual(
+          [],
+        );
+        const emptied = await auditRows(db, f.workspaceId, 'team.emptied');
+        expect(emptied).toHaveLength(1);
+        expect(emptied[0]).toMatchObject({
+          actorMemberId: returning.id,
+          targetType: 'team',
+          targetId: teamId,
+          metadata: { member_id: returning.id, via: 'invite' },
+        });
+        // Recoverable: an owner finds it in the private-team directory and joins it again.
+        const directory = successOf(await listPrivateTeamDirectory(db.orm, owner));
+        expect(directory.find((row) => row.id === teamId)).toMatchObject({
+          memberCount: 0,
+          isMember: false,
+        });
+        txidOf(await addTeamMember(db.orm, owner, teamId, f.members.owner.id));
+        expect(
+          await db.orm.select().from(teamMember).where(eq(teamMember.teamId, teamId)),
+        ).toHaveLength(1);
+      });
+
+      it('writes nothing when the private team keeps somebody, and nothing for a public team they leave', async () => {
+        const s = await setup();
+        const { db, f, owner } = s;
+        const { returning, teamId } = await soloTeam(s, 'KEEP');
+        txidOf(await addTeamMember(db.orm, owner, teamId, f.members.owner.id));
+        await db.orm
+          .insert(teamMember)
+          .values({ workspaceId: f.workspaceId, teamId: f.teams.eng.id, memberId: returning.id });
+        const now = new Date();
+        const created = value(
+          await createInvite(db.orm, owner, input({ email: returning.email }), { now }),
+        );
+
+        value(
+          await acceptInvite(db.orm, { token: created.token, name: 'Back', now, userAgent: null }),
+        );
+
+        expect(await auditRows(db, f.workspaceId, 'team.emptied')).toEqual([]);
+        const left = await db.orm
+          .select({ teamId: teamMember.teamId })
+          .from(teamMember)
+          .where(eq(teamMember.memberId, returning.id));
+        expect(left).toEqual([]);
+      });
     });
 
     describe('the inviter must still manage every invited team', () => {
