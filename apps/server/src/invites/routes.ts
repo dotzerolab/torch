@@ -14,15 +14,12 @@ import {
 import type { Actor, Role } from '@torch/shared/permissions';
 import type { Context } from 'hono';
 import { Hono } from 'hono';
-import { setCookie } from 'hono/cookie';
-import { clientIp, createRateLimiter } from '../auth/rate-limit.ts';
+import { clientIp, clientKey, createRateLimiter } from '../auth/rate-limit.ts';
 import {
-  isSecureUrl,
+  buildSessionCookie,
   listSessionWorkspaces,
   liveSessionExpiry,
   readSessionToken,
-  revokeSessions,
-  sessionCookieName,
 } from '../auth/sessions.ts';
 import type { Orm } from '../db.ts';
 import type { Mailer, MailMessage } from '../mail/mailer.ts';
@@ -50,7 +47,7 @@ export type InviteRouteDeps = {
   now?: () => Date;
 };
 
-/** Public routes: calls per client address and window (preview and accept share one budget). */
+/** Public routes: calls per client (one address, or one /64 for IPv6) and window; preview and accept share one budget. */
 const PUBLIC_LIMIT = 20;
 const PUBLIC_WINDOW_MS = 15 * 60 * 1000;
 
@@ -108,8 +105,6 @@ async function readBody<T>(
 export function createInviteRoutes(deps: InviteRouteDeps): Hono {
   const now = deps.now ?? (() => new Date());
   const baseUrl = deps.appUrl.replace(/\/+$/, '');
-  const cookieName = sessionCookieName(deps.appUrl);
-  const secure = isSecureUrl(deps.appUrl);
   const limiter = createRateLimiter({
     limit: PUBLIC_LIMIT,
     windowMs: PUBLIC_WINDOW_MS,
@@ -224,7 +219,7 @@ export function createInviteRoutes(deps: InviteRouteDeps): Hono {
   // ---- public ----
 
   function limited(c: Context): Response | null {
-    const verdict = limiter.hit(clientIp(c.req.raw, c.env, deps.trustProxy));
+    const verdict = limiter.hit(clientKey(clientIp(c.req.raw, c.env, deps.trustProxy)));
     if (verdict.allowed) return null;
     return c.json({ error: 'rate_limited', message: MESSAGES.rate_limited }, 429, {
       ...NO_STORE,
@@ -251,27 +246,22 @@ export function createInviteRoutes(deps: InviteRouteDeps): Hono {
 
     const at = now();
     const userAgent = c.req.header('user-agent')?.slice(0, 255) ?? null;
+    // Like a sign-in link: the cookie the browser already holds stops working, in the same transaction that opens
+    // the new sessions (a refused invite changes nothing).
     const result = await acceptInvite(deps.orm, {
       token: body.data.token,
       name: body.data.name,
       now: at,
       userAgent,
+      revokeSessionToken: readSessionToken(c.req.raw, deps.appUrl),
     });
     if (!result.ok) return failure(c, result.code, result.status);
-
-    // Like a sign-in link: the cookie it replaces stops working.
-    const previous = readSessionToken(c.req.raw, deps.appUrl);
-    if (previous) await revokeSessions(deps.orm, previous, at);
 
     const { sessionToken } = result.value;
     const expiresAt = await liveSessionExpiry(deps.orm, sessionToken, at);
     if (expiresAt) {
-      setCookie(c, cookieName, sessionToken, {
-        httpOnly: true,
-        secure,
-        sameSite: 'Lax',
-        path: '/',
-        maxAge: Math.max(1, Math.floor((expiresAt.getTime() - at.getTime()) / 1000)),
+      c.header('Set-Cookie', buildSessionCookie(deps.appUrl, sessionToken, expiresAt, at), {
+        append: true,
       });
     }
     const workspaces = await listSessionWorkspaces(deps.orm, sessionToken, at);

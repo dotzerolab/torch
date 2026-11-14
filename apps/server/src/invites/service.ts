@@ -26,7 +26,7 @@ import {
 } from '@torch/shared/permissions';
 import { and, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import { recordAudit } from '../audit/log.ts';
-import { createSessionsForMembers } from '../auth/sessions.ts';
+import { createSessionsForMembers, revokeSessions } from '../auth/sessions.ts';
 import { generateToken, hashToken, isWellFormedToken } from '../auth/tokens.ts';
 import type { Orm, Tx } from '../db.ts';
 import { currentTxid } from '../mutations/txid.ts';
@@ -463,12 +463,22 @@ async function availableHandle(tx: Tx, workspaceId: string, base: string): Promi
  * email, keeping their id), puts them in the invited teams, audits it and opens one session for every workspace
  * where that email is an active member, all behind one cookie token. Any refusal after the burn rolls the burn back,
  * so a failed attempt never uses the invite up.
+ *
+ * `revokeSessionToken` is the cookie the browser already holds: like a sign-in link, its sessions are revoked in the
+ * same transaction that opens the new ones, so accepting an invite never leaves the old cookie alive, and a refusal
+ * leaves it signed in.
  */
 export async function acceptInvite(
   orm: Orm,
-  input: { token: string; name: string; now: Date; userAgent: string | null },
+  input: {
+    token: string;
+    name: string;
+    now: Date;
+    userAgent: string | null;
+    revokeSessionToken?: string | null;
+  },
 ): Promise<ServiceResult<{ sessionToken: string; workspaceId: string; memberId: string }>> {
-  const { token, now, userAgent } = input;
+  const { token, now, userAgent, revokeSessionToken } = input;
   const name = input.name.trim();
   if (name.length < 1 || name.length > MAX_NAME_LENGTH) return refuse('invalid_input', 400);
   if (!isWellFormedToken(token)) return refuse('invite_invalid', 400);
@@ -587,6 +597,7 @@ export async function acceptInvite(
         .from(member)
         .where(and(eq(member.email, consumed.email), isNull(member.deactivatedAt)));
       const sessionToken = await createSessionsForMembers(tx, active, { now, userAgent });
+      if (revokeSessionToken) await revokeSessions(tx, revokeSessionToken, now);
       return ok({ sessionToken, workspaceId, memberId });
     });
   } catch (error) {

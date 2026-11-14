@@ -3,7 +3,7 @@ import { invite, session, workspace } from '@torch/shared/db/schema';
 import { eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../app.ts';
-import { createSessionsForMembers } from '../auth/sessions.ts';
+import { buildSessionCookie, createSessionsForMembers, SESSION_TTL_MS } from '../auth/sessions.ts';
 import type { Db } from '../db.ts';
 import { createAuthTestApp, testBrand } from '../test/auth-app.ts';
 import { addMember, createWorkspaceFixture, type WorkspaceFixture } from '../test/fixtures.ts';
@@ -607,6 +607,50 @@ describe.skipIf(!databaseUrl)('invite routes (Postgres)', () => {
       expect(actor).not.toBeNull();
     });
 
+    it.each(['http://app.example.test', 'https://app.example.test'])(
+      'the sign-in cookie is the one a sign-in link sets: same builder, same attributes (%s)',
+      async (appUrl) => {
+        const s = await setup({ appUrl });
+        const at = s.t.now();
+        const created = await createViaApi(s, {});
+
+        const res = await s.t.post('/api/invites/accept', {
+          token: created.token,
+          name: 'Same Cookie',
+        });
+
+        const header = res.headers.getSetCookie()[0] ?? '';
+        const token = /^(?:__Host-)?sid=([A-Za-z0-9_-]{43});/.exec(header)?.[1] ?? '';
+        expect(token).not.toBe('');
+        expect(header).toBe(
+          buildSessionCookie(appUrl, token, new Date(at.getTime() + SESSION_TTL_MS), at),
+        );
+      },
+    );
+
+    it('a refused accept after the burn (already a member) leaves the previous cookie signed in and the invite usable', async () => {
+      const s = await setup();
+      const email = `race-${unique()}@example.test`;
+      const created = await createViaApi(s, { email });
+      await addMember(s.db.orm, s.f.workspaceId, 'member', { email });
+
+      const res = await s.t.post(
+        '/api/invites/accept',
+        { token: created.token, name: 'Late Comer' },
+        { cookie: s.member },
+      );
+
+      expect(res.status).toBe(409);
+      expect(res.headers.getSetCookie()).toHaveLength(0);
+      const actor = await s.t.auth.resolveActor(
+        new Request(`${s.t.origin}/x`, { headers: { cookie: s.member } }),
+        s.f.workspaceId,
+      );
+      expect(actor).not.toBeNull();
+      const [row] = await s.db.orm.select().from(invite).where(eq(invite.id, created.inviteId));
+      expect(row?.acceptedAt).toBeNull();
+    });
+
     it('the 21st public call from one address in 15 minutes is 429 with Retry-After; other addresses and the signed-in routes are not affected', async () => {
       const s = await setup();
       const { t } = s;
@@ -643,6 +687,36 @@ describe.skipIf(!databaseUrl)('invite routes (Postgres)', () => {
       t.clock.current = new Date(t.clock.current.getTime() + 16 * MINUTE);
       const later = await t.post('/api/invites/preview', { token: 'a'.repeat(43) }, { ip });
       expect(later.status).toBe(400);
+    });
+
+    it('the public limit keys an IPv6 client by its /64: rotating addresses inside it share one budget, another /64 is unaffected', async () => {
+      const s = await setup();
+      const ask = (ip: string) =>
+        s.t.post('/api/invites/preview', { token: 'a'.repeat(43) }, { ip });
+
+      for (let i = 1; i <= 20; i++) {
+        expect((await ask(`2001:db8:1:2:${i}:aaaa:bbbb:cccc`)).status, `call ${i}`).toBe(400);
+      }
+
+      expect((await ask('2001:db8:1:2:ffff::1')).status).toBe(429);
+      expect((await ask('2001:db8:1:3::1')).status).toBe(400);
+    });
+
+    it('an IPv4-mapped IPv6 socket address shares the budget of its IPv4 address, on accept too', async () => {
+      const s = await setup();
+      const preview = (ip: string) =>
+        s.t.post('/api/invites/preview', { token: 'a'.repeat(43) }, { ip });
+
+      for (let i = 1; i <= 10; i++) expect((await preview('203.0.113.50')).status).toBe(400);
+      for (let i = 1; i <= 10; i++) expect((await preview('::ffff:203.0.113.50')).status).toBe(400);
+
+      expect((await preview('203.0.113.50')).status).toBe(429);
+      const accept = await s.t.post(
+        '/api/invites/accept',
+        { token: 'a'.repeat(43), name: 'X' },
+        { ip: '::ffff:203.0.113.50' },
+      );
+      expect(accept.status).toBe(429);
     });
 
     it('a body over 16 KB is 413', async () => {

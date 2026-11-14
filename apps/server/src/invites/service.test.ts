@@ -12,7 +12,7 @@ import type { InviteCreateInput } from '@torch/shared/mutations/admin';
 import type { Actor } from '@torch/shared/permissions';
 import { and, asc, eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
-import { listSessionWorkspaces } from '../auth/sessions.ts';
+import { createSessionsForMembers, listSessionWorkspaces } from '../auth/sessions.ts';
 import { generateToken, hashToken } from '../auth/tokens.ts';
 import type { Db } from '../db.ts';
 import { loadActor } from '../permissions/load-actor.ts';
@@ -1000,6 +1000,108 @@ describe.skipIf(!databaseUrl)('invite service (Postgres)', () => {
           })
         ).ok,
       ).toBe(true);
+    });
+
+    it('revokes every session of the previous cookie, in all its workspaces, and leaves the new ones live', async () => {
+      const s = await setup();
+      const { db, f } = s;
+      const other = await createWorkspaceFixture(db.orm);
+      const now = new Date();
+      const previous = await db.orm.transaction((tx) =>
+        createSessionsForMembers(
+          tx,
+          [
+            { workspaceId: f.workspaceId, memberId: f.members.member.id },
+            { workspaceId: other.workspaceId, memberId: other.members.member.id },
+          ],
+          { now, userAgent: null },
+        ),
+      );
+      const created = await pendingInvite(s, {}, now);
+
+      const accepted = value(
+        await acceptInvite(db.orm, {
+          token: created.token,
+          name: 'Fresh Start',
+          now,
+          userAgent: null,
+          revokeSessionToken: previous,
+        }),
+      );
+
+      const old = await db.orm
+        .select()
+        .from(session)
+        .where(eq(session.tokenHash, hashToken(previous)));
+      expect(old).toHaveLength(2);
+      for (const row of old) expect(row.revokedAt?.getTime()).toBe(now.getTime());
+      const fresh = await db.orm
+        .select()
+        .from(session)
+        .where(eq(session.tokenHash, hashToken(accepted.sessionToken)));
+      expect(fresh).toHaveLength(1);
+      expect(fresh[0]?.revokedAt).toBeNull();
+    });
+
+    it('a refusal after the burn rolls everything back: the previous cookie stays live and the invite stays pending', async () => {
+      const s = await setup();
+      const { db, f } = s;
+      const email = `race-${unique()}@example.test`;
+      const now = new Date();
+      const previous = await db.orm.transaction((tx) =>
+        createSessionsForMembers(
+          tx,
+          [{ workspaceId: f.workspaceId, memberId: f.members.member.id }],
+          { now, userAgent: null },
+        ),
+      );
+      const created = await pendingInvite(s, { email }, now);
+      await addMember(db.orm, f.workspaceId, 'member', { email });
+
+      const refused = await acceptInvite(db.orm, {
+        token: created.token,
+        name: 'Late Comer',
+        now,
+        userAgent: null,
+        revokeSessionToken: previous,
+      });
+
+      expect(refusal(refused)).toEqual({ code: 'already_member', status: 409 });
+      const old = await db.orm
+        .select()
+        .from(session)
+        .where(eq(session.tokenHash, hashToken(previous)));
+      expect(old).toHaveLength(1);
+      expect(old[0]?.revokedAt).toBeNull();
+      expect((await inviteRow(db, created.inviteId)).acceptedAt).toBeNull();
+    });
+
+    it('a link that is not valid leaves the previous cookie live', async () => {
+      const s = await setup();
+      const { db, f } = s;
+      const now = new Date();
+      const previous = await db.orm.transaction((tx) =>
+        createSessionsForMembers(
+          tx,
+          [{ workspaceId: f.workspaceId, memberId: f.members.member.id }],
+          { now, userAgent: null },
+        ),
+      );
+
+      const refused = await acceptInvite(db.orm, {
+        token: generateToken(),
+        name: 'Nobody',
+        now,
+        userAgent: null,
+        revokeSessionToken: previous,
+      });
+
+      expect(refusal(refused)).toEqual({ code: 'invite_invalid', status: 400 });
+      const old = await db.orm
+        .select()
+        .from(session)
+        .where(eq(session.tokenHash, hashToken(previous)));
+      expect(old[0]?.revokedAt).toBeNull();
     });
 
     it('a deactivated member with that email is reactivated with the invited role, keeps their id, and gets exactly the invited teams', async () => {
