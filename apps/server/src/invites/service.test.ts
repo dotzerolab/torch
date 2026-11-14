@@ -5,6 +5,7 @@ import {
   inviteTeam,
   member,
   session,
+  team,
   teamMember,
   workspace,
 } from '@torch/shared/db/schema';
@@ -16,6 +17,7 @@ import { createSessionsForMembers, listSessionWorkspaces } from '../auth/session
 import { generateToken, hashToken } from '../auth/tokens.ts';
 import type { Db } from '../db.ts';
 import { loadActor } from '../permissions/load-actor.ts';
+import { actorOf } from '../test/admin-helpers.ts';
 import { addMember, createWorkspaceFixture } from '../test/fixtures.ts';
 import { useSharedDatabase } from '../test/shared-database.ts';
 import type { ServiceResult } from '../util/result.ts';
@@ -393,6 +395,51 @@ describe.skipIf(!databaseUrl)('invite service (Postgres)', () => {
       }
     });
 
+    it('an admin demoted or deactivated while the request was in flight cannot create an invite (403)', async () => {
+      const { db, f, admin } = await setup();
+      const now = new Date();
+
+      // `admin` was resolved before these writes, exactly like a request that is already on its way.
+      await db.orm.update(member).set({ role: 'member' }).where(eq(member.id, f.members.admin.id));
+      const demoted = await createInvite(db.orm, admin, input(), { now });
+      await db.orm
+        .update(member)
+        .set({ role: 'admin', deactivatedAt: new Date() })
+        .where(eq(member.id, f.members.admin.id));
+      const gone = await createInvite(db.orm, admin, input(), { now });
+
+      expect(refusal(demoted)).toEqual({ code: 'forbidden', status: 403 });
+      expect(refusal(gone)).toEqual({ code: 'forbidden', status: 403 });
+      expect(
+        await db.orm.select().from(invite).where(eq(invite.workspaceId, f.workspaceId)),
+      ).toEqual([]);
+      expect(await auditRows(db, f.workspaceId, 'invite.created')).toEqual([]);
+    });
+
+    it('a team the actor left while the request was in flight is 404, like a team they never saw', async () => {
+      const { db, f } = await setup();
+      await db.orm.insert(teamMember).values({
+        workspaceId: f.workspaceId,
+        teamId: f.teams.ops.id,
+        memberId: f.members.admin.id,
+      });
+      const adminInOps = await actorOf(db, f.workspaceId, f.members.admin.id);
+      await db.orm
+        .delete(teamMember)
+        .where(
+          and(eq(teamMember.teamId, f.teams.ops.id), eq(teamMember.memberId, f.members.admin.id)),
+        );
+
+      const refused = await createInvite(
+        db.orm,
+        adminInOps,
+        input({ role: 'guest', teamIds: [f.teams.ops.id] }),
+        { now: new Date() },
+      );
+
+      expect(refusal(refused)).toEqual({ code: 'not_found', status: 404 });
+    });
+
     it('a second pending invite for the same email is 409 invite_pending, another workspace is fine', async () => {
       const { db, owner } = await setup();
       const other = await setup();
@@ -544,6 +591,20 @@ describe.skipIf(!databaseUrl)('invite service (Postgres)', () => {
   });
 
   describe('resendInvite', () => {
+    it('an admin demoted while the request was in flight cannot resend (403) and the invite is untouched', async () => {
+      const { db, f, admin } = await setup();
+      const now = new Date();
+      const created = value(await createInvite(db.orm, admin, input(), { now }));
+      const before = await inviteRow(db, created.inviteId);
+      await db.orm.update(member).set({ role: 'member' }).where(eq(member.id, f.members.admin.id));
+
+      const refused = await resendInvite(db.orm, admin, created.inviteId, { now });
+
+      expect(refusal(refused)).toEqual({ code: 'forbidden', status: 403 });
+      expect(await inviteRow(db, created.inviteId)).toEqual(before);
+      expect(await auditRows(db, f.workspaceId, 'invite.resent')).toEqual([]);
+    });
+
     it('gives the same row a new token and a fresh 7 days, and the old link is dead', async () => {
       const { db, f, owner } = await setup();
       const email = `again-${unique()}@example.test`;
@@ -643,6 +704,22 @@ describe.skipIf(!databaseUrl)('invite service (Postgres)', () => {
   });
 
   describe('revokeInvite', () => {
+    it('an admin deactivated while the request was in flight cannot revoke (403) and the invite stays pending', async () => {
+      const { db, f, admin } = await setup();
+      const now = new Date();
+      const created = value(await createInvite(db.orm, admin, input(), { now }));
+      await db.orm
+        .update(member)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(member.id, f.members.admin.id));
+
+      const refused = await revokeInvite(db.orm, admin, created.inviteId, { now });
+
+      expect(refusal(refused)).toEqual({ code: 'forbidden', status: 403 });
+      expect((await inviteRow(db, created.inviteId)).revokedAt).toBeNull();
+      expect(await auditRows(db, f.workspaceId, 'invite.revoked')).toEqual([]);
+    });
+
     it('kills the link for preview and accept, and answers a txid', async () => {
       const { db, f, owner } = await setup();
       const now = new Date();
@@ -1452,6 +1529,125 @@ describe.skipIf(!databaseUrl)('invite service (Postgres)', () => {
       expect(accepted.memberId).toBe(before.id);
       const [back] = await db.orm.select().from(member).where(eq(member.id, before.id));
       expect(back).toMatchObject({ role: 'member', deactivatedAt: null });
+    });
+
+    describe('the inviter must still manage every invited team', () => {
+      async function inviteIntoOps(s: Awaited<ReturnType<typeof setup>>, now: Date) {
+        const { db, f } = s;
+        await db.orm.insert(teamMember).values({
+          workspaceId: f.workspaceId,
+          teamId: f.teams.ops.id,
+          memberId: f.members.admin.id,
+        });
+        const adminInOps = await actorOf(db, f.workspaceId, f.members.admin.id);
+        return value(
+          await createInvite(db.orm, adminInOps, input({ teamIds: [f.teams.ops.id] }), { now }),
+        );
+      }
+
+      it('an admin who is still in the private team can hand out an invite into it', async () => {
+        const s = await setup();
+        const now = new Date();
+        const created = await inviteIntoOps(s, now);
+
+        const accepted = value(
+          await acceptInvite(s.db.orm, {
+            token: created.token,
+            name: 'Ops New',
+            now,
+            userAgent: null,
+          }),
+        );
+
+        const teams = await s.db.orm
+          .select({ teamId: teamMember.teamId })
+          .from(teamMember)
+          .where(eq(teamMember.memberId, accepted.memberId));
+        expect(teams).toEqual([{ teamId: s.f.teams.ops.id }]);
+      });
+
+      it('an inviter who left the private team since is invite_invalid: no member, the invite stays pending, preview is null', async () => {
+        const s = await setup();
+        const { db, f } = s;
+        const now = new Date();
+        const created = await inviteIntoOps(s, now);
+        await db.orm
+          .delete(teamMember)
+          .where(
+            and(eq(teamMember.teamId, f.teams.ops.id), eq(teamMember.memberId, f.members.admin.id)),
+          );
+
+        const refused = await acceptInvite(db.orm, {
+          token: created.token,
+          name: 'Ops New',
+          now,
+          userAgent: null,
+        });
+
+        expect(refusal(refused)).toEqual({ code: 'invite_invalid', status: 400 });
+        expect(await previewInvite(db.orm, created.token, now)).toBeNull();
+        expect((await inviteRow(db, created.inviteId)).acceptedAt).toBeNull();
+        const row = await inviteRow(db, created.inviteId);
+        const members = await db.orm
+          .select({ id: member.id })
+          .from(member)
+          .where(and(eq(member.workspaceId, f.workspaceId), eq(member.email, row.email)));
+        expect(members).toEqual([]);
+      });
+
+      it('a team that turned private after the invite, with the inviter outside it, is invite_invalid', async () => {
+        const s = await setup();
+        const { db, f } = s;
+        const now = new Date();
+        // The admin is not a member of ENG (it is public, so they can still hand out invites into it).
+        await db.orm
+          .delete(teamMember)
+          .where(
+            and(eq(teamMember.teamId, f.teams.eng.id), eq(teamMember.memberId, f.members.admin.id)),
+          );
+        const adminOutside = await actorOf(db, f.workspaceId, f.members.admin.id);
+        const created = value(
+          await createInvite(db.orm, adminOutside, input({ teamIds: [f.teams.eng.id] }), { now }),
+        );
+        await db.orm.update(team).set({ private: true }).where(eq(team.id, f.teams.eng.id));
+
+        const refused = await acceptInvite(db.orm, {
+          token: created.token,
+          name: 'Eng New',
+          now,
+          userAgent: null,
+        });
+
+        expect(refusal(refused)).toEqual({ code: 'invite_invalid', status: 400 });
+        expect((await inviteRow(db, created.inviteId)).acceptedAt).toBeNull();
+      });
+
+      it('one team out of two that the inviter cannot manage refuses the whole invite', async () => {
+        const s = await setup();
+        const { db, f } = s;
+        const now = new Date();
+        const created = await inviteIntoOps(s, now);
+        await db.orm.insert(inviteTeam).values({
+          workspaceId: f.workspaceId,
+          inviteId: created.inviteId,
+          teamId: f.teams.eng.id,
+        });
+        await db.orm.update(team).set({ private: true }).where(eq(team.id, f.teams.eng.id));
+        await db.orm
+          .delete(teamMember)
+          .where(
+            and(eq(teamMember.teamId, f.teams.eng.id), eq(teamMember.memberId, f.members.admin.id)),
+          );
+
+        const refused = await acceptInvite(db.orm, {
+          token: created.token,
+          name: 'Both New',
+          now,
+          userAgent: null,
+        });
+
+        expect(refusal(refused)).toEqual({ code: 'invite_invalid', status: 400 });
+      });
     });
 
     it('an invite for the owner role made by an owner is accepted', async () => {

@@ -3,8 +3,10 @@
 // per call, the audit row in the same transaction. The link token is 32 random bytes; only its SHA-256 is stored.
 //
 // Lock order, shared with the member and team services: the workspace row first, then member rows. Invite rows are
-// locked only after the workspace row (create, accept) or alone (resend, revoke), so no two paths wait on each
-// other in a circle.
+// always locked after the workspace row (create, resend, revoke, accept), so no two paths wait on each other in a
+// circle. Every function that acts for someone decides on the actor as the database says it once it holds the
+// workspace lock (`currentActor`), not on the one its request resolved earlier: a demoted or deactivated admin whose
+// request was already in flight changes nothing.
 import {
   invite,
   inviteTeam,
@@ -23,6 +25,7 @@ import {
   canManageMembers,
   canManageTeamMembership,
   type Role,
+  type TeamAccess,
 } from '@torch/shared/permissions';
 import { and, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import { recordAudit } from '../audit/log.ts';
@@ -30,6 +33,7 @@ import { createSessionsForMembers, revokeSessions } from '../auth/sessions.ts';
 import { generateToken, hashToken, isWellFormedToken } from '../auth/tokens.ts';
 import type { Orm, Tx } from '../db.ts';
 import { currentTxid } from '../mutations/txid.ts';
+import { currentActor } from '../permissions/current-actor.ts';
 import type { ServiceResult } from '../util/result.ts';
 import { isUuid } from '../util/uuid.ts';
 
@@ -76,24 +80,77 @@ async function lockWorkspace(tx: Tx, workspaceId: string): Promise<void> {
 
 const isPending = and(isNull(invite.acceptedAt), isNull(invite.revokedAt));
 
+/** Anything with `select`: the Orm and a transaction both. */
+type Reader = Pick<Orm, 'select'>;
+
 /**
- * May the member who made an invite still hand out its role? An invite outlives its maker for up to 7 days; if they
- * were deactivated or lost the right since, the link must not open an account for them.
+ * May the member who made an invite still hand it out? An invite outlives its maker for up to 7 days: if they were
+ * deactivated or lost a right since, the link must not open an account for them. They need the right to manage
+ * members and to grant the invited role; when the address belongs to a deactivated member the invite brings back,
+ * the right to grant the role that person has now (an admin never reactivates an admin or an owner); and the right to
+ * manage the membership of EVERY invited team (a private team the inviter left, or that turned private without them,
+ * no longer counts). `teams` and `inviterTeamIds` are only needed for the last rule.
  */
-function inviterMayGrant(
-  workspaceId: string,
-  inviterId: string,
-  inviter: { role: MemberRole; deactivatedAt: Date | null } | undefined,
-  role: Role,
-): boolean {
+function inviterMayHandOut(hand: {
+  workspaceId: string;
+  inviterId: string;
+  inviter: { role: MemberRole; deactivatedAt: Date | null } | undefined;
+  role: Role;
+  returningRole?: MemberRole;
+  teams?: readonly TeamAccess[];
+  inviterTeamIds?: ReadonlySet<string>;
+}): boolean {
+  const { inviter } = hand;
   if (!inviter || inviter.deactivatedAt) return false;
   const asActor: Actor = {
-    workspaceId,
-    memberId: inviterId,
+    workspaceId: hand.workspaceId,
+    memberId: hand.inviterId,
     role: inviter.role,
-    teamIds: new Set(),
+    teamIds: hand.inviterTeamIds ?? new Set(),
   };
-  return canManageMembers(asActor) && canGrantRole(asActor, role);
+  if (!canManageMembers(asActor) || !canGrantRole(asActor, hand.role)) return false;
+  if (hand.returningRole && !canGrantRole(asActor, hand.returningRole)) return false;
+  return (hand.teams ?? []).every((row) => canManageTeamMembership(asActor, row));
+}
+
+type InvitedTeam = TeamAccess & { key: string; name: string };
+
+/** The teams an invite adds its person to, by key, and which of them the inviter belongs to. */
+async function loadInvitedTeams(
+  db: Reader,
+  row: { workspaceId: string; id: string; invitedBy: string },
+): Promise<{ teams: InvitedTeam[]; inviterTeamIds: Set<string> }> {
+  const teams = await db
+    .select({
+      id: team.id,
+      workspaceId: team.workspaceId,
+      private: team.private,
+      key: team.key,
+      name: team.name,
+    })
+    .from(inviteTeam)
+    .innerJoin(
+      team,
+      and(eq(team.workspaceId, inviteTeam.workspaceId), eq(team.id, inviteTeam.teamId)),
+    )
+    .where(and(eq(inviteTeam.workspaceId, row.workspaceId), eq(inviteTeam.inviteId, row.id)))
+    .orderBy(team.key);
+  if (teams.length === 0) return { teams, inviterTeamIds: new Set() };
+
+  const memberships = await db
+    .select({ teamId: teamMember.teamId })
+    .from(teamMember)
+    .where(
+      and(
+        eq(teamMember.workspaceId, row.workspaceId),
+        eq(teamMember.memberId, row.invitedBy),
+        inArray(
+          teamMember.teamId,
+          teams.map((t) => t.id),
+        ),
+      ),
+    );
+  return { teams, inviterTeamIds: new Set(memberships.map((m) => m.teamId)) };
 }
 
 // ---- create ----
@@ -120,6 +177,12 @@ export async function createInvite(
 
   return orm.transaction(async (tx) => {
     await lockWorkspace(tx, actor.workspaceId);
+    // The actor as the database says it now: an admin demoted or deactivated since the request resolved them, or who
+    // left a private team, does not invite on their old rights.
+    const current = await currentActor(tx, actor);
+    if (!current || !canManageMembers(current) || !canGrantRole(current, input.role)) {
+      return refuse('forbidden', 403);
+    }
 
     if (teamIds.length > 0) {
       const teams = await tx
@@ -127,8 +190,9 @@ export async function createInvite(
         .from(team)
         .where(and(eq(team.workspaceId, actor.workspaceId), inArray(team.id, teamIds)));
       if (teams.length !== teamIds.length) return refuse('not_found', 404);
-      if (!teams.every((row) => canManageTeamMembership(actor, row)))
+      if (!teams.every((row) => canManageTeamMembership(current, row))) {
         return refuse('not_found', 404);
+      }
     }
 
     const [existing] = await tx
@@ -140,7 +204,7 @@ export async function createInvite(
     // A deactivated member comes back through the invite, with the invited role: that is a reactivation, and it
     // follows the rule of reactivating (`canDeactivateMember`): whoever may not grant the role the person has now
     // (an admin, for a deactivated admin or owner) may not bring them back this way either.
-    if (existing && !canGrantRole(actor, existing.role)) return refuse('forbidden', 403);
+    if (existing && !canGrantRole(current, existing.role)) return refuse('forbidden', 403);
 
     // Row locks: a resend of the same invite waits here and the decision below sees its new expiry.
     const pendingForEmail = await tx
@@ -239,13 +303,17 @@ export async function resendInvite(
   if (!isUuid(inviteId)) return refuse('not_found', 404);
 
   return orm.transaction(async (tx) => {
+    await lockWorkspace(tx, actor.workspaceId);
+    const current = await currentActor(tx, actor);
+    if (!current || !canManageMembers(current)) return refuse('forbidden', 403);
+
     const [row] = await tx
       .select()
       .from(invite)
       .where(and(eq(invite.workspaceId, actor.workspaceId), eq(invite.id, inviteId), isPending))
       .for('update');
     if (!row) return refuse('not_found', 404);
-    if (!canGrantRole(actor, row.role)) return refuse('forbidden', 403);
+    if (!canGrantRole(current, row.role)) return refuse('forbidden', 403);
 
     const token = generateToken();
     await tx
@@ -278,13 +346,17 @@ export async function revokeInvite(
   if (!isUuid(inviteId)) return refuse('not_found', 404);
 
   return orm.transaction(async (tx) => {
+    await lockWorkspace(tx, actor.workspaceId);
+    const current = await currentActor(tx, actor);
+    if (!current || !canManageMembers(current)) return refuse('forbidden', 403);
+
     const [row] = await tx
       .select()
       .from(invite)
       .where(and(eq(invite.workspaceId, actor.workspaceId), eq(invite.id, inviteId)))
       .for('update');
     if (!row || row.acceptedAt) return refuse('not_found', 404);
-    if (!canGrantRole(actor, row.role)) return refuse('forbidden', 403);
+    if (!canGrantRole(current, row.role)) return refuse('forbidden', 403);
 
     if (!row.revokedAt) {
       await tx
@@ -405,28 +477,28 @@ export async function previewInvite(
   const inviter = row.inviterRole
     ? { role: row.inviterRole, deactivatedAt: row.inviterDeactivatedAt }
     : undefined;
-  if (!inviterMayGrant(row.workspaceId, row.invitedBy, inviter, row.role)) return null;
   const [returning] = await orm
     .select({ role: member.role, deactivatedAt: member.deactivatedAt })
     .from(member)
     .where(and(eq(member.workspaceId, row.workspaceId), eq(member.email, row.email)));
-  if (
-    returning?.deactivatedAt &&
-    !inviterMayGrant(row.workspaceId, row.invitedBy, inviter, returning.role)
-  ) {
-    return null;
-  }
+  const { teams, inviterTeamIds } = await loadInvitedTeams(orm, row);
+  const allowed = inviterMayHandOut({
+    workspaceId: row.workspaceId,
+    inviterId: row.invitedBy,
+    inviter,
+    role: row.role,
+    returningRole: returning?.deactivatedAt ? returning.role : undefined,
+    teams,
+    inviterTeamIds,
+  });
+  if (!allowed) return null;
 
-  const teams = await orm
-    .select({ key: team.key, name: team.name })
-    .from(inviteTeam)
-    .innerJoin(
-      team,
-      and(eq(team.workspaceId, inviteTeam.workspaceId), eq(team.id, inviteTeam.teamId)),
-    )
-    .where(and(eq(inviteTeam.workspaceId, row.workspaceId), eq(inviteTeam.inviteId, row.id)))
-    .orderBy(team.key);
-  return { workspaceName: row.workspaceName, email: row.email, role: row.role, teams };
+  return {
+    workspaceName: row.workspaceName,
+    email: row.email,
+    role: row.role,
+    teams: teams.map(({ key, name }) => ({ key, name })),
+  };
 }
 
 /** The names a mail needs besides what the invite holds: the workspace and the member who is inviting. */
@@ -517,9 +589,8 @@ export async function acceptInvite(
         .select({ role: member.role, deactivatedAt: member.deactivatedAt })
         .from(member)
         .where(and(eq(member.workspaceId, workspaceId), eq(member.id, consumed.invitedBy)));
-      if (!inviterMayGrant(workspaceId, consumed.invitedBy, inviter, consumed.role)) {
-        throw new Abort(refuse('invite_invalid', 400));
-      }
+      const handOut = { workspaceId, inviterId: consumed.invitedBy, inviter, role: consumed.role };
+      if (!inviterMayHandOut(handOut)) throw new Abort(refuse('invite_invalid', 400));
 
       const [existing] = await tx
         .select({ id: member.id, role: member.role, deactivatedAt: member.deactivatedAt })
@@ -527,15 +598,22 @@ export async function acceptInvite(
         .where(and(eq(member.workspaceId, workspaceId), eq(member.email, consumed.email)))
         .for('no key update');
 
+      if (existing && !existing.deactivatedAt) throw new Abort(refuse('already_member', 409));
+      // Everything the maker must still be allowed to do: the role (and, for a returning member, the role they have
+      // now) and the membership of every invited team. Teams are read, not locked: a change of the maker's teams
+      // that lands in the next few milliseconds is the same as one made right after the accept.
+      const { teams: invitedTeams, inviterTeamIds } = await loadInvitedTeams(tx, consumed);
+      const allowed = inviterMayHandOut({
+        ...handOut,
+        returningRole: existing?.role,
+        teams: invitedTeams,
+        inviterTeamIds,
+      });
+      if (!allowed) throw new Abort(refuse('invite_invalid', 400));
+
       let memberId: string;
       const reactivated = existing !== undefined;
       if (existing) {
-        if (!existing.deactivatedAt) throw new Abort(refuse('already_member', 409));
-        // The person may have been promoted to admin or owner (and deactivated) since the invite was made: whoever made
-        // it must still be allowed to reactivate that role, exactly as at creation.
-        if (!inviterMayGrant(workspaceId, consumed.invitedBy, inviter, existing.role)) {
-          throw new Abort(refuse('invite_invalid', 400));
-        }
         // The same row, the invited role. Team memberships become exactly the invited teams (least privilege: a
         // returning guest never keeps access this invite does not grant). Deactivation keeps the old rows, so they are
         // deleted before the invited ones go in, in this transaction with the member row locked.
@@ -565,14 +643,10 @@ export async function acceptInvite(
         memberId = created.id;
       }
 
-      const invitedTeams = await tx
-        .select({ teamId: inviteTeam.teamId })
-        .from(inviteTeam)
-        .where(and(eq(inviteTeam.workspaceId, workspaceId), eq(inviteTeam.inviteId, consumed.id)));
       if (invitedTeams.length > 0) {
         await tx
           .insert(teamMember)
-          .values(invitedTeams.map((row) => ({ workspaceId, teamId: row.teamId, memberId })));
+          .values(invitedTeams.map((row) => ({ workspaceId, teamId: row.id, memberId })));
       }
 
       await tx
