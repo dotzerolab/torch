@@ -1,4 +1,9 @@
 {
+  "common.close": "Chiudi",
+  "common.cancel": "Annulla",
+  "common.save": "Salva",
+  "common.loading": "Caricamento…",
+  "common.moreActions": "Altre azioni",
   "app.welcome": "Benvenuto in {brand}",
   "app.loadError": "Impossibile caricare le impostazioni.",
   "auth.email.subject": "Accedi a {brand}",

@@ -1,4 +1,9 @@
 {
+  "common.close": "Close",
+  "common.cancel": "Cancel",
+  "common.save": "Save",
+  "common.loading": "Loading…",
+  "common.moreActions": "More actions",
   "app.welcome": "Welcome to {brand}",
   "app.loadError": "Could not load the settings.",
   "auth.email.subject": "Sign in to {brand}",
