@@ -1,8 +1,8 @@
-import { member } from '@torch/shared/db/schema';
-import { eq } from 'drizzle-orm';
+import { member, teamMember } from '@torch/shared/db/schema';
+import { and, eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
-import { createWorkspaceFixture, withTempDatabase } from '../test/fixtures.ts';
-import { loadActor, loadTeamAccess } from './load-actor.ts';
+import { addMember, createWorkspaceFixture, withTempDatabase } from '../test/fixtures.ts';
+import { loadActor, loadTeamAccess, loadVisibleMemberIds } from './load-actor.ts';
 
 const databaseUrl = process.env.DATABASE_URL;
 
@@ -115,6 +115,142 @@ describe.skipIf(!databaseUrl)('loadActor / loadTeamAccess (Postgres)', () => {
       const access = await loadTeamAccess(db.orm, a.workspaceId, b.teams.eng.id);
 
       expect(access).toBeNull();
+    });
+  });
+});
+
+describe.skipIf(!databaseUrl)('loadVisibleMemberIds (Postgres)', () => {
+  const sorted = (ids: string[]) => [...ids].sort();
+
+  it('owner, admin and member see the whole workspace', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+
+      for (const who of ['owner', 'admin', 'member', 'outsider'] as const) {
+        const actor = await loadActor(db.orm, f.workspaceId, f.members[who].id);
+
+        expect(await loadVisibleMemberIds(db.orm, actor as NonNullable<typeof actor>), who).toBe(
+          'all',
+        );
+      }
+    });
+  });
+
+  it('a guest sees self plus the members sharing a team, sorted, and not the outsider', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const guest = await loadActor(db.orm, f.workspaceId, f.members.guest.id);
+
+      const ids = await loadVisibleMemberIds(db.orm, guest as NonNullable<typeof guest>);
+
+      expect(ids).toEqual(
+        sorted([f.members.guest.id, f.members.owner.id, f.members.admin.id, f.members.member.id]),
+      );
+      expect(ids).not.toContain(f.members.outsider.id);
+    });
+  });
+
+  it('a guest in no team sees only themselves', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const lonely = await addMember(db.orm, f.workspaceId, 'guest');
+      const actor = await loadActor(db.orm, f.workspaceId, lonely.id);
+
+      expect(await loadVisibleMemberIds(db.orm, actor as NonNullable<typeof actor>)).toEqual([
+        lonely.id,
+      ]);
+    });
+  });
+
+  it('a guest in two teams sees the union, each member once', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const opsOnly = await addMember(db.orm, f.workspaceId, 'member', {
+        teamIds: [f.teams.ops.id],
+      });
+      await db.orm.insert(teamMember).values({
+        workspaceId: f.workspaceId,
+        teamId: f.teams.ops.id,
+        memberId: f.members.guest.id,
+      });
+      const guest = await loadActor(db.orm, f.workspaceId, f.members.guest.id);
+
+      const ids = await loadVisibleMemberIds(db.orm, guest as NonNullable<typeof guest>);
+
+      // The owner and the member are in both teams and still appear once.
+      expect(ids).toEqual(
+        sorted([
+          f.members.guest.id,
+          f.members.owner.id,
+          f.members.admin.id,
+          f.members.member.id,
+          opsOnly.id,
+        ]),
+      );
+      expect(ids).not.toContain(f.members.outsider.id);
+    });
+  });
+
+  it('deactivated co-members stay in the list so their names resolve', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      await db.orm
+        .update(member)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(member.id, f.members.admin.id));
+      const guest = await loadActor(db.orm, f.workspaceId, f.members.guest.id);
+
+      const ids = await loadVisibleMemberIds(db.orm, guest as NonNullable<typeof guest>);
+
+      expect(ids).toContain(f.members.admin.id);
+    });
+  });
+
+  it('the list follows the team memberships at the time of the call', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const colleague = await addMember(db.orm, f.workspaceId, 'member', {
+        teamIds: [f.teams.eng.id],
+      });
+      const idsFor = async () => {
+        const guest = await loadActor(db.orm, f.workspaceId, f.members.guest.id);
+        return loadVisibleMemberIds(db.orm, guest as NonNullable<typeof guest>);
+      };
+
+      expect(await idsFor()).toContain(colleague.id);
+      await db.orm
+        .delete(teamMember)
+        .where(and(eq(teamMember.teamId, f.teams.eng.id), eq(teamMember.memberId, colleague.id)));
+      expect(await idsFor()).not.toContain(colleague.id);
+    });
+  });
+
+  it('never returns a member of another workspace', async () => {
+    await withTempDatabase(async (db) => {
+      const a = await createWorkspaceFixture(db.orm);
+      const b = await createWorkspaceFixture(db.orm);
+      const guest = await loadActor(db.orm, a.workspaceId, a.members.guest.id);
+
+      const ids = await loadVisibleMemberIds(db.orm, guest as NonNullable<typeof guest>);
+
+      for (const other of Object.values(b.members)) expect(ids).not.toContain(other.id);
+    });
+  });
+
+  it('is scoped by the actor, not by anything else: a guest actor of workspace A with B team ids sees nothing of B', async () => {
+    await withTempDatabase(async (db) => {
+      const a = await createWorkspaceFixture(db.orm);
+      const b = await createWorkspaceFixture(db.orm);
+      const guest = await loadActor(db.orm, a.workspaceId, a.members.guest.id);
+      // A tampered actor: its team set names a team of workspace B.
+      const tampered = {
+        ...(guest as NonNullable<typeof guest>),
+        teamIds: new Set([b.teams.eng.id]),
+      };
+
+      const ids = await loadVisibleMemberIds(db.orm, tampered);
+
+      expect(ids).toEqual([a.members.guest.id]);
     });
   });
 });

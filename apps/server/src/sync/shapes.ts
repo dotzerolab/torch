@@ -31,6 +31,21 @@ const ISSUE_COLUMNS = [
   'updated_at',
   'archived_at',
 ];
+/**
+ * The synced member profile: an allowlist, so a column added to `member` later stays private until someone adds
+ * it here on purpose. Never `email` (administrators read it through the REST list) and never `timezone`.
+ */
+export const MEMBER_COLUMNS: readonly string[] = [
+  'id',
+  'workspace_id',
+  'name',
+  'handle',
+  'role',
+  'locale',
+  'deactivated_at',
+  'created_at',
+];
+const TEAM_MEMBER_COLUMNS = ['team_id', 'member_id', 'workspace_id', 'created_at'];
 const WORKFLOW_STATE_COLUMNS = [
   'id',
   'workspace_id',
@@ -72,5 +87,51 @@ export function teamScopedShape(
     where: 'team_id = $1',
     params: [teamId],
     columns: WORKFLOW_STATE_COLUMNS,
+  };
+}
+
+/**
+ * The member profiles the actor may read, mirroring `canSeeMember` in SQL. `visibleMemberIds` comes from
+ * `loadVisibleMemberIds` (stored ids, never the request): `'all'` for every role but guest, and for a guest the
+ * list of themselves plus the members they share a team with. The list is sorted and de-duplicated so one actor
+ * state always yields one URL, and it is never empty in SQL (the nil uuid matches no row).
+ */
+export function membersShape(
+  actor: Actor,
+  visibleMemberIds: readonly string[] | 'all',
+): ShapeDefinition {
+  if (visibleMemberIds === 'all') {
+    // Fail closed: a guest must never be handed the whole workspace, whatever the caller computed.
+    if (actor.role === 'guest') {
+      throw new Error('a guest cannot read the whole-workspace member shape');
+    }
+    return {
+      table: 'member',
+      where: 'workspace_id = $1',
+      params: [actor.workspaceId],
+      columns: [...MEMBER_COLUMNS],
+    };
+  }
+  const unique = [...new Set(visibleMemberIds)].sort();
+  const ids = unique.length > 0 ? unique : [NIL_UUID];
+  const list = ids.map((_, index) => `$${index + 2}`).join(', ');
+  return {
+    table: 'member',
+    where: `workspace_id = $1 AND id IN (${list})`,
+    params: [actor.workspaceId, ...ids],
+    columns: [...MEMBER_COLUMNS],
+  };
+}
+
+/**
+ * Who is in one team (ADR 0001 section 2: one shape per team). The caller has already checked that the actor can
+ * see `teamId`; every co-member of a team the actor can see is visible to them by construction.
+ */
+export function teamMembersShape(teamId: string): ShapeDefinition {
+  return {
+    table: 'team_member',
+    where: 'team_id = $1',
+    params: [teamId],
+    columns: [...TEAM_MEMBER_COLUMNS],
   };
 }
