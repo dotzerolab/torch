@@ -12,7 +12,7 @@ import {
   LOGIN_TOKEN_TTL_MS,
   previewMagicLink,
 } from './magic-link.ts';
-import { clientIp, createRateLimiter, type RateLimitResult } from './rate-limit.ts';
+import { clientIp, clientKey, createRateLimiter, type RateLimitResult } from './rate-limit.ts';
 import {
   buildSessionCookie,
   isSecureUrl,
@@ -71,6 +71,8 @@ export function createAuthRoutes(deps: AuthDeps) {
   });
   const app = new Hono();
 
+  // One client = one address, or one /64 for IPv6 (see `clientKey`).
+  const limitKey = (c: Context) => clientKey(clientIp(c.req.raw, c.env, deps.trustProxy));
   const tooManyRequests = (c: Context, limited: Extract<RateLimitResult, { allowed: false }>) =>
     c.json({ error: 'rate_limited', message: 'Too many requests. Try again later.' }, 429, {
       'Retry-After': String(limited.retryAfterSeconds),
@@ -93,8 +95,7 @@ export function createAuthRoutes(deps: AuthDeps) {
   });
 
   app.post('/magic-link', async (c) => {
-    const ip = clientIp(c.req.raw, c.env, deps.trustProxy);
-    const limited = ipLimiter.hit(ip);
+    const limited = ipLimiter.hit(limitKey(c));
     if (!limited.allowed) return tooManyRequests(c, limited);
 
     const body = await readJson(c.req.raw);
@@ -135,7 +136,7 @@ export function createAuthRoutes(deps: AuthDeps) {
   // Who a link would sign in, shown on the Continue page before anything is used up. POST only, like verify: the
   // token travels in the body, never in a URL.
   app.post('/preview', async (c) => {
-    const limited = linkLimiter.hit(clientIp(c.req.raw, c.env, deps.trustProxy));
+    const limited = linkLimiter.hit(limitKey(c));
     if (!limited.allowed) return tooManyRequests(c, limited);
 
     const body = await readJson(c.req.raw);
@@ -147,7 +148,7 @@ export function createAuthRoutes(deps: AuthDeps) {
 
   // POST only: a mail scanner that opens the link with GET must not burn it (the web page shows a button).
   app.post('/verify', async (c) => {
-    const limited = linkLimiter.hit(clientIp(c.req.raw, c.env, deps.trustProxy));
+    const limited = linkLimiter.hit(limitKey(c));
     if (!limited.allowed) return tooManyRequests(c, limited);
 
     const body = await readJson(c.req.raw);

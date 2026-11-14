@@ -200,6 +200,47 @@ describe.skipIf(!databaseUrl)('POST /api/auth/magic-link', () => {
     });
   });
 
+  it('an IPv6 client rotating addresses inside its /64 shares one limit; another /64 is unaffected', async () => {
+    await withTempDatabase(async (db) => {
+      const t = createAuthTestApp(db);
+      const ask = (ip: string) =>
+        t.post('/api/auth/magic-link', { email: `x-${unique()}@example.test` }, { ip });
+
+      for (let i = 1; i <= 20; i++) {
+        expect((await ask(`2001:db8:1:2:${i}:aaaa:bbbb:cccc`)).status).toBe(202);
+      }
+      const blocked = await ask('2001:db8:1:2:ffff::1');
+
+      expect(blocked.status).toBe(429);
+      expect((await ask('2001:db8:1:3::1')).status).toBe(202);
+    });
+  });
+
+  it('an IPv4-mapped IPv6 socket address counts as its IPv4 address', async () => {
+    await withTempDatabase(async (db) => {
+      const t = createAuthTestApp(db);
+      const ask = (ip: string) =>
+        t.post('/api/auth/magic-link', { email: `x-${unique()}@example.test` }, { ip });
+
+      for (let i = 1; i <= 10; i++) expect((await ask('203.0.113.50')).status).toBe(202);
+      for (let i = 1; i <= 10; i++) expect((await ask('::ffff:203.0.113.50')).status).toBe(202);
+
+      expect((await ask('203.0.113.50')).status).toBe(429);
+    });
+  });
+
+  it('the preview and verify limit also keys IPv6 by /64', async () => {
+    await withTempDatabase(async (db) => {
+      const t = createAuthTestApp(db);
+      const ask = (ip: string) => t.post('/api/auth/preview', { token: generateToken() }, { ip });
+
+      for (let i = 1; i <= 60; i++) expect((await ask(`2001:db8:9:9:${i}::1`)).status).toBe(400);
+
+      expect((await ask('2001:db8:9:9:ffff::1')).status).toBe(429);
+      expect((await ask('2001:db8:9:a::1')).status).toBe(400);
+    });
+  });
+
   it('x-forwarded-for is ignored unless TRUST_PROXY: spoofed values do not escape the IP limit', async () => {
     await withTempDatabase(async (db) => {
       const t = createAuthTestApp(db, { trustProxy: false });
