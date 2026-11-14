@@ -5,10 +5,12 @@ import { csrfGuard } from './auth/csrf.ts';
 import { createAuthRoutes } from './auth/routes.ts';
 import type { Db } from './db.ts';
 import type { Mailer } from './mail/mailer.ts';
+import { createMemberRoutes } from './members/routes.ts';
 import { createMutationRoutes } from './mutations/routes.ts';
 import type { ActorResolver } from './permissions/load-actor.ts';
 import type { ElectricConfig } from './sync/config.ts';
 import { createSyncRoutes } from './sync/routes.ts';
+import { createTeamRoutes } from './teams/routes.ts';
 
 // Dependencies injected by main.ts (and by tests). Grows as tasks add routes.
 export type AppDeps = {
@@ -98,6 +100,8 @@ export function createApp(deps: AppDeps): App {
 
   if (deps.db?.orm && deps.auth) {
     app.route('/api', createMutationRoutes({ orm: deps.db.orm, auth: deps.auth }));
+    app.route('/api', createMemberRoutes({ orm: deps.db.orm, auth: deps.auth }));
+    app.route('/api', createTeamRoutes({ orm: deps.db.orm, auth: deps.auth }));
   }
 
   if (deps.db?.orm && deps.electric && deps.auth) {
