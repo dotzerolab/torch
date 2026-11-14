@@ -5,6 +5,7 @@ import { refreshSessionCookie } from './auth/cookie-refresh.ts';
 import { csrfGuard } from './auth/csrf.ts';
 import { isSessionResolver } from './auth/resolver.ts';
 import { createAuthRoutes } from './auth/routes.ts';
+import { buildManifest } from './brand/manifest.ts';
 import type { Db } from './db.ts';
 import { createInviteRoutes } from './invites/routes.ts';
 import type { Mailer } from './mail/mailer.ts';
@@ -87,6 +88,13 @@ export function createApp(deps: AppDeps): App {
 
   app.get('/health', (c) => c.json({ status: 'ok' }));
   app.get('/api/brand', (c) => c.json(deps.brand));
+  // The installed-app manifest follows the brand, so it is built per request and never cached by the browser.
+  app.get('/api/manifest.webmanifest', (c) =>
+    c.body(JSON.stringify(buildManifest(deps.brand)), 200, {
+      'content-type': 'application/manifest+json',
+      'cache-control': 'no-cache',
+    }),
+  );
   app.get('/health/db', async (c) => {
     if (!deps.db) return c.json({ status: 'error', reason: 'DATABASE_URL is not set' }, 503);
     const health = await deps.db.health();
