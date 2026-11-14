@@ -2,9 +2,9 @@
 // random token; only its SHA-256 is stored.
 import { member, session, workspace } from '@torch/shared/db/schema';
 import { and, asc, eq, gt, isNull, lte, max, sql } from 'drizzle-orm';
-import type { Orm } from '../db.ts';
+import type { Orm, Tx } from '../db.ts';
 import { isUuid } from '../util/uuid.ts';
-import { hashToken, isWellFormedToken } from './tokens.ts';
+import { generateToken, hashToken, isWellFormedToken } from './tokens.ts';
 
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const SESSION_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
@@ -60,6 +60,33 @@ export async function findSession(orm: Orm, token: string, workspaceId: string, 
     )
     .limit(1);
   return row ?? null;
+}
+
+/**
+ * Opens a session for each of `members` (one row per workspace and member, all behind one new cookie token, so
+ * one hash) and returns the raw token for the cookie. The caller passes its own `tx`, so the sessions commit or
+ * roll back with whatever made them necessary (a consumed sign-in link, an accepted invite).
+ */
+export async function createSessionsForMembers(
+  tx: Tx,
+  members: { workspaceId: string; memberId: string }[],
+  input: { now: Date; userAgent: string | null },
+): Promise<string> {
+  const { now, userAgent } = input;
+  const token = generateToken();
+  const tokenHash = hashToken(token);
+  await tx.insert(session).values(
+    members.map((row) => ({
+      workspaceId: row.workspaceId,
+      memberId: row.memberId,
+      tokenHash,
+      createdAt: now,
+      lastSeenAt: now,
+      expiresAt: new Date(now.getTime() + SESSION_TTL_MS),
+      userAgent,
+    })),
+  );
+  return token;
 }
 
 /** Slides the expiry of every live session of this cookie that was last touched over an hour ago. */
