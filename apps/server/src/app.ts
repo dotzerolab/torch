@@ -1,7 +1,9 @@
 import type { Brand } from '@torch/shared/brand';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
+import { refreshSessionCookie } from './auth/cookie-refresh.ts';
 import { csrfGuard } from './auth/csrf.ts';
+import { isSessionResolver } from './auth/resolver.ts';
 import { createAuthRoutes } from './auth/routes.ts';
 import type { Db } from './db.ts';
 import type { Mailer } from './mail/mailer.ts';
@@ -75,6 +77,12 @@ export function createApp(deps: AppDeps): App {
         c.json({ error: 'invalid_input', message: 'The request body is too large.' }, 413),
     }),
   );
+
+  // A session slides forward when it is used; when the resolver says it did for this request, the cookie is sent
+  // again with the new lifetime, so a browser in use stays signed in up to the 90-day ceiling.
+  if (deps.auth && deps.config && isSessionResolver(deps.auth)) {
+    app.use('/api/*', refreshSessionCookie(deps.auth, deps.config.appUrl, deps.now));
+  }
 
   app.get('/health', (c) => c.json({ status: 'ok' }));
   app.get('/api/brand', (c) => c.json(deps.brand));

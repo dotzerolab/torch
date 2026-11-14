@@ -17,6 +17,8 @@
   "auth.login.error": "Qualcosa è andato storto. Riprova.",
   "auth.verify.title": "Completa l'accesso",
   "auth.verify.intro": "Continua per accedere a {brand}.",
+  "auth.verify.signingInAs": "Accesso come {email}",
+  "auth.verify.unavailable": "Non è stato possibile controllare il link in questo momento. Ricarica la pagina tra qualche minuto.",
   "auth.verify.continue": "Continua",
   "auth.verify.invalid": "Questo link di accesso non è valido o è scaduto.",
   "auth.verify.requestNew": "Richiedi un nuovo link",

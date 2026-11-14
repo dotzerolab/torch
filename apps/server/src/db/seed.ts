@@ -182,13 +182,41 @@ const DEMO_EMAILS: Record<LayoutRole, string> = {
   outsider: 'outsider@example.test',
 };
 
-export async function seedDev(
-  orm: Orm,
-  opts: { issuesPerTeam?: number } = {},
-): Promise<{ created: boolean; workspaceSlug: 'demo' }> {
+/** Hostnames of this machine: the only APP_URL a dev seed accepts without `--allow-remote`. */
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/**
+ * The demo members are `@example.test` addresses (undeliverable), so the demo workspace cannot be signed into by a
+ * stranger, but it is still dev data: it never belongs on an installation that is reachable from elsewhere. The
+ * guard is opt-in, so a forgotten NODE_ENV is not enough to seed one: unless APP_URL names this machine (or none is
+ * set) it refuses, and `allowRemote` (CLI `--allow-remote`) is the explicit way past that. Production is never
+ * seeded, flag or not.
+ */
+function assertSeedAllowed(allowRemote: boolean): void {
   if (process.env.NODE_ENV === 'production') {
     throw new Error('seedDev refuses to run when NODE_ENV=production');
   }
+  const appUrl = process.env.APP_URL;
+  if (!appUrl || allowRemote) return;
+  let hostname: string | undefined;
+  try {
+    hostname = new URL(appUrl).hostname;
+  } catch {
+    // Not echoed: a malformed value may still carry a credential.
+  }
+  if (hostname !== undefined && LOCAL_HOSTS.has(hostname)) return;
+  throw new Error(
+    hostname === undefined
+      ? 'seedDev refuses to run: APP_URL is not a valid URL, so it cannot be shown to be this machine. Fix it, or pass --allow-remote.'
+      : `seedDev refuses to run: APP_URL points at "${hostname}", not at this machine. The demo workspace is for local development; pass --allow-remote to seed it anyway.`,
+  );
+}
+
+export async function seedDev(
+  orm: Orm,
+  opts: { issuesPerTeam?: number; allowRemote?: boolean } = {},
+): Promise<{ created: boolean; workspaceSlug: 'demo' }> {
+  assertSeedAllowed(opts.allowRemote ?? false);
   const issuesPerTeam = opts.issuesPerTeam ?? 50;
   if (!Number.isInteger(issuesPerTeam) || issuesPerTeam < 1) {
     throw new Error(`issuesPerTeam must be a positive integer, got ${issuesPerTeam}`);
@@ -220,7 +248,7 @@ if (import.meta.main) {
   }
   const db = createDb(databaseUrl);
   try {
-    const result = await seedDev(db.orm);
+    const result = await seedDev(db.orm, { allowRemote: process.argv.includes('--allow-remote') });
     console.info(
       result.created
         ? `demo workspace created; sign in as owner@example.test`
