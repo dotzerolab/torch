@@ -4,14 +4,9 @@ import { t } from '@torch/shared/i18n';
 import { issueUpdateInput } from '@torch/shared/mutations/issue';
 import { useState } from 'react';
 import { ApiError } from '../api.ts';
-import { type SessionWorkspace, signOut } from '../auth/useSession.ts';
 import { mutationErrorMessage } from '../errors.ts';
-import {
-  issuesCollection,
-  type SyncedIssue,
-  type SyncedTeam,
-  teamsCollection,
-} from '../sync/collections.ts';
+import { useShell } from '../shell/ShellContext.ts';
+import { issuesCollection, type SyncedIssue, type SyncedTeam } from '../sync/collections.ts';
 
 const MAX_PRIORITY = 4;
 
@@ -32,6 +27,7 @@ function TitleField({
   const [draft, setDraft] = useState<string | null>(null);
   return (
     <input
+      className="issue-row__title"
       data-testid={`issue-title-${issue.number}`}
       aria-label={label}
       maxLength={255}
@@ -82,29 +78,35 @@ function IssueList({
     });
   }
 
-  if (!isReady) return <p aria-busy="true">{t(locale, 'workspace.loading')}</p>;
+  if (!isReady) {
+    return (
+      <p className="issues__note" aria-busy="true">
+        {t(locale, 'workspace.loading')}
+      </p>
+    );
+  }
   return (
-    <section aria-label={team.name}>
+    <section className="issues" aria-label={team.name}>
       {error && (
-        <p role="alert" data-testid="mutation-error">
+        <p className="issues__error" role="alert" data-testid="mutation-error">
           {error}
         </p>
       )}
       {data.length === 0 ? (
-        <p>{t(locale, 'workspace.noIssues')}</p>
+        <p className="issues__note">{t(locale, 'workspace.noIssues')}</p>
       ) : (
-        <ol>
+        <ol className="issue-list">
           {data.map((issue) => (
-            <li key={issue.id} data-testid={`issue-${issue.number}`}>
-              <span>
+            <li key={issue.id} className="issue-row" data-testid={`issue-${issue.number}`}>
+              <span className="issue-row__id">
                 {team.key}-{issue.number}
-              </span>{' '}
+              </span>
               <TitleField
                 issue={issue}
                 label={t(locale, 'issue.titleLabel', { key: `${team.key}-${issue.number}` })}
                 onSave={(title) => save(issue, title)}
-              />{' '}
-              <span data-testid={`issue-priority-${issue.number}`}>
+              />
+              <span className="issue-row__priority" data-testid={`issue-priority-${issue.number}`}>
                 {priorityLabel(locale, issue.priority)}
               </span>
             </li>
@@ -115,77 +117,18 @@ function IssueList({
   );
 }
 
-function WorkspaceBody({ workspace, locale }: { workspace: SessionWorkspace; locale: Locale }) {
-  const teams = teamsCollection(workspace.id);
-  const { data, isReady } = useLiveQuery({
-    query: (q) => q.from({ team: teams }).orderBy(({ team }) => team.key),
-  });
-  const [chosenId, setChosenId] = useState<string | null>(null);
-
-  if (!isReady) return <p aria-busy="true">{t(locale, 'workspace.loading')}</p>;
-  if (data.length === 0) return <p>{t(locale, 'workspace.noTeams')}</p>;
-
-  // The first team until one is picked, and again if the picked one is no longer shared with this member.
-  const selected = data.find((team) => team.id === chosenId) ?? data[0];
-  return (
-    <>
-      <nav aria-label={t(locale, 'workspace.teams')}>
-        <ul>
-          {data.map((team) => (
-            <li key={team.id}>
-              <button
-                type="button"
-                data-testid={`team-${team.key}`}
-                aria-current={team.id === selected?.id ? 'true' : undefined}
-                onClick={() => setChosenId(team.id)}
-              >
-                {team.key} {team.name}
-              </button>
-            </li>
-          ))}
-        </ul>
-      </nav>
-      {selected && (
-        <IssueList key={selected.id} workspaceId={workspace.id} team={selected} locale={locale} />
-      )}
-    </>
-  );
-}
-
-export function Workspace({
-  workspaces,
-  locale,
-}: {
-  workspaces: SessionWorkspace[];
-  locale: Locale;
-}) {
-  const [chosenId, setChosenId] = useState<string | null>(null);
-  const workspace = workspaces.find((candidate) => candidate.id === chosenId) ?? workspaces[0];
-  if (!workspace) return null;
-
-  return (
-    <main>
-      <header>
-        <h1 data-testid="workspace-name">{workspace.name}</h1>
-        {workspaces.length > 1 && (
-          <select
-            aria-label={t(locale, 'workspace.picker')}
-            data-testid="workspace-picker"
-            value={workspace.id}
-            onChange={(event) => setChosenId(event.target.value)}
-          >
-            {workspaces.map((candidate) => (
-              <option key={candidate.id} value={candidate.id}>
-                {candidate.name}
-              </option>
-            ))}
-          </select>
-        )}
-        <button type="button" data-testid="sign-out" onClick={() => void signOut()}>
-          {t(locale, 'workspace.signOut')}
-        </button>
-      </header>
-      <WorkspaceBody key={workspace.id} workspace={workspace} locale={locale} />
-    </main>
-  );
+/** The page of the signed-in shell for now: the issues of the team the shell is showing. */
+export function Workspace({ locale }: { locale: Locale }) {
+  const { workspace, team, teams, teamsReady } = useShell();
+  if (!teamsReady) {
+    return (
+      <p className="issues__note" aria-busy="true">
+        {t(locale, 'workspace.loading')}
+      </p>
+    );
+  }
+  if (teams.length === 0 || !team) {
+    return <p className="issues__note">{t(locale, 'workspace.noTeams')}</p>;
+  }
+  return <IssueList key={team.id} workspaceId={workspace.id} team={team} locale={locale} />;
 }
