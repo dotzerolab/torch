@@ -513,12 +513,18 @@ export async function acceptInvite(
       const reactivated = existing !== undefined;
       if (existing) {
         if (!existing.deactivatedAt) throw new Abort(refuse('already_member', 409));
-        // The same row, the invited role. Deactivation keeps team memberships, so the member comes back with the
-        // ones they had; the invited teams are added below next to them.
+        // The same row, the invited role. Team memberships become exactly the invited teams (least privilege: a
+        // returning guest never keeps access this invite does not grant). Deactivation keeps the old rows, so they are
+        // deleted before the invited ones go in, in this transaction with the member row locked.
         await tx
           .update(member)
           .set({ deactivatedAt: null, role: consumed.role, name })
           .where(and(eq(member.workspaceId, workspaceId), eq(member.id, existing.id)));
+        await tx
+          .delete(teamMember)
+          .where(
+            and(eq(teamMember.workspaceId, workspaceId), eq(teamMember.memberId, existing.id)),
+          );
         memberId = existing.id;
       } else {
         const [created] = await tx
@@ -541,11 +547,9 @@ export async function acceptInvite(
         .from(inviteTeam)
         .where(and(eq(inviteTeam.workspaceId, workspaceId), eq(inviteTeam.inviteId, consumed.id)));
       if (invitedTeams.length > 0) {
-        // A reactivated member may already be in some of these teams: keep those rows, add the rest.
         await tx
           .insert(teamMember)
-          .values(invitedTeams.map((row) => ({ workspaceId, teamId: row.teamId, memberId })))
-          .onConflictDoNothing();
+          .values(invitedTeams.map((row) => ({ workspaceId, teamId: row.teamId, memberId })));
       }
 
       await tx

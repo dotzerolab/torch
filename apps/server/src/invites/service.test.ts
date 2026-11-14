@@ -1002,7 +1002,7 @@ describe.skipIf(!databaseUrl)('invite service (Postgres)', () => {
       ).toBe(true);
     });
 
-    it('a deactivated member with that email is reactivated with the invited role, keeps their id and their old teams, and gains the invited ones', async () => {
+    it('a deactivated member with that email is reactivated with the invited role, keeps their id, and gets exactly the invited teams', async () => {
       const s = await setup();
       const { db, f } = s;
       const email = `back-${unique()}@example.test`;
@@ -1041,12 +1041,12 @@ describe.skipIf(!databaseUrl)('invite service (Postgres)', () => {
         locale: 'it',
         deactivatedAt: null,
       });
-      // Deactivation keeps team memberships: the old private team stays, the invited one is added.
+      // A guest never keeps access the invite did not grant: the old private team is gone.
       const teams = await db.orm
         .select({ teamId: teamMember.teamId })
         .from(teamMember)
         .where(eq(teamMember.memberId, before.id));
-      expect(teams.map((t) => t.teamId).sort()).toEqual([f.teams.eng.id, f.teams.ops.id].sort());
+      expect(teams).toEqual([{ teamId: f.teams.eng.id }]);
       const members = await db.orm
         .select()
         .from(member)
@@ -1057,19 +1057,52 @@ describe.skipIf(!databaseUrl)('invite service (Postgres)', () => {
       expect(acceptedEntry?.metadata).toMatchObject({ reactivated: true, role: 'guest' });
     });
 
-    it('a deactivated member who is still in ENG accepts an invite for ENG and OPS: active, in both, one row each, no error', async () => {
+    it('a deactivated member who is still in ENG accepts an invite for OPS only: active, in OPS only, no error', async () => {
       const s = await setup();
       const { db, f } = s;
-      const email = `kept-${unique()}@example.test`;
+      const email = `swap-${unique()}@example.test`;
       const before = await addMember(db.orm, f.workspaceId, 'member', {
         email,
         teamIds: [f.teams.eng.id],
       });
-      const joinedLongAgo = new Date(Date.now() - 30 * DAY);
       await db.orm
-        .update(teamMember)
-        .set({ createdAt: joinedLongAgo })
+        .update(member)
+        .set({ deactivatedAt: new Date(Date.now() - DAY) })
+        .where(eq(member.id, before.id));
+      const now = new Date();
+      const created = await pendingInvite(
+        s,
+        { email, role: 'member', teamIds: [f.teams.ops.id] },
+        now,
+      );
+
+      const accepted = value(
+        await acceptInvite(db.orm, {
+          token: created.token,
+          name: 'Swap Person',
+          now,
+          userAgent: null,
+        }),
+      );
+
+      expect(accepted.memberId).toBe(before.id);
+      const [row] = await db.orm.select().from(member).where(eq(member.id, before.id));
+      expect(row?.deactivatedAt).toBeNull();
+      const teams = await db.orm
+        .select({ teamId: teamMember.teamId })
+        .from(teamMember)
         .where(eq(teamMember.memberId, before.id));
+      expect(teams).toEqual([{ teamId: f.teams.ops.id }]);
+    });
+
+    it('the replace cannot hit a row that exists: a deactivated member in ENG accepts an invite for ENG and OPS and ends in both, one row each', async () => {
+      const s = await setup();
+      const { db, f } = s;
+      const email = `overlap-${unique()}@example.test`;
+      const before = await addMember(db.orm, f.workspaceId, 'member', {
+        email,
+        teamIds: [f.teams.eng.id],
+      });
       await db.orm
         .update(member)
         .set({ deactivatedAt: new Date(Date.now() - DAY) })
@@ -1084,28 +1117,18 @@ describe.skipIf(!databaseUrl)('invite service (Postgres)', () => {
       const accepted = value(
         await acceptInvite(db.orm, {
           token: created.token,
-          name: 'Kept Person',
+          name: 'Overlap Person',
           now,
           userAgent: null,
         }),
       );
 
       expect(accepted.memberId).toBe(before.id);
-      const [row] = await db.orm.select().from(member).where(eq(member.id, before.id));
-      expect(row?.deactivatedAt).toBeNull();
       const teams = await db.orm
-        .select({ teamId: teamMember.teamId, createdAt: teamMember.createdAt })
+        .select({ teamId: teamMember.teamId })
         .from(teamMember)
         .where(eq(teamMember.memberId, before.id));
       expect(teams.map((t) => t.teamId).sort()).toEqual([f.teams.eng.id, f.teams.ops.id].sort());
-      // The ENG row is the old one, not a rewritten copy.
-      const eng = teams.find((t) => t.teamId === f.teams.eng.id);
-      expect(eng?.createdAt.getTime()).toBe(joinedLongAgo.getTime());
-      expect(
-        refusal(
-          await acceptInvite(db.orm, { token: created.token, name: 'Again', now, userAgent: null }),
-        ).code,
-      ).toBe('invite_invalid');
     });
 
     it('the same email in other workspaces: one cookie token covers every workspace where it is active', async () => {
