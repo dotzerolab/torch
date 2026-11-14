@@ -222,6 +222,9 @@ or misspelled field stops the server at startup and names the file and the field
 `packages/shared/src/i18n/{en,it}.json` and takes the product name from `{brand}`; the literal product name never goes
 in a string, JSX text or HTML (`pnpm brand:check`).
 
+The default brand (logo files, colours, typeface, construction, minimum sizes) is described in
+[docs/brand/BRAND.md](docs/brand/BRAND.md).
+
 A dependency outside the allowed licences needs an entry (name, version, reason) in
 `config/license-exceptions.json`, approved by a maintainer.
 
