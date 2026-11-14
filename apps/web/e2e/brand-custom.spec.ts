@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { contrastRatio } from '@torch/shared/theme/contrast';
 
 // Runs in the "custom-brand" project: its server reads BRAND_CONFIG_PATH=e2e/fixtures/brand.acme.json.
 test('a custom brand file replaces the product name everywhere', async ({ page }) => {
@@ -30,4 +31,18 @@ test('the web manifest and the page link to it carry the custom brand', async ({
     { src: '/acme/favicon.svg', sizes: 'any', type: 'image/svg+xml' },
   ]);
   expect(JSON.stringify(manifest)).not.toContain('Torch');
+});
+
+test('the text on the brand accent stays readable', async ({ page }) => {
+  await page.goto('/');
+  await expect(page).toHaveTitle('Acme Tasks');
+  const { accent, foreground } = await page.evaluate(() => {
+    const style = getComputedStyle(document.documentElement);
+    return {
+      accent: style.getPropertyValue('--accent').trim(),
+      foreground: style.getPropertyValue('--accent-fg').trim(),
+    };
+  });
+  expect(accent.toLowerCase()).toBe('#3366ff');
+  expect(contrastRatio(foreground, accent)).toBeGreaterThanOrEqual(4.5);
 });
