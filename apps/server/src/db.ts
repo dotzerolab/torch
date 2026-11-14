@@ -7,6 +7,9 @@ export type DbHealth = { status: 'ok'; walLevel: 'logical' } | { status: 'error'
 /** Drizzle handle with the full schema; what every query function in the server takes. */
 export type Orm = NodePgDatabase<typeof schema>;
 
+/** The handle inside `orm.transaction(...)`: what a service function writes with, so action and audit row commit together. */
+export type Tx = Parameters<Parameters<Orm['transaction']>[0]>[0];
+
 export type Db = {
   health(): Promise<DbHealth>;
   close(): Promise<void>;

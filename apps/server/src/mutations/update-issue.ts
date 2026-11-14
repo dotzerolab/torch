@@ -8,14 +8,13 @@ import {
 } from '@torch/shared/mutations/issue';
 import { type Actor, canEditIssues, canSeeTeam, type TeamAccess } from '@torch/shared/permissions';
 import { and, eq, isNull, sql } from 'drizzle-orm';
-import type { Orm } from '../db.ts';
+import type { Orm, Tx } from '../db.ts';
 import { isUuid } from '../util/uuid.ts';
+import { currentTxid } from './txid.ts';
 
 export type UpdateIssueResult =
   | { ok: true; txid: number }
   | { ok: false; code: MutationErrorCode; status: 400 | 403 | 404 };
-
-type Tx = Parameters<Parameters<Orm['transaction']>[0]>[0];
 
 const refuse = (code: MutationErrorCode, status: 400 | 403 | 404): UpdateIssueResult => ({
   ok: false,
@@ -116,9 +115,6 @@ export async function updateIssue(
       .where(and(eq(issue.id, issueId), eq(issue.workspaceId, actor.workspaceId)));
 
     // Electric reports this id for the transaction's rows; the client waits for it (`awaitTxId`).
-    const { rows } = await tx.execute<{ txid: string }>(
-      sql`select pg_current_xact_id()::xid::text as txid`,
-    );
-    return { ok: true as const, txid: Number(rows[0]?.txid) };
+    return { ok: true as const, txid: await currentTxid(tx) };
   });
 }

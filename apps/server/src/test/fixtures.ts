@@ -1,6 +1,7 @@
 // Test helpers for every database test: a throwaway database per test file or test, and a ready-made
 // workspace with members, teams, states and issues. Synthetic data only (`example.test` emails).
 import { randomBytes } from 'node:crypto';
+import { type MemberRole, type MemberRow, member, teamMember } from '@torch/shared/db/schema';
 import pg from 'pg';
 import { runMigrations } from '../db/migrate.ts';
 import { insertWorkspaceLayout, type LayoutRole, type WorkspaceLayout } from '../db/seed.ts';
@@ -78,4 +79,40 @@ export async function createWorkspaceFixture(
       issuesPerTeam: ISSUES_PER_TEAM,
     }),
   );
+}
+
+/**
+ * Adds one active member to an existing workspace, optionally into some of its teams, in one transaction (a team of
+ * another workspace is refused by the composite foreign key and leaves nothing behind). The email is stored
+ * normalised; without options it is a fresh `<role>-<suffix>@example.test`, and the handle is always unique.
+ */
+export async function addMember(
+  orm: Orm,
+  workspaceId: string,
+  role: MemberRole,
+  opts: { email?: string; name?: string; teamIds?: string[] } = {},
+): Promise<MemberRow> {
+  const suffix = randomBytes(4).toString('hex');
+  const label = `${role[0]?.toUpperCase()}${role.slice(1)}`;
+
+  return orm.transaction(async (tx) => {
+    const [added] = await tx
+      .insert(member)
+      .values({
+        workspaceId,
+        email: (opts.email ?? `${role}-${suffix}@example.test`).trim().toLowerCase(),
+        name: opts.name ?? `${label} ${suffix}`,
+        handle: `${role}-${suffix}`,
+        role,
+      })
+      .returning();
+    if (!added) throw new Error('member insert returned no row');
+
+    if (opts.teamIds?.length) {
+      await tx
+        .insert(teamMember)
+        .values(opts.teamIds.map((teamId) => ({ workspaceId, teamId, memberId: added.id })));
+    }
+    return added;
+  });
 }
