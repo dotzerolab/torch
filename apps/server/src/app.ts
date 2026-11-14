@@ -6,6 +6,7 @@ import { csrfGuard } from './auth/csrf.ts';
 import { isSessionResolver } from './auth/resolver.ts';
 import { createAuthRoutes } from './auth/routes.ts';
 import type { Db } from './db.ts';
+import { createInviteRoutes } from './invites/routes.ts';
 import type { Mailer } from './mail/mailer.ts';
 import { createMemberRoutes } from './members/routes.ts';
 import { createMutationRoutes } from './mutations/routes.ts';
@@ -110,6 +111,21 @@ export function createApp(deps: AppDeps): App {
     app.route('/api', createMutationRoutes({ orm: deps.db.orm, auth: deps.auth }));
     app.route('/api', createMemberRoutes({ orm: deps.db.orm, auth: deps.auth }));
     app.route('/api', createTeamRoutes({ orm: deps.db.orm, auth: deps.auth }));
+  }
+
+  if (deps.db?.orm && deps.auth && deps.mailer && deps.config) {
+    app.route(
+      '/api',
+      createInviteRoutes({
+        orm: deps.db.orm,
+        auth: deps.auth,
+        mailer: deps.mailer,
+        brand: deps.brand,
+        appUrl: deps.config.appUrl,
+        trustProxy: deps.config.trustProxy,
+        now: deps.now,
+      }),
+    );
   }
 
   if (deps.db?.orm && deps.electric && deps.auth) {

@@ -1,10 +1,10 @@
 // Issuing and consuming sign-in links. One link per email: it covers every workspace where that email is an
 // active member, as one login_token row per member sharing one token hash.
-import { loginToken, member, session } from '@torch/shared/db/schema';
+import { loginToken, member } from '@torch/shared/db/schema';
 import type { Locale } from '@torch/shared/i18n';
 import { and, asc, eq, gt, gte, inArray, isNull, sql } from 'drizzle-orm';
 import type { Orm } from '../db.ts';
-import { revokeSessions, SESSION_TTL_MS } from './sessions.ts';
+import { createSessionsForMembers, revokeSessions } from './sessions.ts';
 import { generateToken, hashToken } from './tokens.ts';
 
 export const LOGIN_TOKEN_TTL_MS = 15 * 60 * 1000;
@@ -139,19 +139,7 @@ export async function consumeMagicLink(
       );
     if (active.length === 0) return null;
 
-    const sessionToken = generateToken();
-    const tokenHash = hashToken(sessionToken);
-    await tx.insert(session).values(
-      active.map((row) => ({
-        workspaceId: row.workspaceId,
-        memberId: row.memberId,
-        tokenHash,
-        createdAt: now,
-        lastSeenAt: now,
-        expiresAt: new Date(now.getTime() + SESSION_TTL_MS),
-        userAgent,
-      })),
-    );
+    const sessionToken = await createSessionsForMembers(tx, active, { now, userAgent });
     if (revokeSessionToken) await revokeSessions(tx, revokeSessionToken, now);
     return { sessionToken };
   });
