@@ -190,7 +190,8 @@ pnpm --filter @torch/server bootstrap --name "Acme" --slug acme --email founder@
 ```
 
 `db:seed` is idempotent and for local development only: it refuses to run when `NODE_ENV=production`, and when `APP_URL`
-is set to anything but this machine (`localhost`, `127.0.0.1` or `[::1]`). Seeding a server that other people can reach
+is set to anything but this machine (`localhost`, `127.0.0.1` or `[::1]`); with `APP_URL` unset, `DATABASE_URL` has to name this
+machine too. Seeding a server that other people can reach
 needs the explicit `pnpm --filter @torch/server db:seed --allow-remote` (never in production). `bootstrap` creates the
 first workspace and its owner on a real installation; the owner signs in through the emailed link.
 

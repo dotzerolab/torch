@@ -73,6 +73,31 @@ describe.skipIf(!databaseUrl)('team routes', () => {
     });
   });
 
+  it('every answer of the team routes is no-store, refusals and the private-team directory included', async () => {
+    await withTempDatabase(async (db) => {
+      const { f, t, as } = await setup(db);
+      const owner = await as('owner');
+      const member = await as('member');
+
+      for (const [method, path, body] of routesOf(
+        f.workspaceId,
+        f.teams.eng.id,
+        f.members.member.id,
+      )) {
+        for (const [label, cookie] of [
+          ['owner', owner],
+          ['member', member],
+          ['no cookie', undefined],
+        ] as const) {
+          const res = await t.request(method, path, body, { cookie });
+          expect(res.headers.get('cache-control'), `${method} ${path} ${label} ${res.status}`).toBe(
+            'no-store',
+          );
+        }
+      }
+    });
+  });
+
   it('POST /teams: owner and admin get 201 with the team id and a txid; member and guest get 403', async () => {
     await withTempDatabase(async (db) => {
       const { f, t, as } = await setup(db);

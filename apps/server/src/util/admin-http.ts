@@ -25,8 +25,12 @@ const MESSAGES: Record<AdminErrorCode, string> = {
 
 export type FailureStatus = 400 | 401 | 403 | 404 | 409 | 413 | 429;
 
+// Every admin answer is personal (the member list carries emails): nothing may be kept by a browser or a proxy. Set
+// per answer here, not by a middleware, because a sub-app's middleware would also wrap the routes mounted after it.
+const NO_STORE = { 'Cache-Control': 'no-store' };
+
 export const adminFailure = (code: AdminErrorCode, status: FailureStatus, message?: string) =>
-  Response.json({ error: code, message: message ?? MESSAGES[code] }, { status });
+  Response.json({ error: code, message: message ?? MESSAGES[code] }, { status, headers: NO_STORE });
 
 /**
  * The actor of `:workspaceId`, or the response to send. A workspace id that is not a uuid is 404; no session for that
@@ -61,5 +65,5 @@ export function respond<T>(
   status: 200 | 201 = 200,
 ): Response {
   if (!result.ok) return adminFailure(result.code, result.status);
-  return Response.json(body(result.value), { status });
+  return Response.json(body(result.value), { status, headers: NO_STORE });
 }

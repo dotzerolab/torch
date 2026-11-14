@@ -72,6 +72,27 @@ describe.skipIf(!databaseUrl)('member routes', () => {
     });
   });
 
+  it('every answer of the member routes is no-store: the list carries emails, nothing here may be cached', async () => {
+    await withTempDatabase(async (db) => {
+      const { f, t, as } = await setup(db);
+      const owner = await as('owner');
+      const member = await as('member');
+
+      for (const [method, path, body] of routesOf(f.workspaceId, f.members.guest.id)) {
+        for (const [label, cookie] of [
+          ['owner', owner],
+          ['member', member],
+          ['no cookie', undefined],
+        ] as const) {
+          const res = await t.request(method, path, body, { cookie });
+          expect(res.headers.get('cache-control'), `${method} ${path} ${label} ${res.status}`).toBe(
+            'no-store',
+          );
+        }
+      }
+    });
+  });
+
   it('a workspace id that is not a uuid is 404', async () => {
     await withTempDatabase(async (db) => {
       const { t, as } = await setup(db);

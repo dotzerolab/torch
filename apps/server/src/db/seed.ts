@@ -185,19 +185,39 @@ const DEMO_EMAILS: Record<LayoutRole, string> = {
 /** Hostnames of this machine: the only APP_URL a dev seed accepts without `--allow-remote`. */
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
+/** Does this connection string name a Postgres on this machine (a loopback host, or a unix socket)? */
+function isLocalDatabase(databaseUrl: string | undefined): boolean {
+  if (!databaseUrl) return false;
+  try {
+    const hostname = new URL(databaseUrl).hostname.toLowerCase();
+    // No host (`postgres:///db?host=/var/run/postgresql`) and a percent-encoded socket directory are unix sockets.
+    return hostname === '' || hostname.startsWith('%2f') || LOCAL_HOSTS.has(hostname);
+  } catch {
+    // Not echoed: a malformed value may still carry a password.
+    return false;
+  }
+}
+
 /**
  * The demo members are `@example.test` addresses (undeliverable), so the demo workspace cannot be signed into by a
  * stranger, but it is still dev data: it never belongs on an installation that is reachable from elsewhere. The
- * guard is opt-in, so a forgotten NODE_ENV is not enough to seed one: unless APP_URL names this machine (or none is
- * set) it refuses, and `allowRemote` (CLI `--allow-remote`) is the explicit way past that. Production is never
- * seeded, flag or not.
+ * guard is opt-in, so a forgotten NODE_ENV is not enough to seed one: unless APP_URL names this machine it refuses,
+ * and `allowRemote` (CLI `--allow-remote`) is the explicit way past that. With APP_URL unset the database has to be
+ * the one that names this machine (a shell that exports only a remote DATABASE_URL must not seed it). Production is
+ * never seeded, flag or not.
  */
 function assertSeedAllowed(allowRemote: boolean): void {
   if (process.env.NODE_ENV === 'production') {
     throw new Error('seedDev refuses to run when NODE_ENV=production');
   }
+  if (allowRemote) return;
   const appUrl = process.env.APP_URL;
-  if (!appUrl || allowRemote) return;
+  if (!appUrl) {
+    if (isLocalDatabase(process.env.DATABASE_URL)) return;
+    throw new Error(
+      'seedDev refuses to run: APP_URL is not set and DATABASE_URL does not point at this machine. Set APP_URL to the local web app (see .env.example), or pass --allow-remote.',
+    );
+  }
   let hostname: string | undefined;
   try {
     hostname = new URL(appUrl).hostname;

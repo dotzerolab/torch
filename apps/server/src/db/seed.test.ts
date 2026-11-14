@@ -42,6 +42,55 @@ describe('seedDev guard', () => {
     await expect(seedDev(untouchable)).rejects.toThrow(/--allow-remote/);
   });
 
+  it.each([
+    'postgres://torch:pw@db.example.com:5432/torch',
+    'postgres://torch:pw@10.0.0.7:5432/torch',
+    'postgres://torch:pw@localhost.evil.test/torch',
+    'not a url',
+    '',
+  ])(
+    'refuses when APP_URL is unset and DATABASE_URL is "%s" (not shown to be this machine)',
+    async (databaseUrl) => {
+      vi.stubEnv('NODE_ENV', 'development');
+      vi.stubEnv('APP_URL', '');
+      vi.stubEnv('DATABASE_URL', databaseUrl);
+
+      const error = await seedDev(untouchable).catch((e: unknown) => e as Error);
+
+      expect(String((error as Error).message)).toMatch(/APP_URL is not set/);
+      expect(String((error as Error).message)).toMatch(/--allow-remote/);
+      // Never echoes the connection string (it carries the password).
+      expect(String((error as Error).message)).not.toContain('pw@');
+    },
+  );
+
+  it.each([
+    'postgres://torch:torch@localhost:5432/torch',
+    'postgres://torch:torch@127.0.0.1:5432/torch',
+    'postgres://torch:torch@[::1]:5432/torch',
+    'postgres:///torch?host=/var/run/postgresql',
+  ])(
+    'lets a seed through when APP_URL is unset and DATABASE_URL is local: %s',
+    async (databaseUrl) => {
+      vi.stubEnv('NODE_ENV', 'development');
+      vi.stubEnv('APP_URL', '');
+      vi.stubEnv('DATABASE_URL', databaseUrl);
+
+      // The guard passed: the first touch of the (untouchable) database is what throws.
+      await expect(seedDev(untouchable)).rejects.toThrow(/must not be touched/);
+    },
+  );
+
+  it('allowRemote still seeds with APP_URL unset and a remote DATABASE_URL', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    vi.stubEnv('APP_URL', '');
+    vi.stubEnv('DATABASE_URL', 'postgres://torch:pw@db.example.com:5432/torch');
+
+    await expect(seedDev(untouchable, { allowRemote: true })).rejects.toThrow(
+      /must not be touched/,
+    );
+  });
+
   it('refuses in production even with allowRemote, and even for a local APP_URL', async () => {
     vi.stubEnv('NODE_ENV', 'production');
     vi.stubEnv('APP_URL', 'http://localhost:5173');
