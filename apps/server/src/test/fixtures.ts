@@ -37,17 +37,67 @@ export async function withTempDatabase<T>(fn: (db: Db, url: string) => Promise<T
   url.pathname = `/${name}`;
 
   const admin = new pg.Client({ connectionString: baseUrl });
+  // A lost admin connection fails the next admin query (the test reports it); without a listener it would also be uncaught.
+  admin.on('error', () => {});
   await admin.connect();
   let db: Db | undefined;
+  let outcome: { value: T } | { error: unknown };
   try {
     await admin.query(`create database ${name}`);
     await runMigrations(url.toString());
     db = createDb(url.toString());
-    return await fn(db, url.toString());
-  } finally {
+    outcome = { value: await fn(db, url.toString()) };
+  } catch (error) {
+    outcome = { error };
+  }
+
+  let leftover: OpenConnection[] = [];
+  try {
     await db?.close();
+    leftover = await waitForNoConnections(admin, name);
+  } finally {
+    // `force` is only the cleanup for a test that leaked a connection (reported below); a clean teardown has nothing to cut.
     await admin.query(`drop database if exists ${name} with (force)`);
     await admin.end();
+  }
+
+  if ('error' in outcome) throw outcome.error;
+  if (leftover.length > 0) {
+    const list = leftover
+      .map(
+        (c) =>
+          `pid ${c.pid} state ${c.state} application "${c.application_name}" query: ${c.query}`,
+      )
+      .join('; ');
+    throw new Error(
+      `withTempDatabase: ${leftover.length} connection(s) still open on ${name} after the test, dropped by force: ${list}. ` +
+        'Release every pool client and close every pool or client the test (or the code under test) opened.',
+    );
+  }
+  return outcome.value;
+}
+
+type OpenConnection = {
+  pid: number;
+  state: string | null;
+  application_name: string;
+  query: string;
+};
+
+/**
+ * Connections to `name` other than this admin session. A closed connection can stay listed for a few milliseconds
+ * while its server process exits, so this polls briefly; whatever is still there at the deadline is a real leftover.
+ */
+async function waitForNoConnections(admin: pg.Client, name: string): Promise<OpenConnection[]> {
+  const deadline = Date.now() + 2000;
+  for (;;) {
+    const { rows } = await admin.query<OpenConnection>(
+      `select pid, state, application_name, left(query, 120) as query
+         from pg_stat_activity where datname = $1 and pid <> pg_backend_pid()`,
+      [name],
+    );
+    if (rows.length === 0 || Date.now() >= deadline) return rows;
+    await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
 

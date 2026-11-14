@@ -1,5 +1,6 @@
 import { member, teamMember } from '@torch/shared/db/schema';
 import { and, eq } from 'drizzle-orm';
+import pg from 'pg';
 import { describe, expect, it } from 'vitest';
 import { addMember, createWorkspaceFixture, pgErrorCode, withTempDatabase } from './fixtures.ts';
 
@@ -7,6 +8,39 @@ const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
   console.warn('[fixtures.test] SKIPPED the fixture integration tests: DATABASE_URL is not set.');
 }
+
+describe.skipIf(!databaseUrl)('withTempDatabase (Postgres)', () => {
+  it('fails loudly, listing the connection, when a test leaves one open on the database', async () => {
+    const outcome = withTempDatabase(async (_db, url) => {
+      const leaked = new pg.Client({ connectionString: url, application_name: 'leaky-test' });
+      // The teardown still drops the database and so cuts this connection; the listener keeps that cut from crashing.
+      leaked.on('error', () => {});
+      await leaked.connect();
+    });
+
+    await expect(outcome).rejects.toThrow(/1 connection\(s\) still open.*leaky-test/s);
+  });
+
+  it('keeps the error of the test when the test fails and leaves a connection open', async () => {
+    const outcome = withTempDatabase(async (_db, url) => {
+      const leaked = new pg.Client({ connectionString: url });
+      leaked.on('error', () => {});
+      await leaked.connect();
+      throw new Error('the test itself failed');
+    });
+
+    await expect(outcome).rejects.toThrow('the test itself failed');
+  });
+
+  it('closes cleanly when every connection was released', async () => {
+    const outcome = withTempDatabase(async (db) => {
+      await db.pool.query('select 1');
+      return 'done';
+    });
+
+    await expect(outcome).resolves.toBe('done');
+  });
+});
 
 describe.skipIf(!databaseUrl)('addMember (Postgres)', () => {
   it('creates an active member with a normalised email, the given role and a valid handle', async () => {

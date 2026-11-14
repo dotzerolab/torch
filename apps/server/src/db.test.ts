@@ -66,4 +66,20 @@ describe.skipIf(!databaseUrl)('Postgres integration (dev compose)', () => {
       await db.close();
     }
   });
+
+  // `pool.end()` alone resolves while the sockets are still open; dropping a database right after then makes the
+  // server cut the still-open backends with 57P01, an unhandled error when nothing listens on that client.
+  it('close() resolves only once every connection is closed', async () => {
+    const db = createDb(databaseUrl as string);
+    const ended: boolean[] = [];
+    const first = await db.pool.connect();
+    const second = await db.pool.connect();
+    for (const client of [first, second]) client.once('end', () => ended.push(true));
+    first.release();
+    second.release();
+
+    await db.close();
+
+    expect(ended).toHaveLength(2);
+  });
 });

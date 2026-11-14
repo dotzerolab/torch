@@ -26,14 +26,50 @@ export function interpretWalLevel(walLevel: string): DbHealth {
   };
 }
 
+/** Longest `close` waits for the sockets to close after the pool let go of its clients. */
+const POOL_CLOSE_TIMEOUT_MS = 5000;
+
+/**
+ * A pool that always has an error listener (a pool without one turns the error of an idle client, such as the
+ * server cutting it, into an uncaught exception) and a `close` that resolves only when every connection is closed.
+ * `pool.end()` alone resolves as soon as the pool lets go of its clients, while their sockets are still open and the
+ * server backends alive; a `drop database ... with (force)` right after then cuts those backends with 57P01
+ * (`terminating connection due to administrator command`). Use this for every pool, never `new pg.Pool`.
+ */
+export function createPool(options: pg.PoolConfig): { pool: pg.Pool; close(): Promise<void> } {
+  const pool = new pg.Pool(options);
+  pool.on('error', (error) => console.error('database pool error:', error.message));
+
+  const open = new Set<pg.PoolClient>();
+  pool.on('connect', (client) => {
+    open.add(client);
+    client.once('end', () => open.delete(client));
+  });
+
+  return {
+    pool,
+    async close() {
+      await pool.end();
+      const closed = [...open].map(
+        (client) => new Promise<void>((resolve) => client.once('end', resolve)),
+      );
+      let timer: NodeJS.Timeout | undefined;
+      const gaveUp = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, POOL_CLOSE_TIMEOUT_MS);
+      });
+      await Promise.race([Promise.all(closed), gaveUp]);
+      clearTimeout(timer);
+    },
+  };
+}
+
 /** One connection pool, shared by the Drizzle handle and by code that needs raw SQL. */
 export function createDb(databaseUrl: string): Db {
-  const pool = new pg.Pool({
+  const { pool, close } = createPool({
     connectionString: databaseUrl,
     max: 5,
     connectionTimeoutMillis: 3000,
   });
-  pool.on('error', (error) => console.error('database pool error:', error.message));
 
   return {
     orm: drizzle({ client: pool, schema }),
@@ -50,6 +86,6 @@ export function createDb(databaseUrl: string): Db {
         return { status: 'error', reason: 'cannot reach the database' };
       }
     },
-    close: () => pool.end(),
+    close,
   };
 }
