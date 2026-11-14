@@ -1,14 +1,19 @@
 import type { Brand } from '@torch/shared/brand';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
+import { refreshSessionCookie } from './auth/cookie-refresh.ts';
 import { csrfGuard } from './auth/csrf.ts';
+import { isSessionResolver } from './auth/resolver.ts';
 import { createAuthRoutes } from './auth/routes.ts';
 import type { Db } from './db.ts';
+import { createInviteRoutes } from './invites/routes.ts';
 import type { Mailer } from './mail/mailer.ts';
+import { createMemberRoutes } from './members/routes.ts';
 import { createMutationRoutes } from './mutations/routes.ts';
 import type { ActorResolver } from './permissions/load-actor.ts';
 import type { ElectricConfig } from './sync/config.ts';
 import { createSyncRoutes } from './sync/routes.ts';
+import { createTeamRoutes } from './teams/routes.ts';
 
 // Dependencies injected by main.ts (and by tests). Grows as tasks add routes.
 export type AppDeps = {
@@ -74,6 +79,12 @@ export function createApp(deps: AppDeps): App {
     }),
   );
 
+  // A session slides forward when it is used; when the resolver says it did for this request, the cookie is sent
+  // again with the new lifetime, so a browser in use stays signed in up to the 90-day ceiling.
+  if (deps.auth && deps.config && isSessionResolver(deps.auth)) {
+    app.use('/api/*', refreshSessionCookie(deps.auth, deps.config.appUrl, deps.now));
+  }
+
   app.get('/health', (c) => c.json({ status: 'ok' }));
   app.get('/api/brand', (c) => c.json(deps.brand));
   app.get('/health/db', async (c) => {
@@ -98,6 +109,23 @@ export function createApp(deps: AppDeps): App {
 
   if (deps.db?.orm && deps.auth) {
     app.route('/api', createMutationRoutes({ orm: deps.db.orm, auth: deps.auth }));
+    app.route('/api', createMemberRoutes({ orm: deps.db.orm, auth: deps.auth }));
+    app.route('/api', createTeamRoutes({ orm: deps.db.orm, auth: deps.auth }));
+  }
+
+  if (deps.db?.orm && deps.auth && deps.mailer && deps.config) {
+    app.route(
+      '/api',
+      createInviteRoutes({
+        orm: deps.db.orm,
+        auth: deps.auth,
+        mailer: deps.mailer,
+        brand: deps.brand,
+        appUrl: deps.config.appUrl,
+        trustProxy: deps.config.trustProxy,
+        now: deps.now,
+      }),
+    );
   }
 
   if (deps.db?.orm && deps.electric && deps.auth) {

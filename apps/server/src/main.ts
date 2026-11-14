@@ -2,6 +2,7 @@ import { serve } from '@hono/node-server';
 import { BrandConfigError, loadBrand } from '@torch/shared/brand';
 import { createApp } from './app.ts';
 import { createSessionActorResolver } from './auth/resolver.ts';
+import { startCleanupSchedule } from './db/cleanup.ts';
 import { createDb } from './db.ts';
 import { createSmtpMailer } from './mail/mailer.ts';
 import { ElectricConfigError, readElectricConfig } from './sync/config.ts';
@@ -62,7 +63,11 @@ const server = serve({ fetch: app.fetch, port });
 
 console.info(`server listening on port ${port}`);
 
+// Expired sign-in tokens, old sessions and dead invitations: once at startup, then every 6 hours (counts are logged).
+const stopCleanup = db ? startCleanupSchedule(db.orm) : undefined;
+
 function shutdown() {
+  stopCleanup?.();
   server.close(() => {
     void (db ? db.close() : Promise.resolve()).finally(() => process.exit(0));
   });

@@ -1,4 +1,7 @@
 import {
+  auditLog,
+  invite,
+  inviteTeam,
   issue,
   loginToken,
   member,
@@ -31,6 +34,9 @@ const TABLES = [
   'issue',
   'login_token',
   'session',
+  'invite',
+  'invite_team',
+  'audit_log',
 ];
 
 describe.skipIf(!databaseUrl)('schema (Postgres)', () => {
@@ -300,6 +306,197 @@ describe.skipIf(!databaseUrl)('schema (Postgres)', () => {
 
       const slugs = await db.orm.select({ slug: workspace.slug }).from(workspace);
       expect(new Set(slugs.map((row) => row.slug)).size).toBe(2);
+    });
+  });
+
+  describe('invites and the audit log', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const hash = (n: number) => String(n).padStart(64, '0');
+    const inviteRow = (
+      workspaceId: string,
+      invitedBy: string,
+      over: Partial<typeof invite.$inferInsert> = {},
+    ): typeof invite.$inferInsert => ({
+      workspaceId,
+      email: 'invitee@example.test',
+      role: 'member',
+      tokenHash: hash(1),
+      invitedBy,
+      expiresAt: new Date(Date.now() + 7 * DAY),
+      ...over,
+    });
+
+    it('an invite email must be stored lower-case and trimmed', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const insertEmail = (email: string) =>
+          db.orm
+            .insert(invite)
+            .values(inviteRow(a.workspaceId, a.members.owner.id, { email }))
+            .then(() => 'inserted')
+            .catch(pgErrorCode);
+
+        await expect(insertEmail(' padded@example.test ')).resolves.toBe('23514');
+        await expect(insertEmail('Capitals@Example.test')).resolves.toBe('23514');
+        await expect(insertEmail('clean@example.test')).resolves.toBe('inserted');
+      });
+    });
+
+    it('one pending invite per email per workspace; a revoked or accepted one does not block a new one', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const owner = a.members.owner.id;
+        const insertInvite = (n: number, workspace = a) =>
+          db.orm
+            .insert(invite)
+            .values(
+              inviteRow(workspace.workspaceId, workspace.members.owner.id, { tokenHash: hash(n) }),
+            )
+            .returning({ id: invite.id })
+            .then((rows) => rows[0]?.id ?? 'no row')
+            .catch((error) => pgErrorCode(error) ?? 'unknown error');
+
+        const first = await insertInvite(1);
+        expect(first).toMatch(/^[0-9a-f-]{36}$/);
+        // Same email, still pending: refused.
+        await expect(insertInvite(2)).resolves.toBe('23505');
+        // The same email in another workspace is a different invite.
+        await expect(insertInvite(3, b)).resolves.toMatch(/^[0-9a-f-]{36}$/);
+
+        // Revoked: a new invite for the same email is allowed again.
+        await db.orm.update(invite).set({ revokedAt: new Date() }).where(eq(invite.id, first));
+        const second = await insertInvite(4);
+        expect(second).toMatch(/^[0-9a-f-]{36}$/);
+        await expect(insertInvite(5)).resolves.toBe('23505');
+
+        // Accepted: same.
+        await db.orm
+          .update(invite)
+          .set({ acceptedAt: new Date(), acceptedMemberId: owner })
+          .where(eq(invite.id, second));
+        await expect(insertInvite(6)).resolves.toMatch(/^[0-9a-f-]{36}$/);
+      });
+    });
+
+    it('an invite cannot name an inviter or an accepted member of another workspace', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const attempt = (
+          over: Partial<typeof invite.$inferInsert>,
+          invitedBy = a.members.owner.id,
+        ) =>
+          db.orm
+            .insert(invite)
+            .values(inviteRow(a.workspaceId, invitedBy, over))
+            .then(() => 'inserted')
+            .catch(pgErrorCode);
+
+        await expect(attempt({}, b.members.owner.id)).resolves.toBe('23503');
+        await expect(
+          attempt({ acceptedAt: new Date(), acceptedMemberId: b.members.owner.id }),
+        ).resolves.toBe('23503');
+        await expect(
+          attempt({ acceptedAt: new Date(), acceptedMemberId: a.members.member.id }),
+        ).resolves.toBe('inserted');
+      });
+    });
+
+    it('an invite_team row cannot point at a team of another workspace', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const [created] = await db.orm
+          .insert(invite)
+          .values(inviteRow(a.workspaceId, a.members.owner.id))
+          .returning();
+        if (!created) throw new Error('invite insert returned no row');
+        const link = (workspaceId: string, teamId: string, inviteId = created.id) =>
+          db.orm
+            .insert(inviteTeam)
+            .values({ workspaceId, inviteId, teamId })
+            .then(() => 'inserted')
+            .catch(pgErrorCode);
+
+        await expect(link(a.workspaceId, b.teams.eng.id)).resolves.toBe('23503');
+        // The invite itself belongs to workspace A: naming workspace B for the row does not work either.
+        await expect(link(b.workspaceId, b.teams.eng.id)).resolves.toBe('23503');
+        await expect(link(a.workspaceId, a.teams.eng.id)).resolves.toBe('inserted');
+        // One team once per invite.
+        await expect(link(a.workspaceId, a.teams.eng.id)).resolves.toBe('23505');
+      });
+    });
+
+    it('deleting an invite removes its team links', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const [created] = await db.orm
+          .insert(invite)
+          .values(inviteRow(a.workspaceId, a.members.owner.id))
+          .returning();
+        if (!created) throw new Error('invite insert returned no row');
+        await db.orm
+          .insert(inviteTeam)
+          .values({ workspaceId: a.workspaceId, inviteId: created.id, teamId: a.teams.eng.id });
+
+        await db.orm.delete(invite).where(eq(invite.id, created.id));
+
+        const rows = await db.orm
+          .select()
+          .from(inviteTeam)
+          .where(eq(inviteTeam.inviteId, created.id));
+        expect(rows).toEqual([]);
+      });
+    });
+
+    it('an audit row cannot name an actor of another workspace', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const record = (actorMemberId: string | null, workspaceId = a.workspaceId) =>
+          db.orm
+            .insert(auditLog)
+            .values({
+              workspaceId,
+              actorMemberId,
+              action: 'member.role_changed',
+              targetType: 'member',
+              targetId: a.members.member.id,
+            })
+            .then(() => 'inserted')
+            .catch(pgErrorCode);
+
+        await expect(record(b.members.owner.id)).resolves.toBe('23503');
+        await expect(record(a.members.owner.id)).resolves.toBe('inserted');
+        // A system action has no actor; the workspace must still exist.
+        await expect(record(null)).resolves.toBe('inserted');
+        await expect(record(null, '00000000-0000-4000-8000-0000000000ff')).resolves.toBe('23503');
+      });
+    });
+
+    it('audit metadata defaults to an empty object and rows read back newest first through the index key', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        await db.orm.insert(auditLog).values({
+          workspaceId: a.workspaceId,
+          actorMemberId: a.members.owner.id,
+          action: 'team.created',
+          targetType: 'team',
+        });
+
+        const [row] = await db.orm
+          .select()
+          .from(auditLog)
+          .where(eq(auditLog.workspaceId, a.workspaceId));
+
+        expect(row?.metadata).toEqual({});
+        expect(row?.targetId).toBeNull();
+        const indexes = await db.pool.query<{ indexname: string }>(
+          "select indexname from pg_indexes where tablename = 'audit_log'",
+        );
+        expect(indexes.rows.map((r) => r.indexname)).toContain('audit_log_workspace_created_idx');
+      });
     });
   });
 

@@ -12,7 +12,7 @@ const acme: Brand = {
   emailSenderName: 'Acme Tasks',
   emailSenderAddress: 'no-reply@acme.example',
 };
-const link = 'https://app.example.test/auth/verify?token=abc_DEF-123';
+const link = 'https://app.example.test/auth/verify#token=abc_DEF-123';
 
 describe('renderMagicLinkEmail', () => {
   it('renders EN and IT with the link, the brand name and the expiry', () => {
@@ -47,7 +47,7 @@ describe('renderMagicLinkEmail', () => {
 
   it('brand name and link are HTML-escaped in the html part', () => {
     const evil = { ...acme, productName: 'A<b>' };
-    const evilLink = 'https://app.example.test/auth/verify?token=a&x="y"';
+    const evilLink = 'https://app.example.test/auth/verify#token=a&x="y"';
 
     const mail = renderMagicLinkEmail({
       brand: evil,

@@ -2,9 +2,10 @@
 // random token; only its SHA-256 is stored.
 import { member, session, workspace } from '@torch/shared/db/schema';
 import { and, asc, eq, gt, isNull, lte, max, sql } from 'drizzle-orm';
-import type { Orm } from '../db.ts';
+import { generateCookie } from 'hono/cookie';
+import type { Orm, Tx } from '../db.ts';
 import { isUuid } from '../util/uuid.ts';
-import { hashToken, isWellFormedToken } from './tokens.ts';
+import { generateToken, hashToken, isWellFormedToken } from './tokens.ts';
 
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const SESSION_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
@@ -23,6 +24,25 @@ export const isSecureUrl = (appUrl: string) => new URL(appUrl).protocol === 'htt
 
 /** `__Host-sid` over https (the prefix forbids Domain and demands Secure and Path=/), `sid` over plain http. */
 export const sessionCookieName = (appUrl: string) => (isSecureUrl(appUrl) ? '__Host-sid' : 'sid');
+
+/**
+ * The `Set-Cookie` value of the session cookie: it ends when the session row does (`expiresAt`), measured from
+ * `now`. Sign-in and every refresh build the cookie here, so the flags can never drift apart.
+ */
+export function buildSessionCookie(
+  appUrl: string,
+  token: string,
+  expiresAt: Date,
+  now: Date = new Date(),
+): string {
+  return generateCookie(sessionCookieName(appUrl), token, {
+    httpOnly: true,
+    secure: isSecureUrl(appUrl),
+    sameSite: 'Lax',
+    path: '/',
+    maxAge: Math.max(1, Math.floor((expiresAt.getTime() - now.getTime()) / 1000)),
+  });
+}
 
 /** New expiry for a session used at `now`: 30 days sliding, never past `createdAt` + 90 days. */
 export function slideExpiry(createdAt: Date, now: Date): Date {
@@ -62,9 +82,40 @@ export async function findSession(orm: Orm, token: string, workspaceId: string, 
   return row ?? null;
 }
 
-/** Slides the expiry of every live session of this cookie that was last touched over an hour ago. */
-export async function touchSessions(orm: Orm, token: string, now: Date): Promise<void> {
-  await orm
+/**
+ * Opens a session for each of `members` (one row per workspace and member, all behind one new cookie token, so
+ * one hash) and returns the raw token for the cookie. The caller passes its own `tx`, so the sessions commit or
+ * roll back with whatever made them necessary (a consumed sign-in link, an accepted invite).
+ */
+export async function createSessionsForMembers(
+  tx: Tx,
+  members: { workspaceId: string; memberId: string }[],
+  input: { now: Date; userAgent: string | null },
+): Promise<string> {
+  const { now, userAgent } = input;
+  const token = generateToken();
+  const tokenHash = hashToken(token);
+  await tx.insert(session).values(
+    members.map((row) => ({
+      workspaceId: row.workspaceId,
+      memberId: row.memberId,
+      tokenHash,
+      createdAt: now,
+      lastSeenAt: now,
+      expiresAt: new Date(now.getTime() + SESSION_TTL_MS),
+      userAgent,
+    })),
+  );
+  return token;
+}
+
+/**
+ * Slides the expiry of every live session of this cookie that was last touched over an hour ago. Returns the
+ * newest expiry it wrote, or null when it touched nothing (touched recently, or revoked or expired meanwhile),
+ * so a caller can tell the browser exactly when its cookie now ends.
+ */
+export async function touchSessions(orm: Orm, token: string, now: Date): Promise<Date | null> {
+  const touched = await orm
     .update(session)
     .set({
       lastSeenAt: now,
@@ -77,7 +128,11 @@ export async function touchSessions(orm: Orm, token: string, now: Date): Promise
         gt(session.expiresAt, now),
         lte(session.lastSeenAt, new Date(now.getTime() - TOUCH_INTERVAL_MS)),
       ),
-    );
+    )
+    .returning({ expiresAt: session.expiresAt });
+  let newest: Date | null = null;
+  for (const row of touched) if (!newest || row.expiresAt > newest) newest = row.expiresAt;
+  return newest;
 }
 
 /**
@@ -129,8 +184,15 @@ export async function listSessionWorkspaces(
     .orderBy(asc(workspace.createdAt), asc(workspace.id));
 }
 
-/** Logout: revokes the cookie's session in every workspace. */
-export async function revokeSessions(orm: Orm, token: string, now: Date): Promise<void> {
+/**
+ * Revokes the cookie's session in every workspace: logout, and a sign-in made with a cookie that is already
+ * signed in (then `orm` is the sign-in's transaction, so the old sessions end together with the new ones starting).
+ */
+export async function revokeSessions(
+  orm: Pick<Orm, 'update'>,
+  token: string,
+  now: Date,
+): Promise<void> {
   await orm
     .update(session)
     .set({ revokedAt: now })

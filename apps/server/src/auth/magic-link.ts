@@ -1,10 +1,10 @@
 // Issuing and consuming sign-in links. One link per email: it covers every workspace where that email is an
 // active member, as one login_token row per member sharing one token hash.
-import { loginToken, member, session } from '@torch/shared/db/schema';
+import { loginToken, member } from '@torch/shared/db/schema';
 import type { Locale } from '@torch/shared/i18n';
 import { and, asc, eq, gt, gte, inArray, isNull, sql } from 'drizzle-orm';
 import type { Orm } from '../db.ts';
-import { SESSION_TTL_MS } from './sessions.ts';
+import { createSessionsForMembers, revokeSessions } from './sessions.ts';
 import { generateToken, hashToken } from './tokens.ts';
 
 export const LOGIN_TOKEN_TTL_MS = 15 * 60 * 1000;
@@ -64,16 +64,49 @@ export async function issueMagicLink(
 }
 
 /**
+ * The email a valid link would sign in, or null for an unknown, used or expired link and for a link whose
+ * members were all deactivated (the cases where `consumeMagicLink` answers null). Reads only: the link stays
+ * usable, so the page can show who is signing in before the person presses Continue.
+ */
+export async function previewMagicLink(
+  orm: Orm,
+  input: { token: string; now: Date },
+): Promise<string | null> {
+  const [row] = await orm
+    .select({ email: member.email })
+    .from(loginToken)
+    .innerJoin(
+      member,
+      and(eq(member.workspaceId, loginToken.workspaceId), eq(member.id, loginToken.memberId)),
+    )
+    .where(
+      and(
+        eq(loginToken.tokenHash, hashToken(input.token)),
+        isNull(loginToken.usedAt),
+        gt(loginToken.expiresAt, input.now),
+        isNull(member.deactivatedAt),
+      ),
+    )
+    .orderBy(asc(member.createdAt), asc(member.id))
+    .limit(1);
+  return row?.email ?? null;
+}
+
+/**
  * Burns the link and opens a session in every workspace where the member is still active. The burn is one
  * atomic UPDATE ... WHERE used_at IS NULL, so of any number of concurrent calls exactly one gets rows back.
  * Returns the new session token, or null for an unknown, used or expired link and for a link whose members
  * were all deactivated meanwhile (that link stays burned).
+ *
+ * `revokeSessionToken` is the cookie the browser already holds: its sessions are revoked in the same
+ * transaction that opens the new ones, so a sign-in never leaves the old cookie alive, and a link that fails
+ * leaves it signed in.
  */
 export async function consumeMagicLink(
   orm: Orm,
-  input: { token: string; now: Date; userAgent: string | null },
+  input: { token: string; now: Date; userAgent: string | null; revokeSessionToken?: string | null },
 ): Promise<{ sessionToken: string } | null> {
-  const { token, now, userAgent } = input;
+  const { token, now, userAgent, revokeSessionToken } = input;
   return orm.transaction(async (tx) => {
     const consumed = await tx
       .update(loginToken)
@@ -103,22 +136,15 @@ export async function consumeMagicLink(
           ),
           isNull(member.deactivatedAt),
         ),
-      );
+      )
+      // `for share`: a deactivation running at the same time either is seen here (the member is not active any
+      // more) or waits for this transaction, and its revocation of the member's sessions then finds the ones opened
+      // below. Without it the member could end up deactivated with a live session that a reactivation revives.
+      .for('share', { of: member });
     if (active.length === 0) return null;
 
-    const sessionToken = generateToken();
-    const tokenHash = hashToken(sessionToken);
-    await tx.insert(session).values(
-      active.map((row) => ({
-        workspaceId: row.workspaceId,
-        memberId: row.memberId,
-        tokenHash,
-        createdAt: now,
-        lastSeenAt: now,
-        expiresAt: new Date(now.getTime() + SESSION_TTL_MS),
-        userAgent,
-      })),
-    );
+    const sessionToken = await createSessionsForMembers(tx, active, { now, userAgent });
+    if (revokeSessionToken) await revokeSessions(tx, revokeSessionToken, now);
     return { sessionToken };
   });
 }

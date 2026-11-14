@@ -189,8 +189,15 @@ pnpm --filter @torch/server db:seed                    # dev only: workspace "de
 pnpm --filter @torch/server bootstrap --name "Acme" --slug acme --email founder@example.test --owner-name "Fiona Founder"
 ```
 
-`db:seed` is idempotent and refuses to run when `NODE_ENV=production`. `bootstrap` creates the first workspace and its
-owner on a real installation; the owner signs in through the emailed link.
+`db:seed` is idempotent and for local development only: it refuses to run when `NODE_ENV=production`, and when `APP_URL`
+is set to anything but this machine (`localhost`, `127.0.0.1` or `[::1]`); with `APP_URL` unset, `DATABASE_URL` has to name this
+machine too. Seeding a server that other people can reach
+needs the explicit `pnpm --filter @torch/server db:seed --allow-remote` (never in production). `bootstrap` creates the
+first workspace and its owner on a real installation; the owner signs in through the emailed link.
+
+The server tidies up after itself: at startup and every 6 hours it deletes sign-in tokens that expired over a day ago,
+sessions that expired or were revoked over 7 days ago, and invitations that were never accepted and expired or were
+revoked over 30 days ago. Accepted invitations stay. It logs the counts, nothing else.
 
 ### Gates
 

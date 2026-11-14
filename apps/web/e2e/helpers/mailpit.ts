@@ -40,10 +40,10 @@ export async function waitForMessage(
   }
 }
 
-/** The sign-in link of the newest message to `email` (the first `/auth/verify?token=` URL in its text part). */
+/** The sign-in link of the newest message to `email` (the first `/auth/verify#token=` URL in its text part). */
 export async function latestSignInLink(email: string): Promise<string> {
   const { text } = await waitForMessage(email);
-  const link = text.match(/https?:\/\/[^\s<>"]+\/auth\/verify\?token=[\w-]+/)?.[0];
+  const link = text.match(/https?:\/\/[^\s<>"]+\/auth\/verify#token=[\w-]+/)?.[0];
   if (!link) throw new Error(`no sign-in link in the email to ${email}`);
   return link;
 }

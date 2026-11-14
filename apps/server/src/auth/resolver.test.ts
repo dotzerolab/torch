@@ -178,3 +178,95 @@ describe.skipIf(!databaseUrl)('createSessionActorResolver', () => {
     });
   });
 });
+
+describe.skipIf(!databaseUrl)('SessionResolver.touchedExpiry', () => {
+  it('is the new expiry of the row when resolveActor slid it, and undefined when it did not', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `member-${unique()}@example.test`;
+      const f = await createWorkspaceFixture(db.orm, { email: { member: email } });
+      const t = createAuthTestApp(db);
+      const startedAt = t.clock.current.getTime();
+      const { cookie } = await t.signIn(email);
+
+      // Under an hour: the row is not rewritten, so there is no new expiry to report.
+      t.clock.current = new Date(startedAt + 59 * MINUTE);
+      const early = withCookie(cookie);
+      expect(await t.auth.resolveActor(early, f.workspaceId)).not.toBeNull();
+      expect(t.auth.touchedExpiry(early)).toBeUndefined();
+
+      // Over an hour: the row is rewritten and the reported expiry is exactly the stored one.
+      t.clock.current = new Date(startedAt + HOUR + MINUTE);
+      const later = withCookie(cookie);
+      expect(await t.auth.resolveActor(later, f.workspaceId)).not.toBeNull();
+      const [row] = await db.orm.select().from(session);
+      expect(t.auth.touchedExpiry(later)?.getTime()).toBe(startedAt + HOUR + MINUTE + 30 * DAY);
+      expect(t.auth.touchedExpiry(later)?.getTime()).toBe(row?.expiresAt.getTime());
+    });
+  });
+
+  it('is remembered per request object, not per cookie', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `member-${unique()}@example.test`;
+      const f = await createWorkspaceFixture(db.orm, { email: { member: email } });
+      const t = createAuthTestApp(db);
+      const { cookie } = await t.signIn(email);
+      t.clock.current = new Date(t.clock.current.getTime() + 2 * HOUR);
+
+      const touching = withCookie(cookie);
+      await t.auth.resolveActor(touching, f.workspaceId);
+      const sameCookieOtherRequest = withCookie(cookie);
+      await t.auth.resolveActor(sameCookieOtherRequest, f.workspaceId);
+
+      expect(t.auth.touchedExpiry(touching)).toBeInstanceOf(Date);
+      // The second request found a row touched a moment ago: nothing to refresh for it.
+      expect(t.auth.touchedExpiry(sameCookieOtherRequest)).toBeUndefined();
+      expect(t.auth.touchedExpiry(withCookie(cookie))).toBeUndefined();
+    });
+  });
+
+  it('is undefined when no actor was resolved (no cookie, other workspace, deactivated member)', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `member-${unique()}@example.test`;
+      const f = await createWorkspaceFixture(db.orm, { email: { member: email } });
+      const other = await createWorkspaceFixture(db.orm);
+      const t = createAuthTestApp(db);
+      const { cookie } = await t.signIn(email);
+      t.clock.current = new Date(t.clock.current.getTime() + 2 * HOUR);
+
+      const noCookie = withCookie();
+      const wrongWorkspace = withCookie(cookie);
+      await t.auth.resolveActor(noCookie, f.workspaceId);
+      await t.auth.resolveActor(wrongWorkspace, other.workspaceId);
+      await db.orm
+        .update(member)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(member.id, f.members.member.id));
+      const deactivated = withCookie(cookie);
+      await t.auth.resolveActor(deactivated, f.workspaceId);
+
+      expect(t.auth.touchedExpiry(noCookie)).toBeUndefined();
+      expect(t.auth.touchedExpiry(wrongWorkspace)).toBeUndefined();
+      expect(t.auth.touchedExpiry(deactivated)).toBeUndefined();
+    });
+  });
+
+  it('never goes past created_at + 90 days', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `member-${unique()}@example.test`;
+      const f = await createWorkspaceFixture(db.orm, { email: { member: email } });
+      const t = createAuthTestApp(db);
+      const startedAt = t.clock.current.getTime();
+      const { cookie } = await t.signIn(email);
+      for (const day of [25, 50, 75]) {
+        t.clock.current = new Date(startedAt + day * DAY);
+        await t.auth.resolveActor(withCookie(cookie), f.workspaceId);
+      }
+
+      t.clock.current = new Date(startedAt + 89 * DAY);
+      const request = withCookie(cookie);
+      await t.auth.resolveActor(request, f.workspaceId);
+
+      expect(t.auth.touchedExpiry(request)?.getTime()).toBe(startedAt + 90 * DAY);
+    });
+  });
+});

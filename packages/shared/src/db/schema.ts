@@ -8,6 +8,7 @@ import {
   foreignKey,
   index,
   integer,
+  jsonb,
   pgEnum,
   pgTable,
   primaryKey,
@@ -15,14 +16,13 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 
-export const MEMBER_ROLES = ['owner', 'admin', 'member', 'guest'] as const;
-export type MemberRole = (typeof MEMBER_ROLES)[number];
+import { MEMBER_LOCALES, MEMBER_ROLES } from './enums.ts';
 
-export const MEMBER_LOCALES = ['en', 'it'] as const;
-export type MemberLocale = (typeof MEMBER_LOCALES)[number];
+export { MEMBER_LOCALES, MEMBER_ROLES, type MemberLocale, type MemberRole } from './enums.ts';
 
 export const WORKFLOW_STATE_TYPES = [
   'triage',
@@ -33,6 +33,28 @@ export const WORKFLOW_STATE_TYPES = [
   'canceled',
 ] as const;
 export type WorkflowStateType = (typeof WORKFLOW_STATE_TYPES)[number];
+
+/** What the audit log records (admin actions). Entries carry ids, roles and counts, never emails or free text. */
+export const AUDIT_ACTIONS = [
+  'member.role_changed',
+  'member.deactivated',
+  'member.reactivated',
+  'member.profile_updated',
+  'invite.created',
+  'invite.resent',
+  'invite.revoked',
+  'invite.accepted',
+  'team.created',
+  'team.updated',
+  'team.member_added',
+  'team.member_removed',
+  'team.admin_joined',
+  'team.emptied',
+] as const;
+export type AuditAction = (typeof AUDIT_ACTIONS)[number];
+
+export const AUDIT_TARGET_TYPES = ['member', 'invite', 'team', 'team_member'] as const;
+export type AuditTargetType = (typeof AUDIT_TARGET_TYPES)[number];
 
 export const memberRole = pgEnum('member_role', MEMBER_ROLES);
 export const locale = pgEnum('locale', MEMBER_LOCALES);
@@ -233,6 +255,103 @@ export const session = pgTable(
   ],
 );
 
+/**
+ * A pending, accepted or revoked invitation. Only the SHA-256 of the link token is stored. One pending invite per
+ * email per workspace (the partial unique index); a revoked or accepted one frees the email again.
+ */
+export const invite = pgTable(
+  'invite',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id').notNull(),
+    email: text('email').notNull(),
+    role: memberRole('role').notNull(),
+    locale: locale('locale').notNull().default('en'),
+    tokenHash: text('token_hash').notNull(),
+    invitedBy: uuid('invited_by').notNull(),
+    createdAt: createdAt(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    acceptedAt: timestamp('accepted_at', { withTimezone: true }),
+    acceptedMemberId: uuid('accepted_member_id'),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  },
+  (t) => [
+    // Target of invite_team's composite foreign key.
+    unique('invite_workspace_id_unique').on(t.workspaceId, t.id),
+    index('invite_token_hash_idx').on(t.tokenHash),
+    uniqueIndex('invite_pending_email_unique')
+      .on(t.workspaceId, t.email)
+      .where(sql`${t.acceptedAt} is null and ${t.revokedAt} is null`),
+    check('invite_email_normalised', sql`${t.email} = lower(btrim(${t.email}))`),
+    foreignKey({
+      name: 'invite_invited_by_fk',
+      columns: [t.workspaceId, t.invitedBy],
+      foreignColumns: [member.workspaceId, member.id],
+    }),
+    foreignKey({
+      name: 'invite_accepted_member_fk',
+      columns: [t.workspaceId, t.acceptedMemberId],
+      foreignColumns: [member.workspaceId, member.id],
+    }),
+  ],
+);
+
+/** The teams an invited person joins on acceptance. */
+export const inviteTeam = pgTable(
+  'invite_team',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    inviteId: uuid('invite_id').notNull(),
+    teamId: uuid('team_id').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.inviteId, t.teamId] }),
+    foreignKey({
+      name: 'invite_team_invite_fk',
+      columns: [t.workspaceId, t.inviteId],
+      foreignColumns: [invite.workspaceId, invite.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'invite_team_team_fk',
+      columns: [t.workspaceId, t.teamId],
+      foreignColumns: [team.workspaceId, team.id],
+    }).onDelete('cascade'),
+  ],
+);
+
+/**
+ * Admin actions, one row each, written in the same transaction as the action. `actor_member_id` is null for a
+ * system action. Metadata holds scalars only (ids, roles, counts); the action and target type are one of
+ * `AUDIT_ACTIONS` and `AUDIT_TARGET_TYPES`, enforced by `recordAudit`.
+ */
+export const auditLog = pgTable(
+  'audit_log',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id),
+    actorMemberId: uuid('actor_member_id'),
+    action: text('action').notNull(),
+    targetType: text('target_type').notNull(),
+    targetId: uuid('target_id'),
+    metadata: jsonb('metadata')
+      .$type<Record<string, string | number | boolean | null>>()
+      .notNull()
+      .default({}),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    // NULLS FIRST is what `order by created_at desc` asks for, so the newest-first read uses this index.
+    index('audit_log_workspace_created_idx').on(t.workspaceId, t.createdAt.desc().nullsFirst()),
+    foreignKey({
+      name: 'audit_log_actor_fk',
+      columns: [t.workspaceId, t.actorMemberId],
+      foreignColumns: [member.workspaceId, member.id],
+    }),
+  ],
+);
+
 export type WorkspaceRow = typeof workspace.$inferSelect;
 export type MemberRow = typeof member.$inferSelect;
 export type TeamRow = typeof team.$inferSelect;
@@ -241,3 +360,6 @@ export type WorkflowStateRow = typeof workflowState.$inferSelect;
 export type IssueRow = typeof issue.$inferSelect;
 export type LoginTokenRow = typeof loginToken.$inferSelect;
 export type SessionRow = typeof session.$inferSelect;
+export type InviteRow = typeof invite.$inferSelect;
+export type InviteTeamRow = typeof inviteTeam.$inferSelect;
+export type AuditLogRow = typeof auditLog.$inferSelect;

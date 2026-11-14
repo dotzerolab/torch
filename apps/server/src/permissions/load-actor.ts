@@ -1,7 +1,7 @@
 // Turns a (workspace, member) pair into the `Actor` the shared permission module decides on.
 import { member, team, teamMember } from '@torch/shared/db/schema';
-import type { Actor, TeamAccess } from '@torch/shared/permissions';
-import { and, eq, isNull } from 'drizzle-orm';
+import { type Actor, canSeeMember, type TeamAccess } from '@torch/shared/permissions';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import type { Orm } from '../db.ts';
 import { isUuid } from '../util/uuid.ts';
 
@@ -62,4 +62,43 @@ export async function loadTeamAccess(
     .where(and(eq(team.workspaceId, workspaceId), eq(team.id, teamId)))
     .limit(1);
   return row ?? null;
+}
+
+/**
+ * The ids of the members whose profile the actor may read, for the synced `member` shape: `'all'` for every role
+ * but guest; for a guest the actor themselves plus every member sharing a team with them, sorted. Deactivated
+ * co-members stay in the list so a name that is still on an issue resolves. Read per request from the stored
+ * team memberships, so adding or removing a guest from a team changes the next shape immediately. The decision
+ * itself is `canSeeMember`; this function only narrows the query to the guest's own teams first.
+ */
+export async function loadVisibleMemberIds(
+  orm: Orm,
+  actor: Actor,
+): Promise<readonly string[] | 'all'> {
+  if (actor.role !== 'guest') return 'all';
+
+  // Only the actor's workspace and the actor's teams are read, whatever else the actor object might hold.
+  const teamIds = [...actor.teamIds].filter(isUuid);
+  const sharedTeams = new Map<string, Set<string>>();
+  if (teamIds.length > 0) {
+    const rows = await orm
+      .select({ memberId: teamMember.memberId, teamId: teamMember.teamId })
+      .from(teamMember)
+      .where(
+        and(eq(teamMember.workspaceId, actor.workspaceId), inArray(teamMember.teamId, teamIds)),
+      );
+    for (const row of rows) {
+      const teams = sharedTeams.get(row.memberId) ?? new Set<string>();
+      teams.add(row.teamId);
+      sharedTeams.set(row.memberId, teams);
+    }
+  }
+
+  const visible = new Set<string>([actor.memberId]);
+  for (const [id, teams] of sharedTeams) {
+    if (canSeeMember(actor, { id, workspaceId: actor.workspaceId, teamIds: teams })) {
+      visible.add(id);
+    }
+  }
+  return [...visible].sort();
 }
