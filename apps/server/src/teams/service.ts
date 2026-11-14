@@ -4,7 +4,9 @@
 // the Postgres transaction id for the client's `awaitTxId`. REST, MCP and the assistant call these functions.
 //
 // Locks: a call that changes the people of a team (or its privacy) locks that team row first and counts members
-// under the lock, so "a private team keeps at least one member" holds with concurrent calls.
+// under the lock, so "a private team keeps at least one member" holds with concurrent calls. The mode is
+// `no key update`: `for update` would deadlock with the `for key share` that foreign-key checks take on the team row
+// (a team_member insert of another call), and the team key and id never change.
 import { member, team, teamMember, workflowState } from '@torch/shared/db/schema';
 import { defaultWorkflowStates } from '@torch/shared/db/workflow-defaults';
 import {
@@ -46,7 +48,7 @@ async function lockTeam(tx: Tx, workspaceId: string, teamId: string): Promise<Te
     .select({ id: team.id, workspaceId: team.workspaceId, private: team.private })
     .from(team)
     .where(and(eq(team.workspaceId, workspaceId), eq(team.id, teamId)))
-    .for('update');
+    .for('no key update');
   return row ?? null;
 }
 
@@ -252,17 +254,22 @@ export async function removeTeamMember(
       return refuse('private_team_needs_member', 409);
     }
 
-    await tx
+    // The row may be gone by now (an invite that reactivated this member replaced their memberships while this call
+    // waited for it): then nothing was removed, and nothing is audited.
+    const deleted = await tx
       .delete(teamMember)
-      .where(and(eq(teamMember.teamId, teamId), eq(teamMember.memberId, memberId)));
-    await recordAudit(tx, {
-      workspaceId: actor.workspaceId,
-      actorMemberId: actor.memberId,
-      action: 'team.member_removed',
-      targetType: 'team_member',
-      targetId: memberId,
-      metadata: { teamId },
-    });
+      .where(and(eq(teamMember.teamId, teamId), eq(teamMember.memberId, memberId)))
+      .returning({ memberId: teamMember.memberId });
+    if (deleted.length > 0) {
+      await recordAudit(tx, {
+        workspaceId: actor.workspaceId,
+        actorMemberId: actor.memberId,
+        action: 'team.member_removed',
+        targetType: 'team_member',
+        targetId: memberId,
+        metadata: { teamId },
+      });
+    }
     return succeed({ txid: await currentTxid(tx) });
   });
 }

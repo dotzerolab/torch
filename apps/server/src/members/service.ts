@@ -6,6 +6,12 @@
 // Locks: every change that can alter the number of active owners first locks the workspace row, then the member
 // row, always in that order. The owner count is read under that lock, so two owners demoting or deactivating each
 // other at the same time are serialised and the second one is refused (`last_owner`).
+//
+// Lock mode: `no key update`, never `update`. `for update` conflicts with the `for key share` lock that every
+// foreign-key check takes on the referenced row (an audit row references the workspace and the actor, a team_member or
+// session row references the member), so a plain `for update` here deadlocks with another admin action that is half
+// way through its inserts. `no key update` still conflicts with itself and with `for share`, which is all the
+// serialising needs, because no key column of a workspace or a member ever changes.
 import {
   type MemberLocale,
   type MemberRole,
@@ -53,7 +59,7 @@ async function lockWorkspace(tx: Tx, workspaceId: string): Promise<void> {
     .select({ id: workspace.id })
     .from(workspace)
     .where(eq(workspace.id, workspaceId))
-    .for('update');
+    .for('no key update');
 }
 
 /** The member row, locked; null for an id that is not in this workspace. */
@@ -67,7 +73,7 @@ async function lockTarget(tx: Tx, workspaceId: string, memberId: string): Promis
     })
     .from(member)
     .where(and(eq(member.workspaceId, workspaceId), eq(member.id, memberId)))
-    .for('update');
+    .for('no key update');
   return row ?? null;
 }
 

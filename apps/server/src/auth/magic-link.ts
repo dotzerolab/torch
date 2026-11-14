@@ -136,7 +136,11 @@ export async function consumeMagicLink(
           ),
           isNull(member.deactivatedAt),
         ),
-      );
+      )
+      // `for share`: a deactivation running at the same time either is seen here (the member is not active any
+      // more) or waits for this transaction, and its revocation of the member's sessions then finds the ones opened
+      // below. Without it the member could end up deactivated with a live session that a reactivation revives.
+      .for('share', { of: member });
     if (active.length === 0) return null;
 
     const sessionToken = await createSessionsForMembers(tx, active, { now, userAgent });

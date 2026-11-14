@@ -517,7 +517,7 @@ export async function acceptInvite(
         .select({ id: member.id, deactivatedAt: member.deactivatedAt })
         .from(member)
         .where(and(eq(member.workspaceId, workspaceId), eq(member.email, consumed.email)))
-        .for('update');
+        .for('no key update');
 
       let memberId: string;
       const reactivated = existing !== undefined;
@@ -592,10 +592,13 @@ export async function acceptInvite(
 
       // Signing in with an invite is signing in with the address it was mailed to: every workspace where that
       // address is an active member, exactly like a sign-in link.
+      // `for share`: a deactivation running at the same time either is seen here (the row is not active any more) or
+      // waits for this transaction, and its revocation of the member's sessions then finds the ones opened below.
       const active = await tx
         .select({ workspaceId: member.workspaceId, memberId: member.id })
         .from(member)
-        .where(and(eq(member.email, consumed.email), isNull(member.deactivatedAt)));
+        .where(and(eq(member.email, consumed.email), isNull(member.deactivatedAt)))
+        .for('share');
       const sessionToken = await createSessionsForMembers(tx, active, { now, userAgent });
       if (revokeSessionToken) await revokeSessions(tx, revokeSessionToken, now);
       return ok({ sessionToken, workspaceId, memberId });
