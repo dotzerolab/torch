@@ -5,10 +5,16 @@ import { canSeeTeam } from '@torch/shared/permissions';
 import { Hono } from 'hono';
 import type { Orm } from '../db.ts';
 import type { ActorResolver } from '../permissions/load-actor.ts';
-import { loadTeamAccess } from '../permissions/load-actor.ts';
+import { loadTeamAccess, loadVisibleMemberIds } from '../permissions/load-actor.ts';
 import { isUuid } from '../util/uuid.ts';
 import type { ElectricConfig } from './config.ts';
-import { type ShapeDefinition, teamScopedShape, teamsShape } from './shapes.ts';
+import {
+  membersShape,
+  type ShapeDefinition,
+  teamMembersShape,
+  teamScopedShape,
+  teamsShape,
+} from './shapes.ts';
 
 export type SyncRouteDeps = {
   orm: Orm;
@@ -135,7 +141,16 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
     return proxy(c.req.raw, teamsShape(actor));
   });
 
-  const teamRoute = (path: string, kind: 'issues' | 'workflow_states') =>
+  // Member profiles: the shape follows the actor's role and stored team memberships, never the URL or the query.
+  routes.get('/w/:workspaceId/members', async (c) => {
+    const workspaceId = c.req.param('workspaceId');
+    if (!isUuid(workspaceId)) return notFound();
+    const actor = await authenticate(c.req.raw, workspaceId);
+    if (!actor) return unauthenticated();
+    return proxy(c.req.raw, membersShape(actor, await loadVisibleMemberIds(orm, actor)));
+  });
+
+  const teamRoute = (path: string, kind: 'issues' | 'workflow_states' | 'team_members') =>
     routes.get(`/w/:workspaceId/teams/:teamId/${path}`, async (c) => {
       const workspaceId = c.req.param('workspaceId');
       if (!isUuid(workspaceId)) return notFound();
@@ -148,10 +163,14 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
       const access = await loadTeamAccess(orm, workspaceId, teamId);
       if (!access || !canSeeTeam(actor, access)) return notFound();
       // The shape is built from the stored id (`access.id`), never from the URL string.
-      return proxy(c.req.raw, teamScopedShape(kind, access.id));
+      return proxy(
+        c.req.raw,
+        kind === 'team_members' ? teamMembersShape(access.id) : teamScopedShape(kind, access.id),
+      );
     });
   teamRoute('issues', 'issues');
   teamRoute('workflow-states', 'workflow_states');
+  teamRoute('members', 'team_members');
 
   return routes;
 }

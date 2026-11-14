@@ -1,10 +1,13 @@
 import { ELECTRIC_PROTOCOL_QUERY_PARAMS } from '@electric-sql/client';
 import type { Brand } from '@torch/shared/brand';
+import { member, teamMember } from '@torch/shared/db/schema';
+import { and, eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../app.ts';
 import { createDb, type Db } from '../db.ts';
 import { loadActor } from '../permissions/load-actor.ts';
 import {
+  addMember,
   createWorkspaceFixture,
   type WorkspaceFixture,
   withTempDatabase,
@@ -16,6 +19,7 @@ import {
   TEST_ORIGIN,
 } from '../test/header-actor-resolver.ts';
 import { SYNC_FORWARDED_PARAMS } from './routes.ts';
+import { MEMBER_COLUMNS } from './shapes.ts';
 
 const databaseUrl = process.env.DATABASE_URL;
 const electricUrl = process.env.ELECTRIC_URL;
@@ -569,6 +573,399 @@ describe.skipIf(!databaseUrl)('GET /api/sync (shape proxy, fake Electric)', () =
   });
 });
 
+const membersPath = (f: WorkspaceFixture) => `/api/sync/w/${f.workspaceId}/members`;
+const teamMembersPath = (f: WorkspaceFixture, team: 'eng' | 'ops') =>
+  `/api/sync/w/${f.workspaceId}/teams/${f.teams[team].id}/members`;
+
+/** The values the proxy sent for `params[1]`, `params[2]`, ... in order. */
+function sentParams(call: Call | undefined): string[] {
+  const q = call?.url.searchParams;
+  const values: string[] = [];
+  for (let n = 1; q?.has(`params[${n}]`); n++) values.push(q.get(`params[${n}]`) as string);
+  return values;
+}
+
+const sorted = (ids: string[]) => [...ids].sort();
+
+describe.skipIf(!databaseUrl)('GET /api/sync members and team members (fake Electric)', () => {
+  it('a guest of ENG gets self plus the ENG co-members and nobody else', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const res = await get(app, `${membersPath(f)}?offset=-1`, as(f.members.guest.id));
+
+      expect(res.status).toBe(200);
+      expect(upstream.calls).toHaveLength(1);
+      const q = upstream.calls[0]?.url.searchParams;
+      expect(q?.get('table')).toBe('member');
+      expect(q?.get('where')).toBe('workspace_id = $1 AND id IN ($2, $3, $4, $5)');
+      expect(sentParams(upstream.calls[0])).toEqual([
+        f.workspaceId,
+        ...sorted([
+          f.members.guest.id,
+          f.members.owner.id,
+          f.members.admin.id,
+          f.members.member.id,
+        ]),
+      ]);
+      // The outsider shares no team with the guest.
+      expect(sentParams(upstream.calls[0])).not.toContain(f.members.outsider.id);
+      expect(q?.get('columns')).toBe(MEMBER_COLUMNS.join(','));
+      expect(q?.get('columns')).not.toMatch(/email|timezone/);
+    });
+  });
+
+  it('the guest shape is recomputed per request: joining OPS adds its members, leaving ENG drops its own', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const opsOnly = await addMember(db.orm, f.workspaceId, 'member', {
+        teamIds: [f.teams.ops.id],
+      });
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const guest = as(f.members.guest.id);
+      const idsNow = async () => {
+        upstream.calls.length = 0;
+        const res = await get(app, `${membersPath(f)}?offset=-1`, guest);
+        expect(res.status).toBe(200);
+        return sentParams(upstream.calls[0]).slice(1);
+      };
+
+      // Before: ENG only. The OPS-only member is invisible.
+      const before = await idsNow();
+      expect(before).not.toContain(opsOnly.id);
+      expect(before).toContain(f.members.admin.id);
+
+      // Added to OPS: the next request includes the OPS members.
+      await db.orm.insert(teamMember).values({
+        workspaceId: f.workspaceId,
+        teamId: f.teams.ops.id,
+        memberId: f.members.guest.id,
+      });
+      const joined = await idsNow();
+      expect(joined).toContain(opsOnly.id);
+      expect(joined).toContain(f.members.admin.id);
+      expect(joined).not.toContain(f.members.outsider.id);
+
+      // Removed from ENG: the ENG-only admin is gone, the OPS co-members stay.
+      await db.orm
+        .delete(teamMember)
+        .where(
+          and(eq(teamMember.teamId, f.teams.eng.id), eq(teamMember.memberId, f.members.guest.id)),
+        );
+      const left = await idsNow();
+      expect(left).not.toContain(f.members.admin.id);
+      expect(left).toContain(opsOnly.id);
+      expect(left).toContain(f.members.owner.id);
+      expect(left).toContain(f.members.member.id);
+      expect(left).toContain(f.members.guest.id);
+    });
+  });
+
+  it('a guest in no team gets only themselves', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const lonely = await addMember(db.orm, f.workspaceId, 'guest');
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const res = await get(app, `${membersPath(f)}?offset=-1`, as(lonely.id));
+
+      expect(res.status).toBe(200);
+      expect(sentParams(upstream.calls[0])).toEqual([f.workspaceId, lonely.id]);
+    });
+  });
+
+  it('members, admins and owners get the whole workspace: one parameter, no id list', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      for (const who of ['member', 'admin', 'owner', 'outsider'] as const) {
+        upstream.calls.length = 0;
+        const res = await get(app, `${membersPath(f)}?offset=-1`, as(f.members[who].id));
+
+        expect(res.status, who).toBe(200);
+        const q = upstream.calls[0]?.url.searchParams;
+        expect(q?.get('table'), who).toBe('member');
+        expect(q?.get('where'), who).toBe('workspace_id = $1');
+        expect(sentParams(upstream.calls[0]), who).toEqual([f.workspaceId]);
+        expect(q?.get('columns'), who).toBe(MEMBER_COLUMNS.join(','));
+      }
+    });
+  });
+
+  it('client table, where, columns, params[2] and the rest never reach Electric on the member shapes', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const hostile = new URLSearchParams({
+        offset: '-1',
+        table: 'session',
+        where: '1=1',
+        columns: 'email,timezone',
+        secret: 'hunter2',
+        'params[1]': 'evil',
+        'params[2]': f.members.outsider.id,
+        'params[9]': 'evil9',
+        params: '{"1":"evil"}',
+        replica: 'full',
+        subset__where: "email like 'a%'",
+      });
+
+      const cases: [string, string, RequestInit, string, string[]][] = [
+        ['guest members', membersPath(f), as(f.members.guest.id), 'member', []],
+        ['member members', membersPath(f), as(f.members.member.id), 'member', []],
+        [
+          'team members',
+          teamMembersPath(f, 'eng'),
+          as(f.members.guest.id),
+          'team_member',
+          [f.teams.eng.id],
+        ],
+      ];
+      for (const [name, path, init, table, teamParams] of cases) {
+        upstream.calls.length = 0;
+        const res = await get(app, `${path}?${hostile}`, init);
+
+        expect(res.status, name).toBe(200);
+        const sent = upstream.calls[0]?.url;
+        const q = sent?.searchParams;
+        expect(q?.getAll('table'), name).toEqual([table]);
+        expect(q?.getAll('where'), name).toHaveLength(1);
+        expect(q?.get('where'), name).not.toContain('1=1');
+        expect(q?.getAll('columns'), name).toHaveLength(1);
+        expect(q?.get('columns'), name).not.toMatch(/email|timezone/);
+        expect(q?.getAll('secret'), name).toEqual([SECRET]);
+        expect(q?.has('params'), name).toBe(false);
+        expect(q?.has('replica'), name).toBe(false);
+        expect(q?.has('params[9]'), name).toBe(false);
+        expect(
+          [...(q?.keys() ?? [])].filter((k) => k.startsWith('subset__')),
+          name,
+        ).toEqual([]);
+        expect(sent?.href, name).not.toContain('evil');
+        expect(sent?.href, name).not.toContain('hunter2');
+        if (teamParams.length > 0) expect(sentParams(upstream.calls[0]), name).toEqual(teamParams);
+        // The client's own `params[2]` (the outsider) never lands in a shape; only the server's values do.
+        if (name === 'guest members') {
+          expect(sentParams(upstream.calls[0])).not.toContain(f.members.outsider.id);
+        }
+        if (name === 'member members') {
+          expect(sentParams(upstream.calls[0])).toEqual([f.workspaceId]);
+        }
+      }
+    });
+  });
+
+  it('team members: a team the actor can see is served with params[1] = its stored id', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const visible: [keyof WorkspaceFixture['members'], 'eng' | 'ops'][] = [
+        ['guest', 'eng'],
+        ['member', 'eng'],
+        ['member', 'ops'],
+        ['owner', 'ops'],
+        ['outsider', 'eng'],
+      ];
+      for (const [who, team] of visible) {
+        upstream.calls.length = 0;
+        const res = await get(app, `${teamMembersPath(f, team)}?offset=-1`, as(f.members[who].id));
+
+        expect(res.status, `${who} ${team}`).toBe(200);
+        const q = upstream.calls[0]?.url.searchParams;
+        expect(q?.get('table')).toBe('team_member');
+        expect(q?.get('where')).toBe('team_id = $1');
+        expect(sentParams(upstream.calls[0])).toEqual([f.teams[team].id]);
+        expect(q?.get('columns')).toBe('team_id,member_id,workspace_id,created_at');
+      }
+    });
+  });
+
+  it('team members: a team the actor cannot see answers 404 with the body of an unknown id', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const other = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const unknown = await get(
+        app,
+        `/api/sync/w/${f.workspaceId}/teams/${UNKNOWN_UUID}/members`,
+        as(f.members.owner.id),
+      );
+      expect(unknown.status).toBe(404);
+      const body = await unknown.text();
+      expect(body).toBe(JSON.stringify({ error: 'not_found' }));
+
+      // The guest and the admin are not in the private OPS team; the outsider neither.
+      for (const who of ['guest', 'admin', 'outsider'] as const) {
+        const res = await get(app, `${teamMembersPath(f, 'ops')}?offset=-1`, as(f.members[who].id));
+        expect(res.status, who).toBe(404);
+        expect(await res.text(), who).toBe(body);
+      }
+      // A team of another workspace, and a malformed id.
+      const foreign = await get(
+        app,
+        `/api/sync/w/${f.workspaceId}/teams/${other.teams.eng.id}/members`,
+        as(f.members.owner.id),
+      );
+      const malformed = await get(
+        app,
+        `/api/sync/w/${f.workspaceId}/teams/not-a-uuid/members`,
+        as(f.members.owner.id),
+      );
+      expect([foreign.status, malformed.status]).toEqual([404, 404]);
+      expect(await foreign.text()).toBe(body);
+      expect(await malformed.text()).toBe(body);
+      expect(upstream.calls).toHaveLength(0);
+    });
+  });
+
+  it('team members: a guest added to a private team can then read it, and loses it again on removal', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const guest = as(f.members.guest.id);
+
+      expect((await get(app, teamMembersPath(f, 'ops'), guest)).status).toBe(404);
+      await db.orm.insert(teamMember).values({
+        workspaceId: f.workspaceId,
+        teamId: f.teams.ops.id,
+        memberId: f.members.guest.id,
+      });
+      expect((await get(app, teamMembersPath(f, 'ops'), guest)).status).toBe(200);
+      await db.orm
+        .delete(teamMember)
+        .where(
+          and(eq(teamMember.teamId, f.teams.ops.id), eq(teamMember.memberId, f.members.guest.id)),
+        );
+      expect((await get(app, teamMembersPath(f, 'ops'), guest)).status).toBe(404);
+    });
+  });
+
+  it('a mixed-case or upper-case id is rejected on the member routes: no new shape per spelling', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const guest = as(f.members.guest.id);
+      const mixed = (id: string) =>
+        [...id].map((ch, index) => (index % 2 === 0 ? ch.toUpperCase() : ch)).join('');
+      const team = f.teams.eng.id;
+      expect(mixed(team)).not.toBe(team);
+
+      // Control: the canonical spellings are served, so the 404s below are decisions, not missing routes.
+      expect((await get(app, membersPath(f), guest)).status).toBe(200);
+      expect((await get(app, teamMembersPath(f, 'eng'), guest)).status).toBe(200);
+      upstream.calls.length = 0;
+
+      const paths = [
+        `/api/sync/w/${mixed(f.workspaceId)}/members`,
+        `/api/sync/w/${f.workspaceId.toUpperCase()}/members`,
+        `/api/sync/w/${f.workspaceId}/teams/${mixed(team)}/members`,
+        `/api/sync/w/${f.workspaceId}/teams/${team.toUpperCase()}/members`,
+        `/api/sync/w/${mixed(f.workspaceId)}/teams/${team}/members`,
+      ];
+      for (const path of paths) {
+        const res = await get(app, `${path}?offset=-1`, guest);
+        expect(res.status, path).toBe(404);
+      }
+      expect(upstream.calls).toHaveLength(0);
+    });
+  });
+
+  it('no actor, a deactivated member and an actor of another workspace -> 401, Electric never called', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const other = await createWorkspaceFixture(db.orm);
+      await db.orm
+        .update(member)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(member.id, f.members.member.id));
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      for (const path of [membersPath(f), teamMembersPath(f, 'eng')]) {
+        const anonymous = await get(app, path);
+        expect(anonymous.status, path).toBe(401);
+        expect(await anonymous.json()).toEqual({ error: 'unauthenticated' });
+        expect((await get(app, path, as(f.members.member.id))).status, path).toBe(401);
+        // The cookie of workspace B on the URL of workspace A.
+        expect((await get(app, path, as(other.members.owner.id))).status, path).toBe(401);
+      }
+      expect(upstream.calls).toHaveLength(0);
+    });
+  });
+
+  it('shape responses keep the private cache headers and Vary: Cookie', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(
+        () =>
+          new Response('[{"headers":{"control":"up-to-date"}}]', {
+            status: 200,
+            headers: {
+              'content-type': 'application/json',
+              'cache-control': 'public, max-age=60, stale-while-revalidate=300',
+              vary: 'Accept-Encoding',
+              'electric-handle': 'h-88',
+              'access-control-allow-origin': '*',
+            },
+          }),
+      );
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      for (const [name, path] of [
+        ['members', membersPath(f)],
+        ['team members', teamMembersPath(f, 'eng')],
+      ] as const) {
+        const res = await get(app, `${path}?offset=-1`, as(f.members.guest.id));
+
+        expect(res.status, name).toBe(200);
+        expect(res.headers.get('cache-control'), name).toBe(
+          'private, max-age=60, stale-while-revalidate=300',
+        );
+        expect(res.headers.get('vary')?.split(/\s*,\s*/), name).toEqual(
+          expect.arrayContaining(['Accept-Encoding', 'Cookie']),
+        );
+        expect(res.headers.get('electric-handle'), name).toBe('h-88');
+        expect(res.headers.get('access-control-allow-origin'), name).toBeNull();
+      }
+    });
+  });
+
+  it('only GET is served on the member routes', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      for (const path of [membersPath(f), teamMembersPath(f, 'eng')]) {
+        // Control: a GET of the same path is served.
+        expect((await get(app, path, as(f.members.owner.id))).status, path).toBe(200);
+        upstream.calls.length = 0;
+
+        const res = await get(
+          app,
+          path,
+          as(f.members.owner.id, { method: 'POST', headers: { origin: TEST_ORIGIN } }),
+        );
+        expect(res.status, path).toBeGreaterThanOrEqual(404);
+        expect(upstream.calls, path).toHaveLength(0);
+      }
+    });
+  });
+});
+
 // Real Electric reads the dev database (`torch`) itself, so these tests create their fixture THERE (not in a
 // temp database) and remove it again afterwards.
 describe.skipIf(!databaseUrl || !electricUrl)('GET /api/sync (real Electric)', () => {
@@ -667,6 +1064,76 @@ describe.skipIf(!databaseUrl || !electricUrl)('GET /api/sync (real Electric)', (
       expect(await keysFor('member')).toEqual([f.teams.eng.id, f.teams.ops.id].sort());
       expect(await keysFor('guest')).toEqual([f.teams.eng.id]);
       expect(await keysFor('outsider')).toEqual([f.teams.eng.id]);
+    });
+  }, 30_000);
+  it('real Electric: a guest member shape holds self and ENG co-members, never the outsider, never email or timezone', async () => {
+    await withDevWorkspace(async (db, f) => {
+      const app = realApp(db);
+
+      const res = await get(app, `${membersPath(f)}?offset=-1`, as(f.members.guest.id));
+      const members = await rows(res);
+
+      expect(new Set(members.map((m) => m.id))).toEqual(
+        new Set([f.members.guest.id, f.members.owner.id, f.members.admin.id, f.members.member.id]),
+      );
+      expect(members.map((m) => m.id)).not.toContain(f.members.outsider.id);
+      for (const row of members) {
+        expect(Object.keys(row).sort()).toEqual([...MEMBER_COLUMNS].sort());
+        expect(row.workspace_id).toBe(f.workspaceId);
+      }
+      // The emails are in the database; none of them is in the response.
+      const body = JSON.stringify(members);
+      for (const m of Object.values(f.members)) expect(body).not.toContain(m.email);
+      expect(res.headers.get('cache-control') ?? '').not.toContain('public');
+    });
+  }, 30_000);
+
+  it('real Electric: a member gets the whole workspace, still without email or timezone', async () => {
+    await withDevWorkspace(async (db, f) => {
+      const app = realApp(db);
+
+      const res = await get(app, `${membersPath(f)}?offset=-1`, as(f.members.member.id));
+      const members = await rows(res);
+
+      expect(new Set(members.map((m) => m.id))).toEqual(
+        new Set(Object.values(f.members).map((m) => m.id)),
+      );
+      for (const row of members) {
+        expect(Object.keys(row)).not.toContain('email');
+        expect(Object.keys(row)).not.toContain('timezone');
+      }
+    });
+  }, 30_000);
+
+  it('real Electric: team members come per team, and the private team is closed to a guest', async () => {
+    await withDevWorkspace(async (db, f) => {
+      const app = realApp(db);
+
+      const eng = await rows(
+        await get(app, `${teamMembersPath(f, 'eng')}?offset=-1`, as(f.members.guest.id)),
+      );
+      const ops = await rows(
+        await get(app, `${teamMembersPath(f, 'ops')}?offset=-1`, as(f.members.member.id)),
+      );
+      const guestOps = await get(
+        app,
+        `${teamMembersPath(f, 'ops')}?offset=-1`,
+        as(f.members.guest.id),
+      );
+
+      expect(new Set(eng.map((r) => r.member_id))).toEqual(
+        new Set([f.members.owner.id, f.members.admin.id, f.members.member.id, f.members.guest.id]),
+      );
+      expect(eng.every((r) => r.team_id === f.teams.eng.id)).toBe(true);
+      expect(new Set(ops.map((r) => r.member_id))).toEqual(
+        new Set([f.members.owner.id, f.members.member.id]),
+      );
+      for (const row of [...eng, ...ops]) {
+        expect(Object.keys(row).sort()).toEqual(
+          ['created_at', 'member_id', 'team_id', 'workspace_id'].sort(),
+        );
+      }
+      expect(guestOps.status).toBe(404);
     });
   }, 30_000);
 });

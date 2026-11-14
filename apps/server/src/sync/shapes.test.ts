@@ -1,11 +1,21 @@
 import type { Actor } from '@torch/shared/permissions';
 import { describe, expect, it } from 'vitest';
-import { type ShapeDefinition, teamScopedShape, teamsShape } from './shapes.ts';
+import {
+  MEMBER_COLUMNS,
+  membersShape,
+  type ShapeDefinition,
+  teamMembersShape,
+  teamScopedShape,
+  teamsShape,
+} from './shapes.ts';
 
 const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 const WORKSPACE = '11111111-1111-4111-8111-111111111111';
 const TEAM_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const TEAM_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const SELF = '22222222-2222-4222-8222-222222222222';
+const MEMBER_A = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const MEMBER_B = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 
 const actor = (role: Actor['role'], teamIds: string[]): Actor => ({
   workspaceId: WORKSPACE,
@@ -123,5 +133,91 @@ describe('teamScopedShape', () => {
       'position',
       'color',
     ]);
+  });
+});
+
+describe('membersShape', () => {
+  it('MEMBER_COLUMNS is the pinned allowlist and never holds email or timezone', () => {
+    expect(MEMBER_COLUMNS).toEqual([
+      'id',
+      'workspace_id',
+      'name',
+      'handle',
+      'role',
+      'locale',
+      'deactivated_at',
+      'created_at',
+    ]);
+    expect(MEMBER_COLUMNS).not.toContain('email');
+    expect(MEMBER_COLUMNS).not.toContain('timezone');
+  });
+
+  it('is built on the member table with exactly the allowlist as columns', () => {
+    for (const visible of ['all', [SELF]] as const) {
+      const shape = membersShape(actor(visible === 'all' ? 'member' : 'guest', []), visible);
+
+      expect(shape.table).toBe('member');
+      expect(shape.columns).toEqual([...MEMBER_COLUMNS]);
+      expect(shape.columns).not.toContain('email');
+      expect(shape.columns).not.toContain('timezone');
+    }
+  });
+
+  it('non-guests get the whole workspace: one parameter, no id list', () => {
+    for (const role of ['owner', 'admin', 'member'] as const) {
+      const shape = membersShape(actor(role, [TEAM_A]), 'all');
+
+      expect(shape.where).toBe('workspace_id = $1');
+      expect(shape.where).not.toMatch(/\bid IN\b/i);
+      expect(shape.params).toEqual([WORKSPACE]);
+      expectParameterised(shape);
+    }
+  });
+
+  it('a guest lists exactly the ids given, sorted, as parameters only', () => {
+    const shape = membersShape(actor('guest', [TEAM_A]), [MEMBER_B, SELF, MEMBER_A]);
+
+    expect(shape.where).toBe('workspace_id = $1 AND id IN ($2, $3, $4)');
+    // '2222...' < 'cccc...' < 'dddd...'
+    expect(shape.params).toEqual([WORKSPACE, SELF, MEMBER_A, MEMBER_B]);
+    expectParameterised(shape);
+    // No id ever appears inside the SQL text.
+    for (const id of [SELF, MEMBER_A, MEMBER_B]) expect(shape.where).not.toContain(id);
+  });
+
+  it('duplicate ids collapse to one parameter', () => {
+    const shape = membersShape(actor('guest', [TEAM_A]), [MEMBER_A, MEMBER_A, SELF]);
+
+    expect(shape.where).toBe('workspace_id = $1 AND id IN ($2, $3)');
+    expect(shape.params).toEqual([WORKSPACE, SELF, MEMBER_A]);
+  });
+
+  it('an empty guest list uses the nil uuid so the IN list is never empty', () => {
+    const shape = membersShape(actor('guest', []), []);
+
+    expect(shape.where).toBe('workspace_id = $1 AND id IN ($2)');
+    expect(shape.params).toEqual([WORKSPACE, NIL_UUID]);
+    expectParameterised(shape);
+  });
+
+  it('the workspace id comes from the actor', () => {
+    expect(membersShape(actor('member', []), 'all').params[0]).toBe(WORKSPACE);
+    expect(membersShape(actor('guest', []), [SELF]).params[0]).toBe(WORKSPACE);
+  });
+
+  it('refuses the whole-workspace shape for a guest (fail closed)', () => {
+    expect(() => membersShape(actor('guest', [TEAM_A]), 'all')).toThrow();
+  });
+});
+
+describe('teamMembersShape', () => {
+  it('one shape per team on team_member, bound by params[1] only', () => {
+    const shape = teamMembersShape(TEAM_A);
+
+    expect(shape.table).toBe('team_member');
+    expect(shape.where).toBe('team_id = $1');
+    expect(shape.params).toEqual([TEAM_A]);
+    expect(shape.columns).toEqual(['team_id', 'member_id', 'workspace_id', 'created_at']);
+    expectParameterised(shape);
   });
 });
