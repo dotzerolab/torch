@@ -2,11 +2,13 @@
 
 import { createCollection, useLiveQuery } from '@tanstack/react-db';
 import { act, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   type Cleanable,
   createRegistry,
   type Factories,
+  MAX_LIVE_SHAPES,
+  PAUSE_AFTER_MS,
   type ShapeKey,
   useShapeFrom,
 } from './registry.ts';
@@ -174,5 +176,74 @@ describe('useShapeFrom with a live query', () => {
     });
     await act(async () => {});
     expect(screen.getByTestId('ids').textContent).toBe('b,c');
+  });
+});
+
+describe('live shape budget', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  function open(
+    registry: ReturnType<typeof createRegistry<ReturnType<typeof fakeFactories>['factories']>>,
+  ) {
+    registry.get({ kind: 'teams', workspaceId: ws });
+    registry.get({ kind: 'members', workspaceId: ws });
+    registry.get({ kind: 'ownMemberships', workspaceId: ws });
+  }
+
+  it('keeps a team that left view for 30 s when there is room, then pauses it', async () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    const fake = registry.get(team('issues'));
+    const release = registry.hold(team('issues'));
+    release();
+    vi.advanceTimersByTime(PAUSE_AFTER_MS - 1);
+    await Promise.resolve();
+    expect(fake.cleaned).toBe(0);
+    vi.advanceTimersByTime(1);
+    await Promise.resolve();
+    expect(fake.cleaned).toBe(1);
+    expect(registry.get(team('issues')).id).toBe('issues-w1-t1~2');
+  });
+
+  it('coming back in time keeps the open shape', async () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    const fake = registry.get(team('issues'));
+    registry.hold(team('issues'))();
+    vi.advanceTimersByTime(20_000);
+    registry.hold(team('issues'));
+    vi.advanceTimersByTime(60_000);
+    await Promise.resolve();
+    expect(fake.cleaned).toBe(0);
+  });
+
+  it('never has more than MAX_LIVE_SHAPES open when the team in view changes', async () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    open(registry);
+    // Team t1 in view, then the page switches to t2: the new shape is read before the old reader lets go.
+    registry.get(team('issues', 't1'));
+    const releaseOld = registry.hold(team('issues', 't1'));
+    registry.get(team('issues', 't2'));
+    registry.hold(team('issues', 't2'));
+    expect(registry.liveCount()).toBe(MAX_LIVE_SHAPES + 1);
+    releaseOld();
+    await Promise.resolve();
+    expect(registry.liveCount()).toBe(MAX_LIVE_SHAPES);
+  });
+
+  it('a reader of a restarted shape does not pause the new instance when it lets go of the old one', async () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    open(registry);
+    registry.get(team('issues'));
+    const releaseOld = registry.hold(team('issues'));
+    registry.restart(team('issues'));
+    const fresh = registry.get(team('issues'));
+    releaseOld();
+    registry.hold(team('issues'));
+    await Promise.resolve();
+    expect(fresh.cleaned).toBe(0);
   });
 });

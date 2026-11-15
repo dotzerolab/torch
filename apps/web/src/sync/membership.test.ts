@@ -9,7 +9,11 @@ function fakeCollection(initialKeys: string[], ready = true) {
   let listener: ((changes: Change[]) => void) | undefined;
   let onReady: (() => void) | undefined;
   const state = { ready, keys: initialKeys };
+  const preloaded = vi.fn();
   const collection: Watchable = {
+    async preload() {
+      preloaded();
+    },
     onFirstReady(callback) {
       if (state.ready) callback();
       else onReady = callback;
@@ -32,6 +36,7 @@ function fakeCollection(initialKeys: string[], ready = true) {
       onReady?.();
     },
     state,
+    preloaded,
     get subscribed() {
       return listener !== undefined;
     },
@@ -157,6 +162,14 @@ describe('startMembershipWatcher', () => {
     s.replaceTeams(fakeCollection(['t1']));
     expect(s.calls).toContain('drop:t2');
     expect(s.calls).not.toContain('drop:t1');
+  });
+
+  it('starts the sync of the three shapes it watches', () => {
+    const s = setup();
+    startMembershipWatcher('w1', 'me', s.registry);
+    expect(s.own.preloaded).toHaveBeenCalledOnce();
+    expect(s.members.preloaded).toHaveBeenCalledOnce();
+    expect(s.teams.preloaded).toHaveBeenCalledOnce();
   });
 
   it('stops listening when stopped', () => {

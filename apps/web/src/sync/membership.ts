@@ -14,6 +14,7 @@ type Change = {
 
 /** What the watcher reads of a collection. */
 export type Watchable = {
+  preload(): Promise<void>;
   onFirstReady(callback: () => void): unknown;
   subscribeChanges(callback: (changes: Change[]) => void): { unsubscribe(): void };
   keys(): Iterable<string | number>;
@@ -85,6 +86,9 @@ export function startMembershipWatcher(
     current?.stop();
     let subscription: { unsubscribe(): void } | undefined;
     let live = true;
+    // Nothing else starts these shapes (no screen reads `ownMemberships`), and a collection only syncs once something
+    // asks it to.
+    instance.preload().catch(() => {});
     // Changes are read only once the first sync is in, so the rows of that sync are not mistaken for changes.
     instance.onFirstReady(() => {
       if (!live || stopped) return;
