@@ -1,6 +1,6 @@
 # ADR 0003: Implementation language (stay on TypeScript, or rewrite in Rust?)
 
-Date: 2026-11-15 · Status: Proposed · Builds on: [ADR 0001](0001-sync-engine.md), [ADR 0002](0002-database-portability.md) · Design: [`docs/design.md`](../design.md) §15
+Date: 2026-11-15 · Status: Accepted · Builds on: [ADR 0001](0001-sync-engine.md), [ADR 0002](0002-database-portability.md) · Design: [`docs/design.md`](../design.md) §15
 
 ## Context
 
@@ -162,6 +162,12 @@ in (c) one language for shared rules) do not outweigh that cost today.
 3. Re-measure idle and loaded memory and the write path on Linux with the production image in P8, against the sizing
    target (200 sessions, 100,000 issues, 4 vCPU and 8 GB), and record the numbers next to this record.
 4. Keep raw SQL in few, named places (11 today) so build-time checking can be added later, in TypeScript or Rust.
+5. Machine sizes for a self-hosted instance: minimum 2 vCPU and 2 GB of memory (a small team), recommended 2 vCPU and
+   4 GB, large 4 vCPU and 8 GB (the sizing target). 1 GB is not supported: the stack alone needs 700-900 MiB, plus the
+   operating system and the container runtime. The P8 measurement includes a load test on a 2 GB machine, and the
+   deploy documentation lists these sizes.
+6. A desktop application is planned after v1. It is the first candidate for (d): a Tauri shell (Rust core, system
+   WebView) around the same web app. That choice gets its own record when the work starts.
 
 ## Conditions that would change this (any one reopens it)
 
@@ -169,18 +175,17 @@ in (c) one language for shared rules) do not outweigh that cost today.
    above 50% of a vCPU at the 95th-percentile load, or its memory above 400 MiB.
 2. A Rust-native sync engine with a browser client meets the ADR 0001 bar and reaches a stable release, or TanStack DB
    stops being maintained. That reopens ADR 0001 first.
-3. A product decision adds a desktop or native client, or evidence shows the local companion loses users because it
-   needs Node: (d) for that component.
+3. Evidence shows the local companion loses users because it needs Node: (d) for that component.
 4. A profiled hot path (import, search indexing) is CPU-bound and over its budget on target hardware: (d) for that path.
 5. A group of maintainers with Rust experience commits to keeping a Rust component alive, with its own CI job.
 6. The ownership change announced for Electric (ADR 0002, condition 4) alters its licence or its Postgres focus.
+7. A machine size below 2 GB becomes a requirement: the Node saving would then matter.
 
-## Open questions
+## Answers recorded with the decision
 
-1. Is a desktop application, or a standalone companion binary without Node, wanted after v1? It is the likeliest first
-   use of Rust here.
-2. Is there a per-instance memory ceiling for self-hosters (for example a 1 GB VPS)? At 1 GB the stack's 700-900 MiB
-   leaves little room and the Node saving would matter; the sizing target says 8 GB.
+1. A desktop application is wanted after v1 (consequence 6).
+2. There is no 1 GB ceiling: the minimum machine is 2 GB, the recommended one 4 GB (consequence 5). At 2 GB the Node
+   saving is about 5% of the machine, which does not change the decision.
 
 ## Sources (read 2026-11-15)
 
