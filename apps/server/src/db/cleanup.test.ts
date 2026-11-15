@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { invite, inviteTeam, loginToken, session } from '@torch/shared/db/schema';
+import { idempotencyKey, invite, inviteTeam, loginToken, session } from '@torch/shared/db/schema';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Orm } from '../db.ts';
 import {
@@ -199,8 +199,8 @@ describe.skipIf(!databaseUrl)('cleanupExpiredRows', () => {
       const first = await cleanupExpiredRows(db.orm, NOW);
       const second = await cleanupExpiredRows(db.orm, NOW);
 
-      expect(first).toEqual({ loginTokens: 4, sessions: 6, invites: 4 });
-      expect(second).toEqual({ loginTokens: 0, sessions: 0, invites: 0 });
+      expect(first).toEqual({ loginTokens: 4, sessions: 6, invites: 4, idempotencyKeys: 0 });
+      expect(second).toEqual({ loginTokens: 0, sessions: 0, invites: 0, idempotencyKeys: 0 });
     });
   });
 
@@ -224,7 +224,40 @@ describe.skipIf(!databaseUrl)('cleanupExpiredRows', () => {
         loginTokens: 0,
         sessions: 0,
         invites: 0,
+        idempotencyKeys: 0,
       });
+    });
+  });
+
+  it('deletes idempotency keys older than 24 hours and keeps the newer ones', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const HOUR = 60 * MINUTE;
+      const rows = {
+        old: 25 * HOUR,
+        justOver: 24 * HOUR + MINUTE,
+        recent: 23 * HOUR,
+        fresh: MINUTE,
+      };
+      for (const [key, age] of Object.entries(rows)) {
+        await db.orm.insert(idempotencyKey).values({
+          workspaceId: f.workspaceId,
+          actorId: f.members.owner.id,
+          key,
+          requestHash: hash(),
+          status: 201,
+          response: {},
+          createdAt: ago(age),
+        });
+      }
+
+      const first = await cleanupExpiredRows(db.orm, NOW);
+      const second = await cleanupExpiredRows(db.orm, NOW);
+
+      expect(first.idempotencyKeys).toBe(2);
+      expect(second.idempotencyKeys).toBe(0);
+      const left = await db.orm.select({ key: idempotencyKey.key }).from(idempotencyKey);
+      expect(left.map((row) => row.key).sort()).toEqual(['fresh', 'recent']);
     });
   });
 });

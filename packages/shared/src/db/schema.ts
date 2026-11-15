@@ -22,9 +22,11 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 
-import { ISSUE_RELATION_TYPES, MEMBER_LOCALES, MEMBER_ROLES } from './enums.ts';
+import { ACTIVITY_CLIENTS, ISSUE_RELATION_TYPES, MEMBER_LOCALES, MEMBER_ROLES } from './enums.ts';
 
 export {
+  ACTIVITY_CLIENTS,
+  type ActivityClient,
   ISSUE_RELATION_TYPES,
   type IssueRelationType,
   MEMBER_LOCALES,
@@ -69,6 +71,7 @@ export const memberRole = pgEnum('member_role', MEMBER_ROLES);
 export const locale = pgEnum('locale', MEMBER_LOCALES);
 export const workflowStateType = pgEnum('workflow_state_type', WORKFLOW_STATE_TYPES);
 export const issueRelationType = pgEnum('issue_relation_type', ISSUE_RELATION_TYPES);
+export const activityClient = pgEnum('activity_client', ACTIVITY_CLIENTS);
 
 const id = () => uuid('id').primaryKey().defaultRandom();
 const createdAt = () => timestamp('created_at', { withTimezone: true }).notNull().defaultNow();
@@ -547,6 +550,189 @@ export const auditLog = pgTable(
   ],
 );
 
+/**
+ * One row per changed field of an issue (and one per label, relation, subscriber or link change): who, through which
+ * client, what. A description change keeps `field = 'description'` and no values: text history is not kept in P1.
+ * `actor_id` is null for a system change.
+ */
+export const issueActivity = pgTable(
+  'issue_activity',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id').notNull(),
+    teamId: uuid('team_id').notNull(),
+    issueId: uuid('issue_id').notNull(),
+    actorId: uuid('actor_id'),
+    client: activityClient('client').notNull(),
+    type: text('type').notNull(),
+    field: text('field'),
+    fromValue: jsonb('from_value'),
+    toValue: jsonb('to_value'),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index('issue_activity_issue_created_idx').on(t.issueId, t.createdAt),
+    foreignKey({
+      name: 'issue_activity_issue_fk',
+      columns: [t.workspaceId, t.teamId, t.issueId],
+      foreignColumns: [issue.workspaceId, issue.teamId, issue.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'issue_activity_actor_fk',
+      columns: [t.workspaceId, t.actorId],
+      foreignColumns: [member.workspaceId, member.id],
+    }),
+  ],
+);
+
+/**
+ * The transactional outbox (spec section 11): every state change writes its event in the same transaction. Never synced;
+ * delivery and the pull API come later. `subject_id` is polymorphic (no foreign key); the envelope is built on read.
+ */
+export const event = pgTable(
+  'event',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id),
+    teamId: uuid('team_id'),
+    type: text('type').notNull(),
+    version: smallint('version').notNull(),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull().defaultNow(),
+    actorId: uuid('actor_id'),
+    client: activityClient('client').notNull(),
+    subjectType: text('subject_type').notNull(),
+    subjectId: uuid('subject_id').notNull(),
+    data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}),
+  },
+  (t) => [
+    index('event_workspace_occurred_idx').on(t.workspaceId, t.occurredAt, t.id),
+    foreignKey({
+      name: 'event_team_fk',
+      columns: [t.workspaceId, t.teamId],
+      foreignColumns: [team.workspaceId, team.id],
+    }),
+    foreignKey({
+      name: 'event_actor_fk',
+      columns: [t.workspaceId, t.actorId],
+      foreignColumns: [member.workspaceId, member.id],
+    }),
+  ],
+);
+
+/**
+ * A (source, external id, url) triple on any object, for idempotent imports and links back. An external id is used once
+ * per source in a workspace, and a subject has one reference per source. `source` is a lower-case slug.
+ */
+export const externalRef = pgTable(
+  'external_ref',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id),
+    subjectType: text('subject_type').notNull(),
+    subjectId: uuid('subject_id').notNull(),
+    source: text('source').notNull(),
+    externalId: text('external_id').notNull(),
+    url: text('url'),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    unique('external_ref_source_id_unique').on(t.workspaceId, t.source, t.externalId),
+    unique('external_ref_subject_source_unique').on(
+      t.workspaceId,
+      t.subjectType,
+      t.subjectId,
+      t.source,
+    ),
+    check('external_ref_source_format', sql`${t.source} ~ '^[a-z0-9][a-z0-9._-]{0,63}$'`),
+    check('external_ref_url_scheme', sql`${t.url} is null or ${t.url} ~ '^https?://'`),
+  ],
+);
+
+/**
+ * The stored answer of a create that carried an `Idempotency-Key`: the same actor and key with the same request body
+ * gets this response again. Rows older than 24 hours are removed (`cleanupExpiredRows`).
+ */
+export const idempotencyKey = pgTable(
+  'idempotency_key',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    actorId: uuid('actor_id').notNull(),
+    key: text('key').notNull(),
+    requestHash: text('request_hash').notNull(),
+    status: smallint('status').notNull(),
+    response: jsonb('response').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.actorId, t.key] }),
+    index('idempotency_key_created_idx').on(t.createdAt),
+    check('idempotency_key_length', sql`char_length(${t.key}) between 1 and 128`),
+    foreignKey({
+      name: 'idempotency_key_actor_fk',
+      columns: [t.workspaceId, t.actorId],
+      foreignColumns: [member.workspaceId, member.id],
+    }).onDelete('cascade'),
+  ],
+);
+
+/** Saved filters and display options, personal or shared. Table only: the logic arrives with the issue views. */
+export const savedView = pgTable(
+  'saved_view',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id),
+    teamId: uuid('team_id'),
+    ownerId: uuid('owner_id'),
+    name: text('name').notNull(),
+    filters: jsonb('filters').$type<Record<string, unknown>>().notNull().default({}),
+    display: jsonb('display').$type<Record<string, unknown>>().notNull().default({}),
+    shared: boolean('shared').notNull().default(false),
+    createdAt: createdAt(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      name: 'saved_view_team_fk',
+      columns: [t.workspaceId, t.teamId],
+      foreignColumns: [team.workspaceId, team.id],
+    }),
+    foreignKey({
+      name: 'saved_view_owner_fk',
+      columns: [t.workspaceId, t.ownerId],
+      foreignColumns: [member.workspaceId, member.id],
+    }),
+  ],
+);
+
+/** Pre-filled issue fields a person starts from. Table only: the logic arrives with the issue creation form. */
+export const issueTemplate = pgTable(
+  'issue_template',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id),
+    teamId: uuid('team_id'),
+    name: text('name').notNull(),
+    fields: jsonb('fields').$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: createdAt(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      name: 'issue_template_team_fk',
+      columns: [t.workspaceId, t.teamId],
+      foreignColumns: [team.workspaceId, team.id],
+    }),
+  ],
+);
+
 export type WorkspaceRow = typeof workspace.$inferSelect;
 export type MemberRow = typeof member.$inferSelect;
 export type TeamRow = typeof team.$inferSelect;
@@ -558,6 +744,12 @@ export type IssueLabelRow = typeof issueLabel.$inferSelect;
 export type IssueRelationRow = typeof issueRelation.$inferSelect;
 export type IssueSubscriberRow = typeof issueSubscriber.$inferSelect;
 export type IssueLinkRow = typeof issueLink.$inferSelect;
+export type IssueActivityRow = typeof issueActivity.$inferSelect;
+export type EventRow = typeof event.$inferSelect;
+export type ExternalRefRow = typeof externalRef.$inferSelect;
+export type IdempotencyKeyRow = typeof idempotencyKey.$inferSelect;
+export type SavedViewRow = typeof savedView.$inferSelect;
+export type IssueTemplateRow = typeof issueTemplate.$inferSelect;
 export type LoginTokenRow = typeof loginToken.$inferSelect;
 export type SessionRow = typeof session.$inferSelect;
 export type InviteRow = typeof invite.$inferSelect;

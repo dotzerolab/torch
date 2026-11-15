@@ -1,15 +1,21 @@
 import {
   auditLog,
+  event,
+  externalRef,
+  idempotencyKey,
   invite,
   inviteTeam,
   issue,
+  issueActivity,
   issueLabel,
   issueLink,
   issueRelation,
   issueSubscriber,
+  issueTemplate,
   label,
   loginToken,
   member,
+  savedView,
   session,
   team,
   teamMember,
@@ -36,6 +42,12 @@ if (!databaseUrl) {
 }
 
 const TABLES = [
+  'event',
+  'external_ref',
+  'idempotency_key',
+  'issue_activity',
+  'issue_template',
+  'saved_view',
   'workspace',
   'member',
   'team',
@@ -825,6 +837,279 @@ describe.skipIf(!databaseUrl)('schema (Postgres)', () => {
         expect(await count('issue_relation')).toBe(0);
         // The label itself stays.
         expect(await count('label')).toBe(1);
+      });
+    });
+  });
+
+  describe('activity, events, external references, idempotency keys, views and templates', () => {
+    const outcome = (insertion: PromiseLike<unknown>) =>
+      Promise.resolve(insertion)
+        .then(() => 'inserted')
+        .catch((error) => pgErrorCode(error) ?? 'unknown error');
+    const firstIssue = (f: WorkspaceFixture) => {
+      const row = f.issues.eng[0];
+      if (!row) throw new Error('fixture has no ENG issue');
+      return row;
+    };
+    const indexNames = async (
+      db: { pool: { query: (sql: string) => Promise<{ rows: { indexname: string }[] }> } },
+      table: string,
+    ) =>
+      (
+        await db.pool.query(`select indexname from pg_indexes where tablename = '${table}'`)
+      ).rows.map((row) => row.indexname);
+
+    it('issue_activity cannot cross workspaces or teams, takes a known client only and reads by issue and time', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const row = (over: Partial<typeof issueActivity.$inferInsert>) => ({
+          workspaceId: a.workspaceId,
+          teamId: a.teams.eng.id,
+          issueId: firstIssue(a).id,
+          actorId: a.members.owner.id,
+          client: 'web' as const,
+          type: 'issue.field_changed',
+          field: 'title',
+          fromValue: 'Old',
+          toValue: 'New',
+          ...over,
+        });
+
+        await expect(
+          outcome(db.orm.insert(issueActivity).values(row({ issueId: firstIssue(b).id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(issueActivity).values(row({ actorId: b.members.owner.id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(issueActivity).values(row({ teamId: a.teams.ops.id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(issueActivity).values(row({ client: 'bot' as 'web' }))),
+        ).resolves.toBe('22P02');
+        for (const client of ['web', 'api', 'mcp', 'import', 'system'] as const) {
+          await expect(outcome(db.orm.insert(issueActivity).values(row({ client })))).resolves.toBe(
+            'inserted',
+          );
+        }
+        // A system change has no actor and no field values (a description change stores no text).
+        const [system] = await db.orm
+          .insert(issueActivity)
+          .values(
+            row({ actorId: null, field: 'description', fromValue: undefined, toValue: undefined }),
+          )
+          .returning();
+        expect(system?.actorId).toBeNull();
+        expect(system?.fromValue).toBeNull();
+        expect(system?.toValue).toBeNull();
+        expect(await indexNames(db, 'issue_activity')).toContain(
+          'issue_activity_issue_created_idx',
+        );
+      });
+    });
+
+    it('event rows cannot cross workspaces, may have no team or actor, and read by workspace and time', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const row = (over: Partial<typeof event.$inferInsert>) => ({
+          workspaceId: a.workspaceId,
+          teamId: a.teams.eng.id,
+          type: 'issue.created',
+          version: 1,
+          actorId: a.members.owner.id,
+          client: 'web' as const,
+          subjectType: 'issue',
+          subjectId: firstIssue(a).id,
+          data: { identifier: 'ENG-1' },
+          ...over,
+        });
+
+        await expect(
+          outcome(db.orm.insert(event).values(row({ teamId: b.teams.eng.id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(event).values(row({ actorId: b.members.owner.id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(
+            db.orm
+              .insert(event)
+              .values(row({ workspaceId: '00000000-0000-4000-8000-0000000000ff' })),
+          ),
+        ).resolves.toBe('23503');
+        await expect(outcome(db.orm.insert(event).values(row({})))).resolves.toBe('inserted');
+        await expect(
+          outcome(
+            db.orm.insert(event).values(row({ teamId: null, actorId: null, client: 'system' })),
+          ),
+        ).resolves.toBe('inserted');
+        const [stored] = await db.orm
+          .select()
+          .from(event)
+          .where(eq(event.workspaceId, a.workspaceId))
+          .limit(1);
+        expect(stored?.occurredAt).toBeInstanceOf(Date);
+        expect(await indexNames(db, 'event')).toContain('event_workspace_occurred_idx');
+      });
+    });
+
+    it('an external reference is unique per source and id in a workspace, and one per subject and source', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const [first, second] = a.issues.eng;
+        if (!first || !second) throw new Error('fixture needs two ENG issues');
+        const row = (over: Partial<typeof externalRef.$inferInsert>) => ({
+          workspaceId: a.workspaceId,
+          subjectType: 'issue',
+          subjectId: first.id,
+          source: 'tracker',
+          externalId: 'REQ-1',
+          ...over,
+        });
+
+        await expect(outcome(db.orm.insert(externalRef).values(row({})))).resolves.toBe('inserted');
+        // Same source and id on another subject: the id is taken.
+        await expect(
+          outcome(db.orm.insert(externalRef).values(row({ subjectId: second.id }))),
+        ).resolves.toBe('23505');
+        // Same subject, same source, another id: a subject has one reference per source.
+        await expect(
+          outcome(db.orm.insert(externalRef).values(row({ externalId: 'REQ-2' }))),
+        ).resolves.toBe('23505');
+        // Same subject, another source: fine. Same source and id in another workspace: fine.
+        await expect(
+          outcome(
+            db.orm.insert(externalRef).values(row({ source: 'other-system', externalId: 'REQ-2' })),
+          ),
+        ).resolves.toBe('inserted');
+        await expect(
+          outcome(
+            db.orm
+              .insert(externalRef)
+              .values(row({ workspaceId: b.workspaceId, subjectId: firstIssue(b).id })),
+          ),
+        ).resolves.toBe('inserted');
+      });
+    });
+
+    it('an external reference source is lower-case, 1-64 characters, and a stored url is http or https', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const [first, second, third] = a.issues.eng;
+        if (!first || !second || !third) throw new Error('fixture needs three ENG issues');
+        const withSource = (subjectId: string, source: string, url?: string) =>
+          outcome(
+            db.orm.insert(externalRef).values({
+              workspaceId: a.workspaceId,
+              subjectType: 'issue',
+              subjectId,
+              source,
+              externalId: `id-${source.length}`,
+              url,
+            }),
+          );
+
+        await expect(withSource(first.id, 'Upper')).resolves.toBe('23514');
+        await expect(withSource(first.id, '-leading')).resolves.toBe('23514');
+        await expect(withSource(first.id, 'has space')).resolves.toBe('23514');
+        await expect(withSource(first.id, '')).resolves.toBe('23514');
+        await expect(withSource(first.id, 'a'.repeat(65))).resolves.toBe('23514');
+        await expect(withSource(first.id, 'a'.repeat(64))).resolves.toBe('inserted');
+        await expect(withSource(second.id, 'dash.under_score-9')).resolves.toBe('inserted');
+        await expect(withSource(third.id, 'with-url', 'javascript:alert(1)')).resolves.toBe(
+          '23514',
+        );
+        await expect(withSource(third.id, 'with-url', 'https://example.test/r/1')).resolves.toBe(
+          'inserted',
+        );
+      });
+    });
+
+    it('an idempotency key is unique per workspace, actor and key, 1-128 characters, with a known actor', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const row = (over: Partial<typeof idempotencyKey.$inferInsert>) => ({
+          workspaceId: a.workspaceId,
+          actorId: a.members.owner.id,
+          key: 'key-1',
+          requestHash: 'h'.repeat(64),
+          status: 201,
+          response: { issue: { id: 'x' } },
+          ...over,
+        });
+
+        await expect(outcome(db.orm.insert(idempotencyKey).values(row({})))).resolves.toBe(
+          'inserted',
+        );
+        await expect(outcome(db.orm.insert(idempotencyKey).values(row({})))).resolves.toBe('23505');
+        await expect(
+          outcome(db.orm.insert(idempotencyKey).values(row({ actorId: a.members.admin.id }))),
+        ).resolves.toBe('inserted');
+        await expect(
+          outcome(db.orm.insert(idempotencyKey).values(row({ actorId: b.members.owner.id }))),
+        ).resolves.toBe('23503');
+        await expect(outcome(db.orm.insert(idempotencyKey).values(row({ key: '' })))).resolves.toBe(
+          '23514',
+        );
+        await expect(
+          outcome(db.orm.insert(idempotencyKey).values(row({ key: 'k'.repeat(129) }))),
+        ).resolves.toBe('23514');
+        await expect(
+          outcome(db.orm.insert(idempotencyKey).values(row({ key: 'k'.repeat(128) }))),
+        ).resolves.toBe('inserted');
+      });
+    });
+
+    it('saved views and issue templates follow their workspace and team, and need no team or owner', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const view = (over: Partial<typeof savedView.$inferInsert>) => ({
+          workspaceId: a.workspaceId,
+          name: 'My view',
+          ...over,
+        });
+        const template = (over: Partial<typeof issueTemplate.$inferInsert>) => ({
+          workspaceId: a.workspaceId,
+          name: 'Bug report',
+          ...over,
+        });
+
+        await expect(
+          outcome(db.orm.insert(savedView).values(view({ teamId: b.teams.eng.id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(savedView).values(view({ ownerId: b.members.owner.id }))),
+        ).resolves.toBe('23503');
+        await expect(outcome(db.orm.insert(savedView).values(view({})))).resolves.toBe('inserted');
+        await expect(
+          outcome(
+            db.orm
+              .insert(savedView)
+              .values(view({ teamId: a.teams.eng.id, ownerId: a.members.owner.id, shared: true })),
+          ),
+        ).resolves.toBe('inserted');
+        await expect(
+          outcome(db.orm.insert(issueTemplate).values(template({ teamId: b.teams.eng.id }))),
+        ).resolves.toBe('23503');
+        await expect(outcome(db.orm.insert(issueTemplate).values(template({})))).resolves.toBe(
+          'inserted',
+        );
+
+        const [stored] = await db.orm
+          .select()
+          .from(savedView)
+          .where(eq(savedView.name, 'My view'))
+          .limit(1);
+        expect(stored?.filters).toEqual({});
+        expect(stored?.display).toEqual({});
+        expect(stored?.shared).toBe(false);
+        const [tpl] = await db.orm.select().from(issueTemplate).limit(1);
+        expect(tpl?.fields).toEqual({});
       });
     });
   });

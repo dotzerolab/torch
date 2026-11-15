@@ -9,3 +9,7 @@ export type MemberLocale = (typeof MEMBER_LOCALES)[number];
 /** Stored once with a direction: `blocks` reads "issue blocks related issue"; "blocked by" is its inverse. */
 export const ISSUE_RELATION_TYPES = ['blocks', 'related', 'duplicate'] as const;
 export type IssueRelationType = (typeof ISSUE_RELATION_TYPES)[number];
+
+/** How a change reached Torch. Derived from how the caller authenticated, never from a request header. */
+export const ACTIVITY_CLIENTS = ['web', 'api', 'mcp', 'import', 'system'] as const;
+export type ActivityClient = (typeof ACTIVITY_CLIENTS)[number];
