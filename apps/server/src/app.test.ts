@@ -1,5 +1,5 @@
 import type { Brand } from '@torch/shared/brand';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from './app.ts';
 import type { Orm } from './db.ts';
 import { createMemoryMailer } from './mail/mailer.ts';
@@ -56,13 +56,15 @@ describe('GET /health/db', () => {
   const get = (app: ReturnType<typeof createApp>) =>
     app.fetch(new Request('http://localhost/health/db'));
 
-  it('returns ok with the WAL level when the database is reachable and logical', async () => {
-    const db = { health: async () => ({ status: 'ok', walLevel: 'logical' }) as const };
+  it('returns ok with the WAL level and the replication privilege when the database is ready for sync', async () => {
+    const db = {
+      health: async () => ({ status: 'ok', walLevel: 'logical', replication: true }) as const,
+    };
 
     const res = await get(createApp({ brand, db }));
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ status: 'ok', walLevel: 'logical' });
+    expect(await res.json()).toEqual({ status: 'ok', walLevel: 'logical', replication: true });
   });
 
   it('returns 503 with the reason when the database check fails', async () => {
@@ -84,6 +86,42 @@ describe('GET /health/db', () => {
   });
 });
 
+describe('GET /health/sync', () => {
+  const get = (app: ReturnType<typeof createApp>) =>
+    app.fetch(new Request('http://localhost/health/sync'));
+  const electric = { url: 'http://sync.example.test:3000', secret: 'topsecret-value' };
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('answers disabled with 200 when no sync service is configured', async () => {
+    const res = await get(createApp({ brand }));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: 'disabled' });
+  });
+
+  it('answers ok with 200 when the sync service is active', async () => {
+    vi.stubGlobal('fetch', async () => Response.json({ status: 'active' }));
+
+    const res = await get(createApp({ brand, electric }));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: 'ok' });
+  });
+
+  it('answers 503 with the reason when the sync service is not replicating', async () => {
+    vi.stubGlobal('fetch', async () => Response.json({ status: 'waiting' }));
+
+    const res = await get(createApp({ brand, electric }));
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      status: 'error',
+      reason: 'sync service is not replicating yet (waiting)',
+    });
+  });
+});
+
 describe('request body limit on /api/*', () => {
   const origin = 'http://app.example.test';
   // Nothing may reach the database before a body is accepted: any property access fails the test.
@@ -97,7 +135,10 @@ describe('request body limit on /api/*', () => {
   ) as unknown as Orm;
   const app = createApp({
     brand,
-    db: { health: async () => ({ status: 'ok', walLevel: 'logical' }), orm: untouchedOrm },
+    db: {
+      health: async () => ({ status: 'ok', walLevel: 'logical', replication: true }),
+      orm: untouchedOrm,
+    },
     config: { appUrl: origin, trustProxy: false },
     mailer: createMemoryMailer(),
   });
@@ -171,7 +212,9 @@ describe('request body limit on /api/*', () => {
 
 describe('cookie-authenticated routes need the CSRF guard', () => {
   const origin = 'http://app.example.test';
-  const db = { health: async () => ({ status: 'ok', walLevel: 'logical' }) as const };
+  const db = {
+    health: async () => ({ status: 'ok', walLevel: 'logical', replication: true }) as const,
+  };
   const orm = {} as unknown as Orm;
   const neverCalled: ActorResolver = {
     resolveActor: async () => {
@@ -217,7 +260,10 @@ describe('unexpected errors', () => {
     } as unknown as Orm;
     const app = createApp({
       brand,
-      db: { health: async () => ({ status: 'ok', walLevel: 'logical' }), orm: failing },
+      db: {
+        health: async () => ({ status: 'ok', walLevel: 'logical', replication: true }),
+        orm: failing,
+      },
       config: { appUrl: origin, trustProxy: false },
       mailer: createMemoryMailer(),
     });
