@@ -19,6 +19,7 @@ import {
   session,
   team,
   teamMember,
+  workflowState,
   workspace,
 } from '@torch/shared/db/schema';
 import { and, eq, sql } from 'drizzle-orm';
@@ -636,6 +637,28 @@ describe.skipIf(!databaseUrl)('schema (Postgres)', () => {
           .set({ archivedAt: new Date() })
           .where(and(eq(label.workspaceId, a.workspaceId), eq(label.teamId, a.teams.eng.id)));
         await expect(add('bug', a.teams.eng.id)).resolves.toBe('inserted');
+      });
+    });
+
+    it('workflow state names are unique per team, case-insensitively, until archived', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const add = (name: string, teamId: string) =>
+          outcome(
+            db.orm
+              .insert(workflowState)
+              .values({ workspaceId: a.workspaceId, teamId, name, type: 'started', position: 9 }),
+          );
+
+        await expect(add('Review', a.teams.eng.id)).resolves.toBe('inserted');
+        await expect(add('review', a.teams.eng.id)).resolves.toBe('23505');
+        await expect(add('Review', a.teams.ops.id)).resolves.toBe('inserted');
+
+        await db.orm
+          .update(workflowState)
+          .set({ archivedAt: new Date() })
+          .where(and(eq(workflowState.teamId, a.teams.eng.id), eq(workflowState.name, 'Review')));
+        await expect(add('review', a.teams.eng.id)).resolves.toBe('inserted');
       });
     });
 

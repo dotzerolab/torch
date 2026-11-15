@@ -135,3 +135,16 @@ export async function visibleIssue(
   };
   return canSeeTeam(actor, access) ? { id: row.id, teamId: row.teamId } : null;
 }
+
+/** The access record of a team of the actor's workspace that the actor can see, or null: hidden and missing look alike. */
+export async function visibleTeam(
+  tx: Tx,
+  actor: Actor,
+  teamId: string,
+): Promise<TeamAccess | null> {
+  const [row] = await tx
+    .select({ id: team.id, workspaceId: team.workspaceId, private: team.private })
+    .from(team)
+    .where(and(eq(team.workspaceId, actor.workspaceId), eq(team.id, teamId)));
+  return row && canSeeTeam(actor, row) ? row : null;
+}

@@ -15,6 +15,10 @@ export const ISSUE_ERROR_CODES = [
   'relation_exists',
   'external_ref_exists',
   'idempotency_key_reused',
+  'label_name_taken',
+  'workflow_state_name_taken',
+  'workflow_state_required',
+  'move_target_required',
 ] as const;
 export type IssueErrorCode = (typeof ISSUE_ERROR_CODES)[number];
 
@@ -38,6 +42,11 @@ const MESSAGES: Record<IssueErrorCode, string> = {
   relation_exists: 'These issues already have this relation.',
   external_ref_exists: 'An issue with this external reference already exists.',
   idempotency_key_reused: 'This Idempotency-Key was already used with a different request.',
+  label_name_taken: 'A label with this name already exists here.',
+  workflow_state_name_taken: 'A state with this name already exists in the team.',
+  workflow_state_required:
+    'A team keeps at least one backlog or unstarted state and one completed state.',
+  move_target_required: 'This state has issues: say where they move with moveIssuesTo.',
 };
 
 // Every answer is about one person's data: nothing may be kept by a browser or a proxy.

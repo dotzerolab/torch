@@ -16,7 +16,7 @@ import {
 } from '@torch/shared/db/schema';
 import { type IssueCreateInput, issueCreateInput } from '@torch/shared/mutations/issue';
 import { canCreateIssue, canSeeTeam, type TeamAccess } from '@torch/shared/permissions';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { recordIssueChange } from '../activity/record.ts';
 import type { Orm, Tx } from '../db.ts';
 import { currentTxid } from '../mutations/txid.ts';
@@ -151,7 +151,11 @@ async function createInTransaction(
     .select({ id: workflowState.id, type: workflowState.type, position: workflowState.position })
     .from(workflowState)
     .where(
-      and(eq(workflowState.workspaceId, actor.workspaceId), eq(workflowState.teamId, teamRow.id)),
+      and(
+        eq(workflowState.workspaceId, actor.workspaceId),
+        eq(workflowState.teamId, teamRow.id),
+        isNull(workflowState.archivedAt),
+      ),
     )
     .orderBy(workflowState.position);
   const state = data.stateId
@@ -159,6 +163,14 @@ async function createInTransaction(
     : (states.find((candidate) => candidate.type === 'backlog') ??
       states.find((candidate) => candidate.type === 'unstarted'));
   if (!state) throw invalidReference('stateId');
+  // A shared lock on the state row, taken with "not archived" in the condition: an archive of this state (which locks
+  // the row exclusively) either finishes first, and the row no longer matches, or waits for this transaction.
+  const [stillOpen] = await tx
+    .select({ id: workflowState.id })
+    .from(workflowState)
+    .where(and(eq(workflowState.id, state.id), isNull(workflowState.archivedAt)))
+    .for('share');
+  if (!stillOpen) throw invalidReference('stateId');
 
   const people = new Set<string>([...(data.subscriberIds ?? [])]);
   if (data.assigneeId) people.add(data.assigneeId);

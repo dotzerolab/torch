@@ -22,7 +22,13 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 
-import { ACTIVITY_CLIENTS, ISSUE_RELATION_TYPES, MEMBER_LOCALES, MEMBER_ROLES } from './enums.ts';
+import {
+  ACTIVITY_CLIENTS,
+  ISSUE_RELATION_TYPES,
+  MEMBER_LOCALES,
+  MEMBER_ROLES,
+  WORKFLOW_STATE_TYPES,
+} from './enums.ts';
 
 export {
   ACTIVITY_CLIENTS,
@@ -33,17 +39,9 @@ export {
   MEMBER_ROLES,
   type MemberLocale,
   type MemberRole,
+  WORKFLOW_STATE_TYPES,
+  type WorkflowStateType,
 } from './enums.ts';
-
-export const WORKFLOW_STATE_TYPES = [
-  'triage',
-  'backlog',
-  'unstarted',
-  'started',
-  'completed',
-  'canceled',
-] as const;
-export type WorkflowStateType = (typeof WORKFLOW_STATE_TYPES)[number];
 
 /** What the audit log records (admin actions). Entries carry ids, roles and counts, never emails or free text. */
 export const AUDIT_ACTIONS = [
@@ -165,10 +163,15 @@ export const workflowState = pgTable(
     type: workflowStateType('type').notNull(),
     position: integer('position').notNull(),
     color: text('color').notNull().default('#94a3b8'),
+    // An archived state keeps its issues' history and stays readable; it takes no new issues and frees its name.
+    archivedAt: timestamp('archived_at', { withTimezone: true }),
     createdAt: createdAt(),
   },
   (t) => [
-    unique('workflow_state_team_name_unique').on(t.teamId, t.name),
+    // A name is unique per team among states that are not archived (the same rule as labels).
+    uniqueIndex('workflow_state_team_name_unique')
+      .on(t.teamId, sql`lower(${t.name})`)
+      .where(sql`${t.archivedAt} is null`),
     // Target of the issue's composite foreign key: a state belongs to exactly one team.
     unique('workflow_state_team_id_unique').on(t.teamId, t.id),
     foreignKey({

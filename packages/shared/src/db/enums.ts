@@ -13,3 +13,13 @@ export type IssueRelationType = (typeof ISSUE_RELATION_TYPES)[number];
 /** How a change reached Torch. Derived from how the caller authenticated, never from a request header. */
 export const ACTIVITY_CLIENTS = ['web', 'api', 'mcp', 'import', 'system'] as const;
 export type ActivityClient = (typeof ACTIVITY_CLIENTS)[number];
+
+export const WORKFLOW_STATE_TYPES = [
+  'triage',
+  'backlog',
+  'unstarted',
+  'started',
+  'completed',
+  'canceled',
+] as const;
+export type WorkflowStateType = (typeof WORKFLOW_STATE_TYPES)[number];

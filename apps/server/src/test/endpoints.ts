@@ -8,6 +8,7 @@ import {
   issue,
   issueLink,
   issueRelation,
+  label,
   member,
   team,
   teamMember,
@@ -63,6 +64,14 @@ export type Ids = {
   linkId: string;
   privateLinkId: string;
   ownerOnlyLinkId: string;
+  /** A label of each of the three teams and one of the workspace, and a started workflow state of each team: all new for the attempt. */
+  labelId: string;
+  privateLabelId: string;
+  ownerOnlyLabelId: string;
+  workspaceLabelId: string;
+  stateId: string;
+  privateStateId: string;
+  ownerOnlyStateId: string;
   /** A member (role `member`) who belongs to all three teams. */
   memberId: string;
   /** A member (role `member`) who belongs to no team. */
@@ -133,6 +142,13 @@ export const PLACEHOLDER_IDS: Ids = {
   linkId: ':linkId',
   privateLinkId: ':linkId',
   ownerOnlyLinkId: ':linkId',
+  labelId: ':labelId',
+  privateLabelId: ':labelId',
+  ownerOnlyLabelId: ':labelId',
+  workspaceLabelId: ':labelId',
+  stateId: ':stateId',
+  privateStateId: ':stateId',
+  ownerOnlyStateId: ':stateId',
   memberId: ':memberId',
   newcomerId: ':memberId',
   adminId: ':memberId',
@@ -167,6 +183,8 @@ type IssueKey = 'issueId' | 'privateIssueId' | 'ownerOnlyIssueId';
 type PeerKey = 'peerIssueId' | 'privatePeerIssueId' | 'ownerOnlyPeerIssueId';
 type RelationKey = 'relationId' | 'privateRelationId' | 'ownerOnlyRelationId';
 type LinkKey = 'linkId' | 'privateLinkId' | 'ownerOnlyLinkId';
+type LabelKey = 'labelId' | 'privateLabelId' | 'ownerOnlyLabelId';
+type StateKey = 'stateId' | 'privateStateId' | 'ownerOnlyStateId';
 
 /**
  * The three teams of a world with who may see (and edit the issues of) each and who may manage it, as the rules say:
@@ -179,9 +197,13 @@ const TEAMS: readonly {
   peer: PeerKey;
   relation: RelationKey;
   link: LinkKey;
+  teamLabel: LabelKey;
+  state: StateKey;
   label: string;
   see: Rule;
   manage: Rule;
+  /** Who may define a label of the team: anybody but a guest who sees the team. */
+  defineLabel: Rule;
 }[] = [
   {
     team: 'teamId',
@@ -189,9 +211,12 @@ const TEAMS: readonly {
     peer: 'peerIssueId',
     relation: 'relationId',
     link: 'linkId',
+    teamLabel: 'labelId',
+    state: 'stateId',
     label: 'public team',
     see: { minRole: 'guest' },
     manage: { minRole: 'admin' },
+    defineLabel: { minRole: 'member' },
   },
   {
     team: 'privateTeamId',
@@ -199,9 +224,12 @@ const TEAMS: readonly {
     peer: 'privatePeerIssueId',
     relation: 'privateRelationId',
     link: 'privateLinkId',
+    teamLabel: 'privateLabelId',
+    state: 'privateStateId',
     label: 'private team',
     see: { minRole: 'owner', alsoAllowed: ['member'] },
     manage: { minRole: 'owner' },
+    defineLabel: { minRole: 'owner', alsoAllowed: ['member'] },
   },
   {
     team: 'ownerOnlyTeamId',
@@ -209,9 +237,12 @@ const TEAMS: readonly {
     peer: 'ownerOnlyPeerIssueId',
     relation: 'ownerOnlyRelationId',
     link: 'ownerOnlyLinkId',
+    teamLabel: 'ownerOnlyLabelId',
+    state: 'ownerOnlyStateId',
     label: 'public team with the owner only',
     see: { minRole: 'member' },
     manage: { minRole: 'admin' },
+    defineLabel: { minRole: 'member' },
   },
 ];
 
@@ -479,6 +510,80 @@ export const ENDPOINTS: EndpointCase[] = [
     },
   ]),
 
+  // ---- labels and workflow states ----
+  { name: 'labels: list', method: 'GET', path: (ids) => `${api(ids)}/labels`, minRole: 'guest' },
+  {
+    name: 'labels: create (workspace)',
+    method: 'POST',
+    path: (ids) => `${api(ids)}/labels`,
+    body: (ids: Ids) => ({ name: `W${ids.uid}`, color: '#336699' }),
+    minRole: 'admin',
+  },
+  {
+    name: 'labels: update (workspace)',
+    method: 'PATCH',
+    path: (ids) => `${api(ids)}/labels/${ids.workspaceLabelId}`,
+    body: { color: '#112233' },
+    minRole: 'admin',
+  },
+  {
+    name: 'labels: archive (workspace)',
+    method: 'POST',
+    path: (ids) => `${api(ids)}/labels/${ids.workspaceLabelId}/archive`,
+    minRole: 'admin',
+  },
+  ...TEAMS.flatMap(
+    ({ team: key, teamLabel, state, label, see, manage, defineLabel }): EndpointCase[] => [
+      {
+        name: `labels: create (${label})`,
+        method: 'POST',
+        path: (ids) => `${api(ids)}/labels`,
+        body: (ids: Ids) => ({ name: `T${ids.uid}`, color: '#336699', teamId: ids[key] }),
+        ...defineLabel,
+      },
+      {
+        name: `labels: update (${label})`,
+        method: 'PATCH',
+        path: (ids) => `${api(ids)}/labels/${ids[teamLabel]}`,
+        body: { color: '#112233' },
+        ...defineLabel,
+      },
+      {
+        name: `labels: archive (${label})`,
+        method: 'POST',
+        path: (ids) => `${api(ids)}/labels/${ids[teamLabel]}/archive`,
+        ...defineLabel,
+      },
+      {
+        name: `workflow states: list (${label})`,
+        method: 'GET',
+        path: (ids) => `${api(ids)}/teams/${ids[key]}/workflow-states`,
+        ...see,
+      },
+      {
+        name: `workflow states: create (${label})`,
+        method: 'POST',
+        path: (ids) => `${api(ids)}/teams/${ids[key]}/workflow-states`,
+        body: (ids: Ids) => ({ name: `State ${ids.uid}`, type: 'started' }),
+        ...manage,
+      },
+      {
+        name: `workflow states: update (${label})`,
+        method: 'PATCH',
+        path: (ids) => `${api(ids)}/teams/${ids[key]}/workflow-states/${ids[state]}`,
+        body: { color: '#112233' },
+        ...manage,
+      },
+      {
+        name: `workflow states: archive (${label})`,
+        method: 'POST',
+        path: (ids) => `${api(ids)}/teams/${ids[key]}/workflow-states/${ids[state]}/archive`,
+        body: {},
+        ...manage,
+      },
+    ],
+  ),
+
   // ---- sync shapes ----
   { name: 'sync: teams', method: 'GET', path: (ids) => `${sync(ids)}/teams`, minRole: 'guest' },
   { name: 'sync: members', method: 'GET', path: (ids) => `${sync(ids)}/members`, minRole: 'guest' },
@@ -621,6 +726,13 @@ export async function newAttempt(
     linkId: UNUSED,
     privateLinkId: UNUSED,
     ownerOnlyLinkId: UNUSED,
+    labelId: UNUSED,
+    privateLabelId: UNUSED,
+    ownerOnlyLabelId: UNUSED,
+    workspaceLabelId: UNUSED,
+    stateId: UNUSED,
+    privateStateId: UNUSED,
+    ownerOnlyStateId: UNUSED,
     memberId: UNUSED,
     newcomerId: UNUSED,
     adminId: UNUSED,
@@ -698,6 +810,38 @@ export async function newAttempt(
       ids[linkKey] = row.id;
     }
   }
+
+  const LABEL_TARGETS = [
+    ['eng', 'labelId', 'stateId'],
+    ['ops', 'privateLabelId', 'privateStateId'],
+    ['pub', 'ownerOnlyLabelId', 'ownerOnlyStateId'],
+  ] as const;
+  const newLabelRow = async (teamId: string | null, name: string) => {
+    const [row] = await orm
+      .insert(label)
+      .values({ workspaceId, teamId, name, color: '#336699' })
+      .returning({ id: label.id });
+    if (!row) throw new Error('label insert returned no row');
+    return row.id;
+  };
+  for (const [name, labelKey, stateKey] of LABEL_TARGETS) {
+    if (needs.has(labelKey)) ids[labelKey] = await newLabelRow(ws.teams[name], `L${uid}`);
+    if (needs.has(stateKey)) {
+      const [row] = await orm
+        .insert(workflowState)
+        .values({
+          workspaceId,
+          teamId: ws.teams[name],
+          name: `Review ${uid}`,
+          type: 'started',
+          position: 50,
+        })
+        .returning({ id: workflowState.id });
+      if (!row) throw new Error('workflow state insert returned no row');
+      ids[stateKey] = row.id;
+    }
+  }
+  if (needs.has('workspaceLabelId')) ids.workspaceLabelId = await newLabelRow(null, `WL${uid}`);
 
   if (needs.has('memberId')) {
     const added = await addMember(orm, workspaceId, 'member', {

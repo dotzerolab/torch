@@ -14,7 +14,15 @@
 export type Role = 'owner' | 'admin' | 'member' | 'guest';
 
 /** Every kind of object a permission decision is about. The matrix test needs rows for each one. */
-export const OBJECT_TYPES = ['member', 'invite', 'team', 'team_membership', 'issue'] as const;
+export const OBJECT_TYPES = [
+  'member',
+  'invite',
+  'team',
+  'team_membership',
+  'issue',
+  'label',
+  'workflow_state',
+] as const;
 export type ObjectType = (typeof OBJECT_TYPES)[number];
 
 export type Actor = {
@@ -171,4 +179,20 @@ export function canSeeMember(
 /** Emails are administrative data: owners and admins only (the synced member profile never carries one). */
 export function canSeeMemberEmail(actor: Actor): boolean {
   return isOwnerOrAdmin(actor);
+}
+
+// ---- Labels and workflow states (P1d) ----
+
+/**
+ * Create, edit and archive a label. A workspace label (`team` null) is for owners and admins. A team label is for
+ * anyone but a guest who can see the team: guests read labels, they do not define them.
+ */
+export function canManageLabels(actor: Actor, team: TeamAccess | null): boolean {
+  if (team === null) return isOwnerOrAdmin(actor);
+  return actor.role !== 'guest' && canSeeTeam(actor, team);
+}
+
+/** Create, edit and archive the workflow states of a team: owners and admins, for the teams they can see. */
+export function canManageWorkflow(actor: Actor, team: TeamAccess): boolean {
+  return isOwnerOrAdmin(actor) && canSeeTeam(actor, team);
 }

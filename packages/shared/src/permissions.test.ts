@@ -9,9 +9,11 @@ import {
   canInvite,
   canListPrivateTeams,
   canManageInvite,
+  canManageLabels,
   canManageMembers,
   canManageTeamMembership,
   canManageTeams,
+  canManageWorkflow,
   canSeeMember,
   canSeeMemberEmail,
   canSeeTeam,
@@ -124,7 +126,15 @@ const target = (role: Role, over: Partial<{ id: string; workspaceId: string }> =
 
 describe('OBJECT_TYPES', () => {
   it('lists every object a permission decision is about', () => {
-    expect([...OBJECT_TYPES]).toEqual(['member', 'invite', 'team', 'team_membership', 'issue']);
+    expect([...OBJECT_TYPES]).toEqual([
+      'member',
+      'invite',
+      'team',
+      'team_membership',
+      'issue',
+      'label',
+      'workflow_state',
+    ]);
   });
 });
 
@@ -430,6 +440,35 @@ describe('canSeeMember', () => {
     expect(view(role, [TEAM], { workspaceId: OTHER_WORKSPACE, teamIds: [TEAM] })).toBe(false);
     // Same member id as the actor's own, but in another workspace: still no.
     expect(view(role, [TEAM], { id: SELF, workspaceId: OTHER_WORKSPACE, teamIds: [TEAM] })).toBe(
+      false,
+    );
+  });
+});
+
+describe('canManageLabels and canManageWorkflow', () => {
+  it('a workspace label is for owners and admins', () => {
+    expect(canManageLabels(actor('owner', []), null)).toBe(true);
+    expect(canManageLabels(actor('admin', []), null)).toBe(true);
+    expect(canManageLabels(actor('member', [TEAM]), null)).toBe(false);
+    expect(canManageLabels(actor('guest', [TEAM]), null)).toBe(false);
+  });
+
+  it('a team label is for anyone but a guest who can see the team', () => {
+    expect(canManageLabels(actor('member', []), team())).toBe(true);
+    expect(canManageLabels(actor('member', []), team({ private: true }))).toBe(false);
+    expect(canManageLabels(actor('member', [TEAM]), team({ private: true }))).toBe(true);
+    expect(canManageLabels(actor('guest', [TEAM]), team())).toBe(false);
+    expect(canManageLabels(actor('admin', []), team({ workspaceId: OTHER_WORKSPACE }))).toBe(false);
+  });
+
+  it('workflow states are for owners and admins who can see the team', () => {
+    expect(canManageWorkflow(actor('owner', []), team())).toBe(true);
+    expect(canManageWorkflow(actor('admin', []), team())).toBe(true);
+    expect(canManageWorkflow(actor('admin', []), team({ private: true }))).toBe(false);
+    expect(canManageWorkflow(actor('admin', [TEAM]), team({ private: true }))).toBe(true);
+    expect(canManageWorkflow(actor('member', [TEAM]), team())).toBe(false);
+    expect(canManageWorkflow(actor('guest', [TEAM]), team())).toBe(false);
+    expect(canManageWorkflow(actor('owner', []), team({ workspaceId: OTHER_WORKSPACE }))).toBe(
       false,
     );
   });

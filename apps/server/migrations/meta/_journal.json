@@ -29,6 +29,13 @@
       "when": 1794751286230,
       "tag": "0003_activity_events_refs_keys",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794762005411,
+      "tag": "0004_workflow_state_archive",
+      "breakpoints": true
     }
   ]
 }

@@ -12,7 +12,7 @@ import {
 } from '@torch/shared/db/schema';
 import { type IssueUpdateInput, issueUpdateInput } from '@torch/shared/mutations/issue';
 import { canEditIssues, canSeeTeam, type TeamAccess } from '@torch/shared/permissions';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { recordIssueChange } from '../activity/record.ts';
 import type { Orm, Tx } from '../db.ts';
 import { currentTxid } from '../mutations/txid.ts';
@@ -135,7 +135,9 @@ export async function updateIssue(
     if (before.archivedAt) return refuse('issue_archived', 409);
 
     let stateType: Awaited<ReturnType<typeof stateTypeOf>>;
-    if (changes.stateId !== undefined) {
+    // Only a real move reads the target state, under a shared lock (see archiveWorkflowState): a state that is
+    // being archived is not a target, and an update that keeps the state takes no state lock at all.
+    if (changes.stateId !== undefined && changes.stateId !== before.stateId) {
       stateType = await stateTypeOf(tx, before.teamId, changes.stateId);
       if (!stateType) return refuse('invalid_state', 400);
     }
@@ -211,7 +213,14 @@ async function stateTypeOf(tx: Tx, teamId: string, stateId: string) {
   const [state] = await tx
     .select({ type: workflowState.type })
     .from(workflowState)
-    .where(and(eq(workflowState.id, stateId), eq(workflowState.teamId, teamId)));
+    .where(
+      and(
+        eq(workflowState.id, stateId),
+        eq(workflowState.teamId, teamId),
+        isNull(workflowState.archivedAt),
+      ),
+    )
+    .for('share');
   return state?.type;
 }
 

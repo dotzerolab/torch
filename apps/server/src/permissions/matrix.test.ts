@@ -20,9 +20,11 @@ import {
   canInvite,
   canListPrivateTeams,
   canManageInvite,
+  canManageLabels,
   canManageMembers,
   canManageTeamMembership,
   canManageTeams,
+  canManageWorkflow,
   canSeeMember,
   canSeeMemberEmail,
   canSeeTeam,
@@ -171,6 +173,22 @@ export const MATRIX: Record<ObjectType, MatrixRow[]> = {
     NOBODY('create', 'not in team, private'),
     NOBODY('create', 'other workspace'),
   ],
+  label: [
+    // A workspace label: owners and admins. It has no team, so there is no relation to ask about.
+    row('manage workspace label', true, true, false, false),
+    // A team label: anybody but a guest who can see the team.
+    row('manage team label', true, true, true, false, 'in team'),
+    row('manage team label', true, true, true, false, 'not in team, public'),
+    NOBODY('manage team label', 'not in team, private'),
+    NOBODY('manage team label', 'other workspace'),
+  ],
+  workflow_state: [
+    // Owners and admins, for a team they can see.
+    row('manage', true, true, false, false, 'in team'),
+    row('manage', true, true, false, false, 'not in team, public'),
+    NOBODY('manage', 'not in team, private'),
+    NOBODY('manage', 'other workspace'),
+  ],
 };
 
 // ---- fixtures, in memory ----
@@ -297,6 +315,13 @@ const EVALUATORS: Record<ObjectType, Record<string, Evaluate>> = {
     edit: (s) => canEditIssues(s.actor, s.team),
     create: (s) => canCreateIssue(s.actor, s.team),
   },
+  label: {
+    'manage workspace label': (s) => canManageLabels(s.actor, null),
+    'manage team label': (s) => canManageLabels(s.actor, s.team),
+  },
+  workflow_state: {
+    manage: (s) => canManageWorkflow(s.actor, s.team),
+  },
 };
 
 /**
@@ -317,6 +342,7 @@ const ROLE_ONLY = new Set([
   'invite: create for a deactivated owner',
   'team: create',
   'team: list private directory',
+  'label: manage workspace label',
 ]);
 
 const keyOf = (r: MatrixRow) => `${r.action} [${r.relation ?? '-'}]`;
@@ -507,6 +533,34 @@ const HTTP_ROWS: HttpRow[] = [
 
   // Sync shapes: every role reads the team list and the member list (filtered by the server); a team's own shapes
   // follow the visibility of the team.
+  // Labels: the workspace's are for owners and admins; a team's for anybody but a guest who sees the team. Everybody
+  // reads. Workflow states: owners and admins, for the teams they can see; everybody who sees the team reads them.
+  http('labels: list', 200, 200, 200, 200),
+  http('labels: create (workspace)', 201, 201, 403, 403),
+  http('labels: update (workspace)', 200, 200, 403, 403),
+  http('labels: archive (workspace)', 200, 200, 403, 403),
+  http('labels: create (public team)', 201, 201, 201, 403),
+  http('labels: update (public team)', 200, 200, 200, 403),
+  http('labels: archive (public team)', 200, 200, 200, 403),
+  http('labels: create (private team)', 201, 404, 201, 404),
+  http('labels: update (private team)', 200, 404, 200, 404),
+  http('labels: archive (private team)', 200, 404, 200, 404),
+  http('labels: create (public team with the owner only)', 201, 201, 201, 404),
+  http('labels: update (public team with the owner only)', 200, 200, 200, 404),
+  http('labels: archive (public team with the owner only)', 200, 200, 200, 404),
+  http('workflow states: list (public team)', 200, 200, 200, 200),
+  http('workflow states: create (public team)', 201, 201, 403, 403),
+  http('workflow states: update (public team)', 200, 200, 403, 403),
+  http('workflow states: archive (public team)', 200, 200, 403, 403),
+  http('workflow states: list (private team)', 200, 404, 200, 404),
+  http('workflow states: create (private team)', 201, 404, 403, 404),
+  http('workflow states: update (private team)', 200, 404, 403, 404),
+  http('workflow states: archive (private team)', 200, 404, 403, 404),
+  http('workflow states: list (public team with the owner only)', 200, 200, 200, 404),
+  http('workflow states: create (public team with the owner only)', 201, 201, 403, 404),
+  http('workflow states: update (public team with the owner only)', 200, 200, 403, 404),
+  http('workflow states: archive (public team with the owner only)', 200, 200, 403, 404),
+
   http('sync: teams', 200, 200, 200, 200),
   http('sync: members', 200, 200, 200, 200),
   http('sync: issues (public team)', 200, 200, 200, 200),

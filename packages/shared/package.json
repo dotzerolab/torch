@@ -14,7 +14,8 @@
     "./permissions": "./src/permissions.ts",
     "./db/workflow-defaults": "./src/db/workflow-defaults.ts",
     "./mutations/issue": "./src/mutations/issue.ts",
-    "./mutations/admin": "./src/mutations/admin.ts"
+    "./mutations/admin": "./src/mutations/admin.ts",
+    "./mutations/workflow": "./src/mutations/workflow.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p ."
