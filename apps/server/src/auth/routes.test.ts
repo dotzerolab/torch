@@ -926,6 +926,22 @@ describe.skipIf(!databaseUrl)('GET /api/auth/session and POST /api/auth/logout',
     });
   });
 
+  it('sign-out clears the HTTP cache', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `owner-${unique()}@example.test`;
+      await createWorkspaceFixture(db.orm, { email: { owner: email } });
+      const t = createAuthTestApp(db);
+      const { cookie } = await t.signIn(email);
+
+      const res = await t.post('/api/auth/logout', undefined, { cookie });
+      const withoutCookie = await t.post('/api/auth/logout');
+
+      // Only "cache": "storage" would wipe every workspace stored on the origin.
+      expect(res.headers.get('clear-site-data')).toBe('"cache"');
+      expect(withoutCookie.headers.get('clear-site-data')).toBe('"cache"');
+    });
+  });
+
   it('logout leaves the sessions of another browser alone, and works without a cookie', async () => {
     await withTempDatabase(async (db) => {
       const email = `owner-${unique()}@example.test`;

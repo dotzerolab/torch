@@ -64,18 +64,20 @@ const DROPPED_RESPONSE_HEADERS = [
   'keep-alive',
 ];
 
+/** Every relayed shape response, whatever Electric said: stored at most per user, revalidated on every use. */
+export const SHAPE_CACHE_CONTROL = 'private, no-cache';
+
 function relayHeaders(upstream: Headers): Headers {
   const headers = new Headers(upstream);
   for (const name of DROPPED_RESPONSE_HEADERS) headers.delete(name);
   for (const name of [...headers.keys()])
     if (name.startsWith('access-control-')) headers.delete(name);
 
-  // A shape response belongs to one user's permissions: no shared cache may keep it.
-  const cacheControl = headers.get('cache-control');
-  headers.set(
-    'cache-control',
-    cacheControl ? cacheControl.replace(/\bpublic\b/gi, 'private') : 'private',
-  );
+  // A shape response belongs to one user's permissions and one moment of them. The browser may keep it but must
+  // ask again before every use: the question reaches this proxy, which authorises the caller and then lets
+  // Electric answer 304 against the ETag. Electric's own `max-age` would serve the first snapshot to a user
+  // whose access has since ended.
+  headers.set('cache-control', SHAPE_CACHE_CONTROL);
   const vary = headers.get('vary');
   if (!vary || !/(^|,)\s*(cookie|\*)\s*(,|$)/i.test(vary)) {
     headers.set('vary', vary ? `${vary}, Cookie` : 'Cookie');
@@ -108,7 +110,12 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
 
     let upstream: Response;
     try {
-      upstream = await fetchUpstream(url, { signal: req.signal });
+      // The one request header that crosses: the validator of a response this proxy sent. Credentials stay here.
+      const ifNoneMatch = req.headers.get('if-none-match');
+      upstream = await fetchUpstream(url, {
+        signal: req.signal,
+        ...(ifNoneMatch ? { headers: { 'if-none-match': ifNoneMatch } } : {}),
+      });
     } catch (error) {
       // The client went away mid long-poll: nothing to answer, nothing to log.
       if (req.signal.aborted) return new Response(null, { status: 499 });

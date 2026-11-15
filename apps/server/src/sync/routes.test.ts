@@ -18,7 +18,7 @@ import {
   TEST_MEMBER_HEADER,
   TEST_ORIGIN,
 } from '../test/header-actor-resolver.ts';
-import { SYNC_FORWARDED_PARAMS } from './routes.ts';
+import { SHAPE_CACHE_CONTROL, SYNC_FORWARDED_PARAMS } from './routes.ts';
 import { MEMBER_COLUMNS } from './shapes.ts';
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -336,7 +336,7 @@ describe.skipIf(!databaseUrl)('GET /api/sync (shape proxy, fake Electric)', () =
     });
   });
 
-  it('response drops content-encoding and content-length, cache-control is private, Vary includes Cookie', async () => {
+  it('response drops content-encoding and content-length, cache-control is private no-cache, Vary includes Cookie', async () => {
     await withTempDatabase(async (db) => {
       const f = await createWorkspaceFixture(db.orm);
       const upstream = fakeUpstream(
@@ -366,9 +366,7 @@ describe.skipIf(!databaseUrl)('GET /api/sync (shape proxy, fake Electric)', () =
       expect(res.status).toBe(200);
       expect(res.headers.get('content-encoding')).toBeNull();
       expect(res.headers.get('content-length')).toBeNull();
-      expect(res.headers.get('cache-control')).toBe(
-        'private, max-age=60, stale-while-revalidate=300',
-      );
+      expect(res.headers.get('cache-control')).toBe(SHAPE_CACHE_CONTROL);
       expect(res.headers.get('vary')?.split(/\s*,\s*/)).toEqual(
         expect.arrayContaining(['Accept-Encoding', 'Cookie']),
       );
@@ -389,8 +387,95 @@ describe.skipIf(!databaseUrl)('GET /api/sync (shape proxy, fake Electric)', () =
 
       const res = await get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.member.id));
 
-      expect(res.headers.get('cache-control')).toBe('private');
+      expect(res.headers.get('cache-control')).toBe('private, no-cache');
       expect(res.headers.get('vary')).toContain('Cookie');
+    });
+  });
+
+  it('cache-control is private, no-cache for every relayed status', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const cases: [string, number, string, string | null][] = [
+        ['initial snapshot', 200, 'public, max-age=604800, stale-while-revalidate=2629746', '[]'],
+        ['live response', 200, 'public, max-age=5', '[]'],
+        ['not modified', 304, 'public, max-age=604800', null],
+        ['no content', 204, 'public, max-age=60', null],
+        ['must-refetch', 409, 'public, max-age=60', '[{"headers":{"control":"must-refetch"}}]'],
+        ['bad request', 400, 'public, max-age=60', '{"message":"bad"}'],
+      ];
+      for (const [name, status, upstreamControl, body] of cases) {
+        const upstream = fakeUpstream(
+          () =>
+            new Response(body, {
+              status,
+              headers: { 'content-type': 'application/json', 'cache-control': upstreamControl },
+            }),
+        );
+        const app = buildApp(db, upstream.fetchUpstream);
+
+        const res = await get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.member.id));
+
+        expect(res.status, name).toBe(status);
+        expect(res.headers.get('cache-control'), name).toBe('private, no-cache');
+        expect(res.headers.get('cache-control'), name).not.toMatch(/max-age/);
+        expect(res.headers.get('vary'), name).toContain('Cookie');
+      }
+    });
+  });
+
+  it('if-none-match reaches Electric and its 304 is relayed with an empty body', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(
+        () => new Response(null, { status: 304, headers: { etag: '"abc"' } }),
+      );
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const res = await get(
+        app,
+        `${issuesPath(f, 'eng')}?offset=-1`,
+        as(f.members.member.id, { headers: { 'if-none-match': '"abc"', cookie: 'sid=secret' } }),
+      );
+
+      expect(upstream.calls).toHaveLength(1);
+      const sent = new Headers(upstream.calls[0]?.init?.headers);
+      expect(sent.get('if-none-match')).toBe('"abc"');
+      // Only the validator is forwarded: the caller's credentials stay with us.
+      expect([...sent.keys()]).toEqual(['if-none-match']);
+      expect(res.status).toBe(304);
+      expect(await res.text()).toBe('');
+      expect(res.headers.get('cache-control')).toBe('private, no-cache');
+      expect(res.headers.get('etag')).toBe('"abc"');
+    });
+  });
+
+  it('no if-none-match header is sent upstream when the client sent none', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      await get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.member.id));
+
+      expect([...new Headers(upstream.calls[0]?.init?.headers).keys()]).toEqual([]);
+    });
+  });
+
+  it('etag is relayed', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(
+        () =>
+          new Response('[{"headers":{"control":"up-to-date"}}]', {
+            status: 200,
+            headers: { 'content-type': 'application/json', etag: '"h-1:-1:0_0"' },
+          }),
+      );
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const res = await get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.member.id));
+
+      expect(res.headers.get('etag')).toBe('"h-1:-1:0_0"');
     });
   });
 
@@ -931,9 +1016,7 @@ describe.skipIf(!databaseUrl)('GET /api/sync members and team members (fake Elec
         const res = await get(app, `${path}?offset=-1`, as(f.members.guest.id));
 
         expect(res.status, name).toBe(200);
-        expect(res.headers.get('cache-control'), name).toBe(
-          'private, max-age=60, stale-while-revalidate=300',
-        );
+        expect(res.headers.get('cache-control'), name).toBe('private, no-cache');
         expect(res.headers.get('vary')?.split(/\s*,\s*/), name).toEqual(
           expect.arrayContaining(['Accept-Encoding', 'Cookie']),
         );

@@ -188,6 +188,9 @@ export function createAuthRoutes(deps: AuthDeps) {
     const token = readSessionToken(c.req.raw, deps.appUrl);
     if (token) await revokeSessions(deps.orm, token, now());
     deleteCookie(c, cookieName, { path: '/', secure: isSecureUrl(deps.appUrl) });
+    // The browser's HTTP cache may hold shape responses of this user. Only "cache": "storage" would also wipe the
+    // stores of every other workspace on this origin (the client wipes the signed-out workspace itself).
+    c.header('Clear-Site-Data', '"cache"');
     return c.body(null, 204);
   });
 
