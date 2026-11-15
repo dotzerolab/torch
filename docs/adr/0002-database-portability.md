@@ -1,6 +1,6 @@
 # ADR 0002: Database portability (can Torch run on MySQL?)
 
-Date: 2026-11-15 · Status: Proposed · Builds on: [ADR 0001](0001-sync-engine.md) · Design: [`docs/design.md`](../design.md) §15
+Date: 2026-11-15 · Status: Accepted · Builds on: [ADR 0001](0001-sync-engine.md) · Design: [`docs/design.md`](../design.md) §15
 
 ## Context
 
@@ -77,10 +77,11 @@ which it still needs), risk very high.
 - (d2) An out-of-tree MySQL port by a contributor, allowed by Apache-2.0 and not supported by the maintainers. It
   carries (b) without making it a maintainer cost.
 
-## Decision (proposed)
+## Decision
 
 Choose (a) with (d1): Torch stays Postgres-only, and the deploy documentation says so, says why, and shows how a
-MySQL-only host gets Postgres (same Compose file, or a managed provider). (d2) is neither encouraged nor blocked.
+MySQL-only host gets Postgres (same Compose file, or a managed provider). (d2) is welcome as an out-of-tree project,
+with no support from the maintainers.
 
 Why: the obstacle is the sync source, not the ORM, and every route around it adds a second database, a Beta or Alpha
 dependency, or a second product mode. Dual dialect would double the test surface of a schema whose isolation depends
@@ -103,16 +104,14 @@ can run Postgres.
    MongoDB or Postgres, and a spike on the six ADR 0001 measurements passes.
 3. A group of independent deployers (suggested: at least five) confirms that a MySQL database is all they have **and**
    that they can run containers, and a contributor commits to maintaining a MySQL dialect with its own CI job.
-4. The product accepts a documented "no live sync" mode. Then (b)(i) becomes a smaller, separate decision.
-5. The change of ownership Electric announced on 2026-08-11 (it is joining Neon at Databricks) alters its licence
+4. The change of ownership Electric announced on 2026-08-11 (it is joining Neon at Databricks) alters its licence
    or its Postgres focus. That reopens ADR 0001 first, and this record with it.
 
-## Open questions for the maintainers
+## Answers recorded with the decision
 
-1. Are the blocked deployers limited to a MySQL database with no container host, or can they run containers? Only the
-   second group is served by (d1).
-2. Is a "no live sync" mode acceptable as a product (condition 4)?
-3. Is an unsupported out-of-tree MySQL port welcome (d2)?
+1. The deployers asking for MySQL can run containers, so (d1) with Postgres in the same Compose file serves them.
+2. A "no live sync" mode is not acceptable: live sync is a core property of Torch, so (b)(i) is out of scope.
+3. An out-of-tree MySQL port (d2) is welcome and unsupported: it lives outside this repository and its issue tracker.
 
 ## Sources (read 2026-11-15)
 
