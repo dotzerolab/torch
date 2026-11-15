@@ -46,16 +46,30 @@ describe('issueUpdateInput', () => {
   });
 
   it('is strict: unknown fields, among them description and protected columns, are rejected', () => {
-    for (const field of [
-      'description',
-      'workspaceId',
-      'teamId',
-      'number',
-      'creatorId',
-      'archivedAt',
-    ]) {
+    for (const field of ['workspaceId', 'teamId', 'number', 'creatorId', 'archivedAt']) {
       const result = issueUpdateInput.safeParse({ title: 'ok', [field]: 'x' });
       expect(result.success, field).toBe(false);
+    }
+  });
+
+  it('takes every field an issue can change, labels as add and remove lists', () => {
+    const parsed = issueUpdateInput.parse({
+      description: 'Body',
+      estimate: null,
+      dueDate: '2026-12-31',
+      parentId: ID.toUpperCase(),
+      sortOrder: -2.5,
+      addLabelIds: [ID],
+      removeLabelIds: [ID],
+    });
+    expect(parsed.parentId).toBe(ID);
+    expect(issueUpdateInput.safeParse({ dueDate: '2026-02-30' }).success).toBe(false);
+    expect(issueUpdateInput.safeParse({ estimate: 65 }).success).toBe(false);
+    expect(issueUpdateInput.safeParse({ addLabelIds: ['x'] }).success).toBe(false);
+    expect(issueUpdateInput.safeParse({ description: 'x'.repeat(100_001) }).success).toBe(false);
+    expect(issueUpdateInput.safeParse({ sortOrder: Number.POSITIVE_INFINITY }).success).toBe(false);
+    for (const field of ['teamId', 'externalRef', 'subscriberIds', 'links', 'labelIds']) {
+      expect(issueUpdateInput.safeParse({ title: 'ok', [field]: ID }).success, field).toBe(false);
     }
   });
 

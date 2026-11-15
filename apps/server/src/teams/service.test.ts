@@ -2,7 +2,7 @@ import { member, team, teamMember, workflowState } from '@torch/shared/db/schema
 import { and, asc, eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../db.ts';
-import { updateIssue } from '../mutations/update-issue.ts';
+import { updateIssue } from '../issues/update-issue.ts';
 import { loadActor } from '../permissions/load-actor.ts';
 import { actorOf, auditRows, refusal, successOf, txidOf } from '../test/admin-helpers.ts';
 import {
@@ -499,7 +499,9 @@ describe.skipIf(!databaseUrl)('addTeamMember', () => {
       const opsIssue = f.issues.ops[0];
       if (!opsIssue) throw new Error('fixture has no issue');
       // Before joining: the team and its issues do not exist for this admin.
-      expect(await updateIssue(db.orm, admin, opsIssue.id, { title: 'Peek' })).toMatchObject({
+      expect(
+        await updateIssue(db.orm, { ...admin, client: 'web' }, opsIssue.id, { title: 'Peek' }),
+      ).toMatchObject({
         ok: false,
         status: 404,
       });
@@ -518,7 +520,9 @@ describe.skipIf(!databaseUrl)('addTeamMember', () => {
       const joined = await actorOf(db, f.workspaceId, f.members.admin.id);
       expect(joined.teamIds.has(f.teams.ops.id)).toBe(true);
       expect(
-        await updateIssue(db.orm, joined, opsIssue.id, { title: 'Now visible' }),
+        await updateIssue(db.orm, { ...joined, client: 'web' }, opsIssue.id, {
+          title: 'Now visible',
+        }),
       ).toMatchObject({
         ok: true,
       });

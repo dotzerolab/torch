@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { createApp } from '../app.ts';
 import type { Db } from '../db.ts';
-import { loadActor } from '../permissions/load-actor.ts';
+import { loadClientActor } from '../permissions/load-actor.ts';
 import {
   createWorkspaceFixture,
   type WorkspaceFixture,
@@ -71,7 +71,7 @@ async function row(db: Db, issueId: string) {
 }
 
 const actorOf = (db: Db, f: WorkspaceFixture, who: keyof WorkspaceFixture['members']) =>
-  loadActor(db.orm, f.workspaceId, f.members[who].id).then((actor) => {
+  loadClientActor(db.orm, f.workspaceId, f.members[who].id, 'web').then((actor) => {
     if (!actor) throw new Error(`no actor for ${who}`);
     return actor;
   });
@@ -259,7 +259,7 @@ describe.skipIf(!databaseUrl)('PATCH /api/w/:workspaceId/issues/:issueId', () =>
     });
   });
 
-  it('unknown field (description) or empty body -> 400 invalid_input', async () => {
+  it('unknown field or empty body -> 400 invalid_input', async () => {
     await withTempDatabase(async (db) => {
       const f = await createWorkspaceFixture(db.orm);
       const target = f.issues.eng[0];
@@ -268,8 +268,8 @@ describe.skipIf(!databaseUrl)('PATCH /api/w/:workspaceId/issues/:issueId', () =>
       const before = await row(db, target.id);
 
       const bodies: Body[] = [
-        { description: 'secret plan' },
-        { title: 'ok', description: 'x' },
+        { number: 99 },
+        { title: 'ok', creatorId: f.members.owner.id },
         { workspaceId: f.workspaceId },
         { teamId: f.teams.ops.id },
         {},
@@ -290,7 +290,7 @@ describe.skipIf(!databaseUrl)('PATCH /api/w/:workspaceId/issues/:issueId', () =>
     });
   });
 
-  it('a body over 16 KB is refused with 413 before anything is read', async () => {
+  it('a body over 512 KB is refused with 413 before anything is read', async () => {
     await withTempDatabase(async (db) => {
       const f = await createWorkspaceFixture(db.orm);
       const target = f.issues.eng[0];
@@ -301,7 +301,7 @@ describe.skipIf(!databaseUrl)('PATCH /api/w/:workspaceId/issues/:issueId', () =>
         buildApp(db),
         f.workspaceId,
         target.id,
-        { title: 'x'.repeat(20_000) },
+        { title: 'x'.repeat(600_000) },
         f.members.member.id,
       );
 
@@ -483,7 +483,7 @@ describe.skipIf(!databaseUrl)('updateIssue (the function REST and MCP reuse)', (
       // Another caller (REST, MCP) may skip the schema: the function still refuses protected columns.
       const smuggled = await updateIssue(db.orm, await actorOf(db, a, 'member'), target.id, {
         title: 'ok',
-        description: 'x',
+        number: 99,
       } as never);
       const emptied = await updateIssue(db.orm, await actorOf(db, a, 'member'), target.id, {});
 

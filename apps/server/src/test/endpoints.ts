@@ -364,6 +364,15 @@ export const ENDPOINTS: EndpointCase[] = [
     }),
   ),
 
+  ...TEAMS.flatMap(({ issue: key, label, see }): EndpointCase[] =>
+    (['archive', 'unarchive'] as const).map((action) => ({
+      name: `issues: ${action} (${label})`,
+      method: 'POST',
+      path: (ids) => `${api(ids)}/issues/${ids[key]}/${action}`,
+      ...see,
+    })),
+  ),
+
   ...TEAMS.map(
     ({ team: key, label, see }): EndpointCase => ({
       name: `issues: create (${label})`,

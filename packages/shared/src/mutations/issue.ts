@@ -3,24 +3,6 @@
 // No Node imports: this file reaches the browser bundle.
 import { z } from 'zod';
 
-/**
- * Per-field update of one issue. Strict on purpose: `description`, `teamId`, `workspaceId`, `number`, `creatorId`
- * and every other column are not updatable here, and an unknown key is an error, not silently ignored. A field
- * that is absent stays as it is (per-field last-writer-wins, spec §14); `assigneeId: null` un-assigns.
- */
-export const issueUpdateInput = z
-  .strictObject({
-    title: z.string().trim().min(1).max(255).optional(),
-    priority: z.number().int().min(0).max(4).optional(),
-    stateId: z.guid().optional(),
-    assigneeId: z.guid().nullable().optional(),
-  })
-  .refine((input) => Object.values(input).some((value) => value !== undefined), {
-    message: 'at least one field is required',
-  });
-
-export type IssueUpdateInput = z.infer<typeof issueUpdateInput>;
-
 /** An id from a request: any case is accepted, the stored lower-case form is what the code compares. */
 const id = z.guid().toLowerCase();
 
@@ -58,6 +40,33 @@ export type ExternalRefInput = z.infer<typeof externalRefInput>;
 
 /** The longest description a client may send, in characters. */
 export const MAX_DESCRIPTION_LENGTH = 100_000;
+
+/**
+ * Per-field update of one issue. Strict on purpose: `teamId`, `workspaceId`, `number`, `creatorId`, the timestamps and
+ * every other column are not updatable here, and an unknown key is an error, not silently ignored. A field that is
+ * absent stays as it is (per-field last-writer-wins, spec section 14); `null` clears `assigneeId`, `estimate`,
+ * `dueDate` and `parentId`. Labels change with `addLabelIds` and `removeLabelIds`: adding a label of a group takes any
+ * other label of that group off the issue.
+ */
+export const issueUpdateInput = z
+  .strictObject({
+    title: z.string().trim().min(1).max(255).optional(),
+    description: z.string().max(MAX_DESCRIPTION_LENGTH).optional(),
+    priority: z.number().int().min(0).max(4).optional(),
+    stateId: id.optional(),
+    assigneeId: id.nullable().optional(),
+    estimate: z.number().int().min(0).max(64).nullable().optional(),
+    dueDate: calendarDay.nullable().optional(),
+    parentId: id.nullable().optional(),
+    sortOrder: z.number().finite().optional(),
+    addLabelIds: z.array(id).max(50).optional(),
+    removeLabelIds: z.array(id).max(50).optional(),
+  })
+  .refine((input) => Object.values(input).some((value) => value !== undefined), {
+    message: 'at least one field is required',
+  });
+
+export type IssueUpdateInput = z.infer<typeof issueUpdateInput>;
 
 /**
  * Every field an issue can start with, in one call. Strict: `number`, `creatorId` and the timestamps are the server's,

@@ -7,6 +7,11 @@ export const ISSUE_ERROR_CODES = [
   'not_found',
   'invalid_input',
   'invalid_reference',
+  // Kept from the first issue mutation: the web already shows a text for each.
+  'invalid_state',
+  'invalid_assignee',
+  'parent_cycle',
+  'issue_archived',
   'external_ref_exists',
   'idempotency_key_reused',
 ] as const;
@@ -25,6 +30,10 @@ const MESSAGES: Record<IssueErrorCode, string> = {
   not_found: 'Not found.',
   invalid_input: 'The request is not valid.',
   invalid_reference: 'A referenced id does not exist or cannot be used here.',
+  invalid_state: "The state does not belong to the issue's team.",
+  invalid_assignee: 'The assignee must be an active member who can see the issue.',
+  parent_cycle: 'An issue cannot be its own ancestor.',
+  issue_archived: 'An archived issue cannot be changed. Unarchive it first.',
   external_ref_exists: 'An issue with this external reference already exists.',
   idempotency_key_reused: 'This Idempotency-Key was already used with a different request.',
 };

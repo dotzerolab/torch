@@ -3,7 +3,7 @@
 import { issue } from '@torch/shared/db/schema';
 import { eq } from 'drizzle-orm';
 import { describe, expect, it, vi } from 'vitest';
-import { loadActor } from '../permissions/load-actor.ts';
+import { loadClientActor } from '../permissions/load-actor.ts';
 import { createWorkspaceFixture, withTempDatabase } from '../test/fixtures.ts';
 import { updateIssue } from './update-issue.ts';
 
@@ -20,7 +20,7 @@ describe.skipIf(!process.env.DATABASE_URL)(
         const f = await createWorkspaceFixture(db.orm);
         const target = f.issues.eng[0];
         if (!target) throw new Error('fixture has no issue');
-        const actor = await loadActor(db.orm, f.workspaceId, f.members.guest.id);
+        const actor = await loadClientActor(db.orm, f.workspaceId, f.members.guest.id, 'web');
         if (!actor) throw new Error('no actor');
 
         const result = await updateIssue(db.orm, actor, target.id, { title: 'nope' });
@@ -36,7 +36,7 @@ describe.skipIf(!process.env.DATABASE_URL)(
         const f = await createWorkspaceFixture(db.orm);
         const opsIssue = f.issues.ops[0];
         if (!opsIssue) throw new Error('fixture has no issue');
-        const actor = await loadActor(db.orm, f.workspaceId, f.members.guest.id);
+        const actor = await loadClientActor(db.orm, f.workspaceId, f.members.guest.id, 'web');
         if (!actor) throw new Error('no actor');
 
         const result = await updateIssue(db.orm, actor, opsIssue.id, { title: 'nope' });
