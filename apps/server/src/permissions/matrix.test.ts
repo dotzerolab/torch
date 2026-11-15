@@ -5,6 +5,10 @@
 //
 // Adding an object type (OBJECT_TYPES) fails `typecheck` until `MATRIX` and `EVALUATORS` have an entry for
 // it, and fails the completeness tests below until it has rows. Later sub-phases append their objects here.
+//
+// The last section asks the same questions of the running app: one row per endpoint case (test/endpoints.ts) with
+// the status every role must get, and a completeness test that every case has a row and every row a case. A new
+// object type needs rows in both places.
 import {
   type Actor,
   canAddSelfToTeam,
@@ -26,7 +30,9 @@ import {
   type Role,
   type TeamAccess,
 } from '@torch/shared/permissions';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { createWorld, ENDPOINTS, type World } from '../test/endpoints.ts';
+import { useSharedDatabase } from '../test/shared-database.ts';
 
 const ROLES: readonly Role[] = ['owner', 'admin', 'member', 'guest'];
 
@@ -389,3 +395,148 @@ describe('permission matrix: another workspace is closed to everybody', () => {
     expect(evaluate(scenario(role, 'other workspace'), 'other workspace')).toBe(false);
   });
 });
+
+// ---- the same rules over HTTP ----
+// One row per endpoint case (test/endpoints.ts): the status each role gets from the running app, written out by hand
+// from the spec. Never read from `minRole`, from the permission module or from what the server answers.
+// 200 is a success, 201 a created team or invite, 202 a resent invite. A refusal is 403 `forbidden` where the actor
+// sees the object but may not do this, and 404 `not_found` where the object is invisible to the actor: a private
+// team they are not in, any team a guest is not in. A session of another workspace is 401 and an id of another
+// workspace is 404 for every role: see test/cross-workspace.test.ts.
+//
+// The fixture's private team (OPS) has the owner and the member in it, not the admin and not the guest. The public
+// team "with the owner only" has the owner in it: the admin and the member see it, the guest does not.
+
+type HttpRow = { endpoint: string; status: Record<Role, number> };
+
+const http = (
+  endpoint: string,
+  owner: number,
+  admin: number,
+  member: number,
+  guest: number,
+): HttpRow => ({ endpoint, status: { owner, admin, member, guest } });
+
+const HTTP_ROWS: HttpRow[] = [
+  // Members: owners and admins list and administer people; an admin moves people between member and guest and
+  // deactivates or reactivates members and guests only; only an owner touches admins and owners; nobody changes
+  // their own role or deactivates themselves; everybody edits their own profile.
+  http('members: list', 200, 200, 403, 403),
+  http('members: change role, member to guest', 200, 200, 403, 403),
+  http('members: change role, member to admin', 200, 403, 403, 403),
+  http('members: change role, admin to member', 200, 403, 403, 403),
+  http('members: change own role', 403, 403, 403, 403),
+  http('members: deactivate a member', 200, 200, 403, 403),
+  http('members: deactivate an admin', 200, 403, 403, 403),
+  http('members: deactivate oneself', 403, 403, 403, 403),
+  http('members: reactivate a member', 200, 200, 403, 403),
+  http('members: reactivate an admin', 200, 403, 403, 403),
+  http('profile: edit own profile', 200, 200, 200, 200),
+
+  // Teams: owners and admins create teams and edit the teams they can see; a member sees a team they are in or a
+  // public one but may not manage it; a guest sees only the teams they are in. An owner or admin may add
+  // themselves to a private team they cannot see (and nobody else may be added to it by them).
+  http('teams: create', 201, 201, 403, 403),
+  http('teams: rename (public team)', 200, 200, 403, 403),
+  http('teams: add a member (public team)', 200, 200, 403, 403),
+  http('teams: remove a member (public team)', 200, 200, 403, 403),
+  http('teams: rename (private team)', 200, 404, 403, 404),
+  http('teams: add a member (private team)', 200, 404, 403, 404),
+  http('teams: remove a member (private team)', 200, 404, 403, 404),
+  http('teams: rename (public team with the owner only)', 200, 200, 403, 404),
+  http('teams: add a member (public team with the owner only)', 200, 200, 403, 404),
+  http('teams: remove a member (public team with the owner only)', 200, 200, 403, 404),
+  http('teams: add oneself (private team)', 200, 200, 403, 404),
+  http('teams: private team directory', 200, 200, 403, 403),
+
+  // Invites: owners and admins; an admin hands out the roles member and guest only, and may not invite into a
+  // private team they cannot see (404: the team does not exist for them).
+  http('invites: list', 200, 200, 403, 403),
+  http('invites: create (member role)', 201, 201, 403, 403),
+  http('invites: create (guest role, into a public team)', 201, 201, 403, 403),
+  http('invites: create (admin role)', 201, 403, 403, 403),
+  http('invites: create (member role, into a private team)', 201, 404, 403, 403),
+  http('invites: resend (member role)', 202, 202, 403, 403),
+  http('invites: resend (admin role)', 202, 403, 403, 403),
+  http('invites: revoke (member role)', 200, 200, 403, 403),
+  http('invites: revoke (admin role)', 200, 403, 403, 403),
+
+  // Issues follow their team, for every role.
+  http('issues: update (public team)', 200, 200, 200, 200),
+  http('issues: update (private team)', 200, 404, 200, 404),
+  http('issues: update (public team with the owner only)', 200, 200, 200, 404),
+
+  // Sync shapes: every role reads the team list and the member list (filtered by the server); a team's own shapes
+  // follow the visibility of the team.
+  http('sync: teams', 200, 200, 200, 200),
+  http('sync: members', 200, 200, 200, 200),
+  http('sync: issues (public team)', 200, 200, 200, 200),
+  http('sync: workflow states (public team)', 200, 200, 200, 200),
+  http('sync: team members (public team)', 200, 200, 200, 200),
+  http('sync: issues (private team)', 200, 404, 200, 404),
+  http('sync: workflow states (private team)', 200, 404, 200, 404),
+  http('sync: team members (private team)', 200, 404, 200, 404),
+  http('sync: issues (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: workflow states (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: team members (public team with the owner only)', 200, 200, 200, 404),
+];
+
+describe('permission matrix over HTTP: completeness', () => {
+  it('every endpoint case has a row', () => {
+    const rows = new Set(HTTP_ROWS.map((r) => r.endpoint));
+    const missing = ENDPOINTS.map((c) => c.name).filter((name) => !rows.has(name));
+    expect(missing, 'endpoint cases without a row').toEqual([]);
+  });
+
+  it('every row belongs to an endpoint case', () => {
+    const cases = new Set(ENDPOINTS.map((c) => c.name));
+    const stale = HTTP_ROWS.map((r) => r.endpoint).filter((name) => !cases.has(name));
+    expect(stale, 'rows without an endpoint case').toEqual([]);
+  });
+
+  it('there is one row per case and every row names all four roles with a status', () => {
+    const names = HTTP_ROWS.map((r) => r.endpoint);
+    expect(new Set(names).size).toBe(names.length);
+    for (const r of HTTP_ROWS) {
+      expect(Object.keys(r.status).sort(), r.endpoint).toEqual([...ROLES].sort());
+      for (const role of ROLES) {
+        expect([200, 201, 202, 403, 404], `${r.endpoint} as ${role}`).toContain(r.status[role]);
+      }
+    }
+  });
+});
+
+const databaseUrl = process.env.DATABASE_URL;
+
+// Integration: needs the dev compose Postgres (see db.test.ts). Skipped, loudly, when DATABASE_URL is not set.
+if (!databaseUrl) {
+  console.warn(
+    '[matrix.test] SKIPPED the HTTP rows of the permission matrix: DATABASE_URL is not set. ' +
+      'Start `docker compose -f docker-compose.dev.yml up -d --wait postgres` and set DATABASE_URL (see .env.example).',
+  );
+}
+
+describe.skipIf(!databaseUrl)(
+  'permission matrix over HTTP: the running app answers what the rows say',
+  () => {
+    const getDb = useSharedDatabase();
+    let world: World;
+    beforeAll(async () => {
+      world = await createWorld(getDb());
+    });
+
+    for (const row of HTTP_ROWS) {
+      for (const role of ROLES) {
+        it(`${row.endpoint} as ${role}: ${row.status[role]}`, async () => {
+          const endpoint = ENDPOINTS.find((c) => c.name === row.endpoint);
+          if (!endpoint) throw new Error(`no endpoint case named "${row.endpoint}"`);
+
+          const attempt = await world.attempt(world.a, role, endpoint);
+          const res = await world.send(endpoint, attempt.ids, attempt.cookie);
+
+          expect(res.status, `${res.status} ${res.error ?? ''}`).toBe(row.status[role]);
+        });
+      }
+    }
+  },
+);

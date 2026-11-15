@@ -122,7 +122,8 @@ flowchart LR
 - **Web:** React and Vite single-page app; reads come from the local store, writes are optimistic and rolled back if
   the server rejects them.
 - **Server:** Node and Hono. One endpoint per mutation, shared by the web app, the REST API, the MCP server and the
-  assistant, with permission checks in one shared module.
+  assistant, with permission checks in one shared module. Who may do what, and how the server answers a refusal:
+  [docs/permissions.md](docs/permissions.md).
 - **Sync:** ElectricSQL streams data from Postgres, and TanStack DB keeps it in the browser. The browser only talks to
   Torch's own server, which adds the permission filter. Why this pair and not Zero:
   [ADR 0001](docs/adr/0001-sync-engine.md).
@@ -131,7 +132,7 @@ flowchart LR
 
 Layout: `apps/web` (React + Vite), `apps/server` (Node + Hono), `packages/shared` (brand, i18n, db schema, permissions;
 the web app imports the subpaths `@torch/shared/brand` and `@torch/shared/i18n`), `config/` (default brand, licence
-exceptions), `scripts/` (CI gates), `docs/` (design, decision records).
+exceptions), `scripts/` (CI gates), `docs/` (design, permissions, decision records).
 
 ## Development
 

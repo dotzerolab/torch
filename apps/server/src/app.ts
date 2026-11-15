@@ -39,6 +39,32 @@ export type AppDeps = {
 // `env` is what the Node adapter passes (socket address); tests may omit it.
 export type App = { fetch(req: Request, env?: unknown): Promise<Response> };
 
+// The framework instance behind each App, so `listRoutes` can read its routes while the App type stays `{ fetch }`.
+const instances = new WeakMap<App, Hono>();
+
+/** One route of an app: the HTTP method and the path pattern as registered (`/api/w/:workspaceId/members`). */
+export type RouteInfo = { method: string; path: string };
+
+/**
+ * The routes `createApp` registered, one entry per method and path, for a test that every authenticated route has a
+ * permission case. Middleware (`use`, registered for every method) is left out; a route that carries its own
+ * middleware (the body limit of the issue mutation) is listed once, not once per handler.
+ */
+export function listRoutes(app: App): RouteInfo[] {
+  const instance = instances.get(app);
+  if (!instance) throw new Error('listRoutes: this is not an app made by createApp');
+
+  const seen = new Set<string>();
+  const routes: RouteInfo[] = [];
+  for (const { method, path } of instance.routes) {
+    const key = `${method} ${path}`;
+    if (method === 'ALL' || seen.has(key)) continue;
+    seen.add(key);
+    routes.push({ method, path });
+  }
+  return routes;
+}
+
 // Every body this API takes (a sign-in email or token, one issue update) is a few short fields. The limit sits
 // in front of every route, so an unauthenticated caller cannot make the process buffer a large body.
 const MAX_BODY_BYTES = 16 * 1024;
@@ -148,5 +174,7 @@ export function createApp(deps: AppDeps): App {
     );
   }
 
-  return { fetch: async (req, env) => app.fetch(req, env) };
+  const created: App = { fetch: async (req, env) => app.fetch(req, env) };
+  instances.set(created, app);
+  return created;
 }
