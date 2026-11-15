@@ -40,6 +40,7 @@ function ShellFrame({
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
+  const onSettings = pathname === '/settings' || pathname.startsWith('/settings/');
   const requestedKey = teamKeyFromPath(pathname);
   // An address that names no visible team (a private team of someone else, a typo) shows the first team instead.
   const team = teams.find((candidate) => candidate.key === requestedKey) ?? teams[0] ?? null;
@@ -59,7 +60,7 @@ function ShellFrame({
       workspace={workspace}
       onSelectWorkspace={onSelectWorkspace}
       teams={teams}
-      activeTeamKey={team?.key ?? null}
+      activeTeamKey={onSettings ? null : (team?.key ?? null)}
       onNavigate={onNavigate}
     />
   );
@@ -75,6 +76,7 @@ function ShellFrame({
           <Header
             workspace={workspace}
             team={team}
+            section={onSettings ? t('shell.settings') : undefined}
             showSidebarButton={phone || collapsed}
             onOpenSidebar={toggleSidebar}
           />

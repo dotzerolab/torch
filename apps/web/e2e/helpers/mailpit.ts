@@ -47,3 +47,11 @@ export async function latestSignInLink(email: string): Promise<string> {
   if (!link) throw new Error(`no sign-in link in the email to ${email}`);
   return link;
 }
+
+/** The invitation link of the newest message to `email` (the first `/invite#token=` URL in its text part). */
+export async function latestInviteLink(email: string): Promise<string> {
+  const { text } = await waitForMessage(email);
+  const link = text.match(/https?:\/\/[^\s<>"]+\/invite#token=[\w-]+/)?.[0];
+  if (!link) throw new Error(`no invitation link in the email to ${email}`);
+  return link;
+}

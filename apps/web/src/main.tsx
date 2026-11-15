@@ -5,6 +5,7 @@ import './design/tokens.css';
 import './design/base.css';
 import './design/components/components.css';
 import './screens/workspace.css';
+import './settings/settings.css';
 import './shell/shell.css';
 import { applyTheme } from './design/theme.ts';
 

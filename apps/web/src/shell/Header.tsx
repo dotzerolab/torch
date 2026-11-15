@@ -9,11 +9,14 @@ import { ThemeMenu } from './ThemeMenu.tsx';
 export function Header({
   workspace,
   team,
+  section,
   showSidebarButton,
   onOpenSidebar,
 }: {
   workspace: SessionWorkspace;
   team: SyncedTeam | null;
+  /** The name of a page that is not about a team (Settings): shown in place of the team. */
+  section?: string;
   showSidebarButton: boolean;
   onOpenSidebar: () => void;
 }) {
@@ -28,7 +31,7 @@ export function Header({
         />
       ) : null}
       <div className="crumb">
-        {team ? (
+        {section || team ? (
           <>
             <span className="crumb__workspace" data-testid="workspace-name">
               {workspace.name}
@@ -36,7 +39,7 @@ export function Header({
             <span className="crumb__separator" aria-hidden="true">
               /
             </span>
-            <h1 className="crumb__title">{team.name}</h1>
+            <h1 className="crumb__title">{section ?? team?.name}</h1>
           </>
         ) : (
           <h1 className="crumb__title" data-testid="workspace-name">
