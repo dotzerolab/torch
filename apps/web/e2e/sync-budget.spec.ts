@@ -46,7 +46,7 @@ test('write not starved: at most four shapes stay in flight, also after the team
   expect(peak).toBeLessThanOrEqual(MAX_IN_FLIGHT_WHILE_SWITCHING);
 
   const title = `Budget ${crypto.randomUUID().slice(0, 8)}`;
-  const field = page.getByTestId('issue-title-4');
+  const field = page.getByTestId('issue-title-5');
   await field.fill(title);
   const write = page.waitForResponse(
     (response) => response.request().method() === 'PATCH' && response.url().includes('/issues/'),
