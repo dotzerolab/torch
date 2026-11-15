@@ -6,7 +6,8 @@ import { useState } from 'react';
 import { ApiError } from '../api.ts';
 import { mutationErrorMessage } from '../errors.ts';
 import { useShell } from '../shell/ShellContext.ts';
-import { issuesCollection, type SyncedIssue, type SyncedTeam } from '../sync/collections.ts';
+import type { SyncedIssue, SyncedTeam } from '../sync/collections.ts';
+import { useShape } from '../sync/shapes.ts';
 
 const MAX_PRIORITY = 4;
 
@@ -54,7 +55,7 @@ function IssueList({
   team: SyncedTeam;
   locale: Locale;
 }) {
-  const issues = issuesCollection(workspaceId, team.id);
+  const issues = useShape({ kind: 'issues', workspaceId, teamId: team.id });
   const { data, isReady } = useLiveQuery({
     query: (q) => q.from({ issue: issues }).orderBy(({ issue }) => issue.number),
   });

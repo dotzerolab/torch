@@ -6,6 +6,7 @@ import { electricCollectionOptions } from '@tanstack/electric-db-collection';
 import { createCollection } from '@tanstack/react-db';
 import { apiFetch } from '../api.ts';
 import { toIssueUpdate } from './issue-update.ts';
+import type { Factories, ShapeContext } from './registry.ts';
 
 /** A `team` row as the shape delivers it (column names as in the database). */
 export type SyncedTeam = {
@@ -29,6 +30,17 @@ export type SyncedMember = {
   locale: 'en' | 'it';
   deactivated_at: string | null;
   created_at: string;
+};
+
+/** A `workflow_state` row of a team's shape. */
+export type SyncedWorkflowState = {
+  id: string;
+  workspace_id: string;
+  team_id: string;
+  name: string;
+  type: string;
+  position: number;
+  color: string;
 };
 
 /** A `team_member` row of one team's shape. */
@@ -58,111 +70,198 @@ export type SyncedIssue = {
 // How long a write waits for its txid to come back through Electric before the optimistic state is dropped.
 const TXID_TIMEOUT_MS = 10_000;
 
-function shapeOptions(path: string) {
+/**
+ * 429 and 5xx never reach `onError`: the pinned client's fetch layer retries them itself (1 s doubling to 30 s, full
+ * jitter, a `Retry-After` header as the floor, no retry limit). These are the timings it uses.
+ */
+export const BACKOFF_OPTIONS = { initialDelay: 1000, maxDelay: 30_000, multiplier: 2 } as const;
+
+/** What the error policy may do besides stopping the stream. */
+export type ShapeErrorActions = {
+  signIn: () => void;
+  dropTeam: (workspaceId: string, teamId: string) => void;
+};
+
+/**
+ * The one policy for a shape that failed beyond the client's own retries: the session ended (401) -> sign in; a
+ * team-scoped shape answers 404 -> the team is gone for this person, drop it; anything else stops the stream (an
+ * empty return; `{}` would make the client retry).
+ */
+export function handleShapeError(
+  error: Error,
+  scope: { workspaceId: string; teamId?: string },
+  actions: ShapeErrorActions,
+): void {
+  if (!(error instanceof FetchError)) return;
+  if (error.status === 401) actions.signIn();
+  else if (error.status === 404 && scope.teamId !== undefined) {
+    actions.dropTeam(scope.workspaceId, scope.teamId);
+  }
+}
+
+const signIn = () => window.location.assign('/login');
+
+function shapeOptions(
+  path: string,
+  scope: { workspaceId: string; teamId?: string },
+  context: ShapeContext,
+) {
   return {
     url: new URL(path, window.location.origin).href,
-    // The session ended while a shape was open: the proxy answers 401, so go back to sign-in.
+    backoffOptions: { ...BACKOFF_OPTIONS },
     onError: (error: Error) => {
-      if (error instanceof FetchError && error.status === 401) window.location.assign('/login');
+      handleShapeError(error, scope, { signIn, dropTeam: context.dropTeam });
     },
   };
 }
 
-export function createTeamsCollection(workspaceId: string) {
+/** A team the server no longer shows: an empty collection that never syncs, so nothing asks for it again. */
+const inertSync = { sync: ({ markReady }: { markReady: () => void }) => markReady() };
+
+const NO_CONTEXT: ShapeContext = { dropTeam: () => {}, inert: false };
+
+export function createTeamsCollection(
+  workspaceId: string,
+  id = `teams-${workspaceId}`,
+  context = NO_CONTEXT,
+) {
   return createCollection(
     electricCollectionOptions<SyncedTeam>({
-      id: `teams-${workspaceId}`,
+      id,
       getKey: (team) => team.id,
-      shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/teams`),
+      shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/teams`, { workspaceId }, context),
     }),
   );
 }
 
-export function createMembersCollection(workspaceId: string) {
+export function createMembersCollection(
+  workspaceId: string,
+  id = `members-${workspaceId}`,
+  context = NO_CONTEXT,
+) {
   return createCollection(
     electricCollectionOptions<SyncedMember>({
-      id: `members-${workspaceId}`,
+      id,
       getKey: (member) => member.id,
-      shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/members`),
+      shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/members`, { workspaceId }, context),
     }),
   );
 }
 
-export function createTeamMembersCollection(workspaceId: string, teamId: string) {
+/** The person's own team memberships: the signal that their access to teams changed. Not shown anywhere. */
+export function createOwnMembershipsCollection(
+  workspaceId: string,
+  id = `own-memberships-${workspaceId}`,
+  context = NO_CONTEXT,
+) {
   return createCollection(
     electricCollectionOptions<SyncedTeamMember>({
-      id: `team-members-${workspaceId}-${teamId}`,
-      // A person is in a team once: the pair is the key.
+      id,
       getKey: (row) => `${row.team_id}:${row.member_id}`,
-      shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/teams/${teamId}/members`),
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/me/team-memberships`,
+        { workspaceId },
+        context,
+      ),
     }),
   );
 }
 
-export function createIssuesCollection(workspaceId: string, teamId: string) {
-  return createCollection(
-    electricCollectionOptions<SyncedIssue>({
-      id: `issues-${workspaceId}-${teamId}`,
-      getKey: (issue) => issue.id,
-      shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/teams/${teamId}/issues`),
-      onUpdate: async ({ transaction, collection }) => {
-        const mutation = transaction.mutations[0];
-        if (!mutation) return;
-        const { txid } = await apiFetch<{ txid: number }>(
-          `/api/w/${workspaceId}/issues/${mutation.key}`,
-          { method: 'PATCH', body: JSON.stringify(toIssueUpdate(mutation.changes)) },
-        );
-        // Resolving before the write comes back through Electric would drop the optimistic state too early.
-        await collection.utils.awaitTxId(txid, TXID_TIMEOUT_MS);
-      },
-    }),
-  );
+export function createTeamMembersCollection(
+  workspaceId: string,
+  teamId: string,
+  id = `team-members-${workspaceId}-${teamId}`,
+  context = NO_CONTEXT,
+) {
+  const options = electricCollectionOptions<SyncedTeamMember>({
+    id,
+    // A person is in a team once: the pair is the key.
+    getKey: (row) => `${row.team_id}:${row.member_id}`,
+    shapeOptions: shapeOptions(
+      `/api/sync/w/${workspaceId}/teams/${teamId}/members`,
+      { workspaceId, teamId },
+      context,
+    ),
+  });
+  return createCollection(context.inert ? { ...options, sync: inertSync } : options);
 }
 
-// One live collection per shape for the life of the page, so going back to a team does not restart its sync.
-// Sign-out reloads the page, which is what drops them.
-const teams = new Map<string, ReturnType<typeof createTeamsCollection>>();
-const issues = new Map<string, ReturnType<typeof createIssuesCollection>>();
-const members = new Map<string, ReturnType<typeof createMembersCollection>>();
-const teamMembers = new Map<string, ReturnType<typeof createTeamMembersCollection>>();
+export function createWorkflowStatesCollection(
+  workspaceId: string,
+  teamId: string,
+  id = `workflow-states-${workspaceId}-${teamId}`,
+  context = NO_CONTEXT,
+) {
+  const options = electricCollectionOptions<SyncedWorkflowState>({
+    id,
+    getKey: (state) => state.id,
+    shapeOptions: shapeOptions(
+      `/api/sync/w/${workspaceId}/teams/${teamId}/workflow-states`,
+      { workspaceId, teamId },
+      context,
+    ),
+  });
+  return createCollection(context.inert ? { ...options, sync: inertSync } : options);
+}
 
-export function teamsCollection(workspaceId: string) {
-  let collection = teams.get(workspaceId);
-  if (!collection) {
-    collection = createTeamsCollection(workspaceId);
-    teams.set(workspaceId, collection);
+/**
+ * M9: every mutation of a transaction is sent, one PATCH each in order, and every txid is awaited. Sending only the
+ * first would confirm the transaction while the others were never written. Resolving before the writes come back
+ * through Electric would drop the optimistic state too early.
+ */
+export async function sendIssueMutations(
+  workspaceId: string,
+  mutations: ReadonlyArray<{ key: string | number; changes: Record<string, unknown> }>,
+  awaitTxId: (txid: number) => Promise<unknown>,
+): Promise<void> {
+  const txids: number[] = [];
+  for (const mutation of mutations) {
+    const { txid } = await apiFetch<{ txid: number }>(
+      `/api/w/${workspaceId}/issues/${mutation.key}`,
+      { method: 'PATCH', body: JSON.stringify(toIssueUpdate(mutation.changes)) },
+    );
+    txids.push(txid);
   }
-  return collection;
+  for (const txid of txids) await awaitTxId(txid);
 }
 
-export function issuesCollection(workspaceId: string, teamId: string) {
-  const key = `${workspaceId}:${teamId}`;
-  let collection = issues.get(key);
-  if (!collection) {
-    collection = createIssuesCollection(workspaceId, teamId);
-    issues.set(key, collection);
-  }
-  return collection;
+export function createIssuesCollection(
+  workspaceId: string,
+  teamId: string,
+  id = `issues-${workspaceId}-${teamId}`,
+  context = NO_CONTEXT,
+) {
+  const options = electricCollectionOptions<SyncedIssue>({
+    id,
+    getKey: (issue) => issue.id,
+    shapeOptions: shapeOptions(
+      `/api/sync/w/${workspaceId}/teams/${teamId}/issues`,
+      { workspaceId, teamId },
+      context,
+    ),
+    // M9: every mutation of the transaction is sent, one PATCH each in order, and every txid is awaited. Sending
+    // only the first would confirm the transaction while the others were never written.
+    onUpdate: async ({ transaction, collection }) => {
+      await sendIssueMutations(workspaceId, transaction.mutations, (txid) =>
+        collection.utils.awaitTxId(txid, TXID_TIMEOUT_MS),
+      );
+    },
+  });
+  return createCollection(context.inert ? { ...options, sync: inertSync } : options);
 }
 
-export function membersCollection(workspaceId: string) {
-  let collection = members.get(workspaceId);
-  if (!collection) {
-    collection = createMembersCollection(workspaceId);
-    members.set(workspaceId, collection);
-  }
-  return collection;
-}
-
-export function teamMembersCollection(workspaceId: string, teamId: string) {
-  const key = `${workspaceId}:${teamId}`;
-  let collection = teamMembers.get(key);
-  if (!collection) {
-    collection = createTeamMembersCollection(workspaceId, teamId);
-    teamMembers.set(key, collection);
-  }
-  return collection;
-}
+/** How each shape kind is built. The registry owns the instances, the ids and the restarts. */
+export const collectionFactories = {
+  teams: (key, id, context) => createTeamsCollection(key.workspaceId, id, context),
+  members: (key, id, context) => createMembersCollection(key.workspaceId, id, context),
+  ownMemberships: (key, id, context) =>
+    createOwnMembershipsCollection(key.workspaceId, id, context),
+  issues: (key, id, context) => createIssuesCollection(key.workspaceId, key.teamId, id, context),
+  workflowStates: (key, id, context) =>
+    createWorkflowStatesCollection(key.workspaceId, key.teamId, id, context),
+  teamMembers: (key, id, context) =>
+    createTeamMembersCollection(key.workspaceId, key.teamId, id, context),
+} satisfies Factories;
 
 /**
  * Waits until the write with this `txid` came back through the shape of `collection`, so the list on screen already

@@ -14,6 +14,7 @@ import { Header } from './Header.tsx';
 import { ShellContext, type ShellState, teamKeyFromPath } from './ShellContext.ts';
 import { Sidebar } from './Sidebar.tsx';
 import { StatusBar } from './StatusBar.tsx';
+import { useMembershipWatcher } from './useMembershipWatcher.ts';
 import { useTeams } from './useTeams.ts';
 
 /** Below this width the sidebar is a drawer opened from the header. */
@@ -37,6 +38,7 @@ function ShellFrame({
   const phone = useMediaQuery(PHONE_QUERY);
   const pathname = usePathname();
   const { teams, ready } = useTeams(workspace.id);
+  useMembershipWatcher(workspace.id, workspace.memberId);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 

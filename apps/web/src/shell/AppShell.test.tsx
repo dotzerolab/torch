@@ -7,6 +7,7 @@ import type { SessionWorkspace } from '../auth/useSession.ts';
 import { THEME_STORAGE_KEY } from '../design/theme.ts';
 import { AppShell } from './AppShell.tsx';
 
+vi.mock('./useMembershipWatcher.ts', () => ({ useMembershipWatcher: () => {} }));
 vi.mock('./useTeams.ts', () => ({
   useTeams: () => ({
     ready: true,

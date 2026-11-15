@@ -10,7 +10,8 @@ import { useToast } from '../design/components/Toast.tsx';
 import { useLocale, useT } from '../design/locale.tsx';
 import { adminFailureMessage } from '../errors.ts';
 import { useTeams } from '../shell/useTeams.ts';
-import { awaitSynced, membersCollection } from '../sync/collections.ts';
+import { awaitSynced } from '../sync/collections.ts';
+import { useShape } from '../sync/shapes.ts';
 import { actorOf, assignableRoles } from './access.ts';
 import { type AdminInvite, adminApi } from './admin-api.ts';
 import { InvitePanel } from './InvitePanel.tsx';
@@ -33,7 +34,7 @@ function MembersAdmin({ workspace }: { workspace: SessionWorkspace }) {
   const toast = useToast();
   const actor = actorOf(workspace);
   const wsId = workspace.id;
-  const collection = membersCollection(wsId);
+  const collection = useShape({ kind: 'members', workspaceId: wsId });
   const { teams } = useTeams(wsId);
 
   // The rows come from the synced `member` shape (live: a deactivation by another admin shows up at once); the
