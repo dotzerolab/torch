@@ -482,6 +482,29 @@ const HTTP_ROWS: HttpRow[] = [
   http('issues: create (private team)', 201, 404, 201, 404),
   http('issues: create (public team with the owner only)', 201, 201, 201, 404),
 
+  // Relations, subscribers and links follow the issue's team: the same visibility, and a guest may also use them.
+  http('issues: list relations (public team)', 200, 200, 200, 200),
+  http('issues: add relation (public team)', 201, 201, 201, 201),
+  http('issues: remove relation (public team)', 200, 200, 200, 200),
+  http('issues: subscribe (public team)', 200, 200, 200, 200),
+  http('issues: unsubscribe (public team)', 200, 200, 200, 200),
+  http('issues: add link (public team)', 201, 201, 201, 201),
+  http('issues: remove link (public team)', 200, 200, 200, 200),
+  http('issues: list relations (private team)', 200, 404, 200, 404),
+  http('issues: add relation (private team)', 201, 404, 201, 404),
+  http('issues: remove relation (private team)', 200, 404, 200, 404),
+  http('issues: subscribe (private team)', 200, 404, 200, 404),
+  http('issues: unsubscribe (private team)', 200, 404, 200, 404),
+  http('issues: add link (private team)', 201, 404, 201, 404),
+  http('issues: remove link (private team)', 200, 404, 200, 404),
+  http('issues: list relations (public team with the owner only)', 200, 200, 200, 404),
+  http('issues: add relation (public team with the owner only)', 201, 201, 201, 404),
+  http('issues: remove relation (public team with the owner only)', 200, 200, 200, 404),
+  http('issues: subscribe (public team with the owner only)', 200, 200, 200, 404),
+  http('issues: unsubscribe (public team with the owner only)', 200, 200, 200, 404),
+  http('issues: add link (public team with the owner only)', 201, 201, 201, 404),
+  http('issues: remove link (public team with the owner only)', 200, 200, 200, 404),
+
   // Sync shapes: every role reads the team list and the member list (filtered by the server); a team's own shapes
   // follow the visibility of the team.
   http('sync: teams', 200, 200, 200, 200),

@@ -115,3 +115,23 @@ export async function usableParent(
   };
   return canSeeTeam(actor, access) ? { id: row.id, teamId: row.teamId } : null;
 }
+
+/** An issue the actor may see (any team they can see, archived or not), or null: a hidden issue and a missing one look alike. */
+export async function visibleIssue(
+  tx: Tx,
+  actor: Actor,
+  issueId: string,
+): Promise<Pick<IssueRow, 'id' | 'teamId'> | null> {
+  const [row] = await tx
+    .select({ id: issue.id, teamId: issue.teamId, teamPrivate: team.private })
+    .from(issue)
+    .innerJoin(team, and(eq(team.workspaceId, issue.workspaceId), eq(team.id, issue.teamId)))
+    .where(and(eq(issue.workspaceId, actor.workspaceId), eq(issue.id, issueId)));
+  if (!row) return null;
+  const access: TeamAccess = {
+    id: row.teamId,
+    workspaceId: actor.workspaceId,
+    private: row.teamPrivate,
+  };
+  return canSeeTeam(actor, access) ? { id: row.id, teamId: row.teamId } : null;
+}

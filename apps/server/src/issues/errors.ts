@@ -12,6 +12,7 @@ export const ISSUE_ERROR_CODES = [
   'invalid_assignee',
   'parent_cycle',
   'issue_archived',
+  'relation_exists',
   'external_ref_exists',
   'idempotency_key_reused',
 ] as const;
@@ -34,6 +35,7 @@ const MESSAGES: Record<IssueErrorCode, string> = {
   invalid_assignee: 'The assignee must be an active member who can see the issue.',
   parent_cycle: 'An issue cannot be its own ancestor.',
   issue_archived: 'An archived issue cannot be changed. Unarchive it first.',
+  relation_exists: 'These issues already have this relation.',
   external_ref_exists: 'An issue with this external reference already exists.',
   idempotency_key_reused: 'This Idempotency-Key was already used with a different request.',
 };

@@ -28,15 +28,16 @@ import {
 } from './references.ts';
 import { applyStateTimestamps } from './state-timestamps.ts';
 
-export type UpdateIssueResult = { ok: true; txid: number } | ({ ok: false } & IssueApiError);
+export type Failure = { ok: false } & IssueApiError;
+export type UpdateIssueResult = { ok: true; txid: number } | Failure;
 
 export const refuse = (
   code: IssueApiError['code'],
   status: IssueApiError['status'],
   extra: Pick<IssueApiError, 'message' | 'details'> = {},
-): UpdateIssueResult => ({ ok: false, code, status, ...extra });
+): Failure => ({ ok: false, code, status, ...extra });
 
-const invalidReference = (field: string): UpdateIssueResult =>
+export const invalidReferenceFailure = (field: string): Failure =>
   refuse('invalid_reference', 422, {
     message: `${field} refers to something that does not exist or cannot be used here.`,
     details: { field },
@@ -71,9 +72,10 @@ export async function lockEditableIssue(
   tx: Tx,
   requested: ClientActor,
   issueId: string,
+  need: 'edit' | 'see' = 'edit',
 ): Promise<
   | { ok: true; row: IssueRow; access: TeamAccess; actor: ClientActor }
-  | { ok: false; refusal: UpdateIssueResult }
+  | { ok: false; refusal: Failure }
 > {
   // Locks the row: concurrent writers of this issue queue here, so each field's last writer wins in order.
   const [row] = await tx
@@ -93,9 +95,18 @@ export async function lockEditableIssue(
     .where(and(eq(team.workspaceId, actor.workspaceId), eq(team.id, row.teamId)));
   if (!access || !canSeeTeam(actor, access))
     return { ok: false, refusal: refuse('not_found', 404) };
-  if (!canEditIssues(actor, access)) return { ok: false, refusal: refuse('forbidden', 403) };
+  if (need === 'edit' && !canEditIssues(actor, access)) {
+    return { ok: false, refusal: refuse('forbidden', 403) };
+  }
   return { ok: true, row, access, actor };
 }
+
+/** Moves the issue's `updated_at` forward: a change to its labels, relations, subscribers or links is a change to it. */
+export const touchIssue = (tx: Tx, workspaceId: string, issueId: string) =>
+  tx
+    .update(issue)
+    .set({ updatedAt: sql`clock_timestamp()` })
+    .where(and(eq(issue.id, issueId), eq(issue.workspaceId, workspaceId)));
 
 /**
  * Updates the given fields of one issue and returns the Postgres transaction id for the client's `awaitTxId`. An
@@ -134,7 +145,8 @@ export async function updateIssue(
     }
     if (changes.parentId) {
       if (changes.parentId === issueId) return refuse('parent_cycle', 422);
-      if (!(await usableParent(tx, actor, changes.parentId))) return invalidReference('parentId');
+      if (!(await usableParent(tx, actor, changes.parentId)))
+        return invalidReferenceFailure('parentId');
       if (await isDescendant(tx, actor.workspaceId, issueId, changes.parentId)) {
         return refuse('parent_cycle', 422);
       }
@@ -146,7 +158,7 @@ export async function updateIssue(
       before.teamId,
       changes.addLabelIds ?? [],
     );
-    if (!adding) return invalidReference('addLabelIds');
+    if (!adding) return invalidReferenceFailure('addLabelIds');
     const labelChange = await planLabels(tx, issueId, adding, changes.removeLabelIds ?? []);
 
     // Only the given fields, plus updated_at. clock_timestamp(), not now(): a writer that waited for the lock

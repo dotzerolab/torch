@@ -94,6 +94,21 @@ export const issueCreateInput = z.strictObject({
 });
 export type IssueCreateInput = z.infer<typeof issueCreateInput>;
 
+/** A relation as a client sends it: `blocked_by` is `blocks` read from the other end. */
+export const RELATION_INPUT_TYPES = ['blocks', 'blocked_by', 'related', 'duplicate'] as const;
+export const issueRelationInput = z.strictObject({
+  relatedIssueId: id,
+  type: z.enum(RELATION_INPUT_TYPES),
+});
+export type IssueRelationInput = z.infer<typeof issueRelationInput>;
+
+/** An external link on an issue: http or https only. */
+export const issueLinkInput = z.strictObject({
+  url: httpUrl,
+  title: z.string().trim().min(1).max(255).optional(),
+});
+export type IssueLinkInput = z.infer<typeof issueLinkInput>;
+
 /**
  * The refusals of a mutation. All are 4xx: the client rolls back the optimistic change and shows a message;
  * only network errors are retried.
