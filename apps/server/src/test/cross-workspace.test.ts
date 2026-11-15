@@ -125,6 +125,7 @@ const WITHOUT_OTHER_IDS = [
   'sync: teams',
   'sync: members',
   'sync: workspace labels',
+  'sync: own team memberships',
 ];
 
 describe.skipIf(!databaseUrl)('workspace isolation over HTTP', () => {
