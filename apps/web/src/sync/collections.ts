@@ -16,6 +16,29 @@ export type SyncedTeam = {
   private: boolean;
 };
 
+/**
+ * A `member` row as the shape delivers it: the profile without email and time zone (those never leave the server in a
+ * shape). `deactivated_at` is set for a member who can no longer sign in.
+ */
+export type SyncedMember = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  handle: string;
+  role: 'owner' | 'admin' | 'member' | 'guest';
+  locale: 'en' | 'it';
+  deactivated_at: string | null;
+  created_at: string;
+};
+
+/** A `team_member` row of one team's shape. */
+export type SyncedTeamMember = {
+  team_id: string;
+  member_id: string;
+  workspace_id: string;
+  created_at: string;
+};
+
 /** An `issue` row of a list shape: never the description (ADR 0001 section 4). Timestamps arrive as ISO text. */
 export type SyncedIssue = {
   id: string;
@@ -55,6 +78,27 @@ export function createTeamsCollection(workspaceId: string) {
   );
 }
 
+export function createMembersCollection(workspaceId: string) {
+  return createCollection(
+    electricCollectionOptions<SyncedMember>({
+      id: `members-${workspaceId}`,
+      getKey: (member) => member.id,
+      shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/members`),
+    }),
+  );
+}
+
+export function createTeamMembersCollection(workspaceId: string, teamId: string) {
+  return createCollection(
+    electricCollectionOptions<SyncedTeamMember>({
+      id: `team-members-${workspaceId}-${teamId}`,
+      // A person is in a team once: the pair is the key.
+      getKey: (row) => `${row.team_id}:${row.member_id}`,
+      shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/teams/${teamId}/members`),
+    }),
+  );
+}
+
 export function createIssuesCollection(workspaceId: string, teamId: string) {
   return createCollection(
     electricCollectionOptions<SyncedIssue>({
@@ -79,6 +123,8 @@ export function createIssuesCollection(workspaceId: string, teamId: string) {
 // Sign-out reloads the page, which is what drops them.
 const teams = new Map<string, ReturnType<typeof createTeamsCollection>>();
 const issues = new Map<string, ReturnType<typeof createIssuesCollection>>();
+const members = new Map<string, ReturnType<typeof createMembersCollection>>();
+const teamMembers = new Map<string, ReturnType<typeof createTeamMembersCollection>>();
 
 export function teamsCollection(workspaceId: string) {
   let collection = teams.get(workspaceId);
@@ -97,4 +143,38 @@ export function issuesCollection(workspaceId: string, teamId: string) {
     issues.set(key, collection);
   }
   return collection;
+}
+
+export function membersCollection(workspaceId: string) {
+  let collection = members.get(workspaceId);
+  if (!collection) {
+    collection = createMembersCollection(workspaceId);
+    members.set(workspaceId, collection);
+  }
+  return collection;
+}
+
+export function teamMembersCollection(workspaceId: string, teamId: string) {
+  const key = `${workspaceId}:${teamId}`;
+  let collection = teamMembers.get(key);
+  if (!collection) {
+    collection = createTeamMembersCollection(workspaceId, teamId);
+    teamMembers.set(key, collection);
+  }
+  return collection;
+}
+
+/**
+ * Waits until the write with this `txid` came back through the shape of `collection`, so the list on screen already
+ * shows it. A wait that runs out is not an error of the write: the server accepted it and the list catches up.
+ */
+export async function awaitSynced(
+  collection: { utils: { awaitTxId: (txid: number, timeoutMs?: number) => Promise<boolean> } },
+  txid: number,
+): Promise<void> {
+  try {
+    await collection.utils.awaitTxId(txid, TXID_TIMEOUT_MS);
+  } catch {
+    // The write is done; the shape was slow or is being refetched.
+  }
 }

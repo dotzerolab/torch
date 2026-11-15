@@ -63,6 +63,13 @@ tests cover: sign-in and sessions, OAuth and tokens, permissions and workspace i
 cross workspaces), secrets and encryption, webhook signing, file uploads, imports. A change to these areas gets a
 slower, closer review. Everything else: tests with the change, not after.
 
+A new kind of object (anything a person can see or change that has its own permission rules) needs rows in the
+permission matrix in the same pull request: add it to `OBJECT_TYPES` in `packages/shared/src/permissions.ts`, then give
+it rows in `apps/server/src/permissions/matrix.test.ts` for every role, written out by hand from the rules in
+[docs/permissions.md](docs/permissions.md) and never computed from the code under test. A new endpoint under
+`/api/w` or `/api/sync/w` needs a case in `apps/server/src/test/endpoints.ts` and a row with the status of every role
+for it in the same matrix file; the cross-workspace tests fail until it has both.
+
 ## Branches, commits, pull requests
 
 - Branch names are `type/topic`: `feat/`, `fix/`, `chore/`, `docs/` (for example `fix/session-expiry`).

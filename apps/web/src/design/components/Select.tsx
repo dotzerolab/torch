@@ -10,16 +10,21 @@ export function Select({
   onValueChange,
   options,
   label,
+  disabled = false,
+  placeholder,
 }: {
   value: string;
   onValueChange: (value: string) => void;
   options: SelectOption[];
   label: string;
+  disabled?: boolean;
+  /** Shown while `value` is empty. */
+  placeholder?: string;
 }) {
   return (
-    <RadixSelect.Root value={value} onValueChange={onValueChange}>
+    <RadixSelect.Root value={value} onValueChange={onValueChange} disabled={disabled}>
       <RadixSelect.Trigger className="select__trigger" aria-label={label}>
-        <RadixSelect.Value />
+        <RadixSelect.Value placeholder={placeholder} />
         <RadixSelect.Icon className="select__chevron">
           <ChevronDown size={14} aria-hidden="true" />
         </RadixSelect.Icon>

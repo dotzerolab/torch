@@ -5,7 +5,7 @@ import { type SessionWorkspace, signOut } from '../auth/useSession.ts';
 import { Button } from '../design/components/Button.tsx';
 import { useT } from '../design/locale.tsx';
 import type { ResolvedTheme } from '../design/theme.ts';
-import { navigate } from '../navigation.ts';
+import { navigate, usePathname } from '../navigation.ts';
 import type { SyncedTeam } from '../sync/collections.ts';
 import { WorkspaceSwitcher } from './WorkspaceSwitcher.tsx';
 
@@ -47,6 +47,8 @@ export function Sidebar({
   onNavigate?: () => void;
 }) {
   const t = useT();
+  const pathname = usePathname();
+  const onSettings = pathname === '/settings' || pathname.startsWith('/settings/');
   return (
     <nav className="sidebar" aria-label={t('shell.sidebar')}>
       <WorkspaceSwitcher
@@ -93,9 +95,23 @@ export function Sidebar({
       </ul>
       <div className="sidebar__footer">
         <ul className="sidebar__list">
-          <Placeholder icon={<Settings size={16} aria-hidden="true" />}>
-            {t('shell.settings')}
-          </Placeholder>
+          <li>
+            <a
+              className="sidebar__item"
+              href="/settings/profile"
+              data-testid="settings-link"
+              aria-current={onSettings ? 'page' : undefined}
+              onClick={(event) => {
+                if (!isPlainClick(event)) return;
+                event.preventDefault();
+                navigate('/settings/profile');
+                onNavigate?.();
+              }}
+            >
+              <Settings size={16} aria-hidden="true" />
+              {t('shell.settings')}
+            </a>
+          </li>
         </ul>
         <Button
           variant="ghost"

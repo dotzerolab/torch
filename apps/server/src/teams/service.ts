@@ -225,8 +225,9 @@ export async function addTeamMember(
 }
 
 /**
- * Removes a person from a team. Visibility and rights as for adding. Removing somebody who is not in the team is a
- * 200 no-op; the last member of a private team cannot be removed (409).
+ * Removes a person from a team. Visibility and rights as for adding. Removing a member of the workspace who is not in
+ * the team (a deactivated one included) is a 200 no-op; an id that is not a member of this workspace is 404, like
+ * everywhere else. The last member of a private team cannot be removed (409).
  */
 export async function removeTeamMember(
   orm: Orm,
@@ -248,7 +249,17 @@ export async function removeTeamMember(
       .select({ memberId: teamMember.memberId })
       .from(teamMember)
       .where(and(eq(teamMember.teamId, teamId), eq(teamMember.memberId, memberId)));
-    if (!membership) return succeed({ txid: await currentTxid(tx) });
+    if (!membership) {
+      // Nothing to remove: a member of this workspace who is not in the team is an idempotent no-op, but an id that
+      // is no member of this workspace (unknown, or of another workspace) is not found. A plain read: no lock is
+      // taken here, so the lock order stays team row, then nothing else.
+      const [known] = await tx
+        .select({ id: member.id })
+        .from(member)
+        .where(and(eq(member.workspaceId, actor.workspaceId), eq(member.id, memberId)));
+      if (!known) return refuse('not_found', 404);
+      return succeed({ txid: await currentTxid(tx) });
+    }
 
     if (access.private && (await countMembers(tx, teamId)) <= 1) {
       return refuse('private_team_needs_member', 409);

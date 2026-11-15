@@ -5,8 +5,10 @@ import { useEffect, useState } from 'react';
 import { LoginPage } from './auth/LoginPage.tsx';
 import { useSession } from './auth/useSession.ts';
 import { VerifyPage } from './auth/VerifyPage.tsx';
+import { AcceptInvitePage } from './invite/AcceptInvitePage.tsx';
 import { navigate, usePathname } from './navigation.ts';
 import { Workspace } from './screens/Workspace.tsx';
+import { SettingsScreen } from './settings/SettingsScreen.tsx';
 import { AppShell } from './shell/AppShell.tsx';
 
 type State = { status: 'loading' } | { status: 'ready'; brand: Brand } | { status: 'error' };
@@ -39,6 +41,7 @@ function applyBrand(brand: Brand) {
 // `/` is the signed-in page: without a session it sends the visitor to /login.
 function Home({ brand, locale }: { brand: Brand; locale: Locale }) {
   const session = useSession();
+  const pathname = usePathname();
   useEffect(() => {
     if (session.status === 'signed-out') navigate('/login', { replace: true });
   }, [session.status]);
@@ -50,7 +53,11 @@ function Home({ brand, locale }: { brand: Brand; locale: Locale }) {
   }
   return (
     <AppShell brand={brand} workspaces={session.workspaces} locale={locale}>
-      <Workspace locale={locale} />
+      {pathname === '/settings' || pathname.startsWith('/settings/') ? (
+        <SettingsScreen />
+      ) : (
+        <Workspace locale={locale} />
+      )}
     </AppShell>
   );
 }
@@ -94,6 +101,13 @@ export function App() {
         ) : (
           <VerifyPage brand={state.brand} locale={locale} />
         )}
+      </main>
+    );
+  }
+  if (pathname === '/invite') {
+    return (
+      <main>
+        <AcceptInvitePage brand={state.brand} locale={locale} />
       </main>
     );
   }
