@@ -5,6 +5,8 @@ import { sql } from 'drizzle-orm';
 import {
   boolean,
   check,
+  date,
+  doublePrecision,
   foreignKey,
   index,
   integer,
@@ -20,9 +22,16 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 
-import { MEMBER_LOCALES, MEMBER_ROLES } from './enums.ts';
+import { ISSUE_RELATION_TYPES, MEMBER_LOCALES, MEMBER_ROLES } from './enums.ts';
 
-export { MEMBER_LOCALES, MEMBER_ROLES, type MemberLocale, type MemberRole } from './enums.ts';
+export {
+  ISSUE_RELATION_TYPES,
+  type IssueRelationType,
+  MEMBER_LOCALES,
+  MEMBER_ROLES,
+  type MemberLocale,
+  type MemberRole,
+} from './enums.ts';
 
 export const WORKFLOW_STATE_TYPES = [
   'triage',
@@ -59,6 +68,7 @@ export type AuditTargetType = (typeof AUDIT_TARGET_TYPES)[number];
 export const memberRole = pgEnum('member_role', MEMBER_ROLES);
 export const locale = pgEnum('locale', MEMBER_LOCALES);
 export const workflowStateType = pgEnum('workflow_state_type', WORKFLOW_STATE_TYPES);
+export const issueRelationType = pgEnum('issue_relation_type', ISSUE_RELATION_TYPES);
 
 const id = () => uuid('id').primaryKey().defaultRandom();
 const createdAt = () => timestamp('created_at', { withTimezone: true }).notNull().defaultNow();
@@ -166,7 +176,11 @@ export const workflowState = pgTable(
   ],
 );
 
-/** Priority follows Linear: 0 none, 1 urgent, 2 high, 3 medium, 4 low. */
+/**
+ * Priority follows Linear: 0 none, 1 urgent, 2 high, 3 medium, 4 low. `sort_order` is Linear's float (a new issue
+ * goes to the top of its state); `parent_id` makes sub-issues of any depth (a cycle is refused by the mutation, under a
+ * lock); `started_at`, `completed_at` and `canceled_at` follow the state the issue is in.
+ */
 export const issue = pgTable(
   'issue',
   {
@@ -178,16 +192,31 @@ export const issue = pgTable(
     description: text('description').notNull().default(''),
     stateId: uuid('state_id').notNull(),
     priority: smallint('priority').notNull().default(0),
+    estimate: smallint('estimate'),
+    dueDate: date('due_date', { mode: 'string' }),
     assigneeId: uuid('assignee_id'),
     creatorId: uuid('creator_id').notNull(),
+    parentId: uuid('parent_id'),
+    sortOrder: doublePrecision('sort_order').notNull().default(0),
     createdAt: createdAt(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    canceledAt: timestamp('canceled_at', { withTimezone: true }),
     archivedAt: timestamp('archived_at', { withTimezone: true }),
   },
   (t) => [
     unique('issue_team_number_unique').on(t.teamId, t.number),
+    // Targets of the composite foreign keys: the parent (workspace, id) and the join tables (workspace, team, id).
+    unique('issue_workspace_id_unique').on(t.workspaceId, t.id),
+    unique('issue_workspace_team_id_unique').on(t.workspaceId, t.teamId, t.id),
     index('issue_team_id_idx').on(t.teamId),
+    // The updated-after poll and the cursor order walk this index.
+    index('issue_workspace_updated_idx').on(t.workspaceId, t.updatedAt, t.id),
+    index('issue_parent_idx').on(t.parentId),
     check('issue_priority_range', sql`${t.priority} between 0 and 4`),
+    check('issue_estimate_range', sql`${t.estimate} between 0 and 64`),
+    check('issue_parent_not_self', sql`${t.parentId} <> ${t.id}`),
     foreignKey({
       name: 'issue_team_fk',
       columns: [t.workspaceId, t.teamId],
@@ -206,6 +235,172 @@ export const issue = pgTable(
     foreignKey({
       name: 'issue_creator_fk',
       columns: [t.workspaceId, t.creatorId],
+      foreignColumns: [member.workspaceId, member.id],
+    }),
+    foreignKey({
+      name: 'issue_parent_fk',
+      columns: [t.workspaceId, t.parentId],
+      foreignColumns: [t.workspaceId, t.id],
+    }),
+  ],
+);
+
+/** A label of the workspace (`team_id` null) or of one team. A group is a label with `is_group`; its children point at it. */
+export const label = pgTable(
+  'label',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id').notNull(),
+    teamId: uuid('team_id'),
+    parentId: uuid('parent_id'),
+    name: text('name').notNull(),
+    color: text('color').notNull(),
+    isGroup: boolean('is_group').notNull().default(false),
+    archivedAt: timestamp('archived_at', { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    // Target of the composite foreign keys that point at a label.
+    unique('label_workspace_id_unique').on(t.workspaceId, t.id),
+    // A name is unique per scope (the workspace, or one team) among labels that are not archived.
+    uniqueIndex('label_scope_name_unique')
+      .on(
+        t.workspaceId,
+        sql`coalesce(${t.teamId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+        sql`lower(${t.name})`,
+      )
+      .where(sql`${t.archivedAt} is null`),
+    index('label_team_idx').on(t.teamId),
+    check('label_parent_not_self', sql`${t.parentId} <> ${t.id}`),
+    foreignKey({
+      name: 'label_team_fk',
+      columns: [t.workspaceId, t.teamId],
+      foreignColumns: [team.workspaceId, team.id],
+    }),
+    foreignKey({
+      name: 'label_parent_fk',
+      columns: [t.workspaceId, t.parentId],
+      foreignColumns: [t.workspaceId, t.id],
+    }),
+  ],
+);
+
+/** A label on an issue. `team_id` repeats the issue's team (the composite key pins it) so a shape can filter by it. */
+export const issueLabel = pgTable(
+  'issue_label',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    teamId: uuid('team_id').notNull(),
+    issueId: uuid('issue_id').notNull(),
+    labelId: uuid('label_id').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.issueId, t.labelId] }),
+    index('issue_label_team_idx').on(t.teamId),
+    index('issue_label_label_idx').on(t.labelId),
+    foreignKey({
+      name: 'issue_label_issue_fk',
+      columns: [t.workspaceId, t.teamId, t.issueId],
+      foreignColumns: [issue.workspaceId, issue.teamId, issue.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'issue_label_label_fk',
+      columns: [t.workspaceId, t.labelId],
+      foreignColumns: [label.workspaceId, label.id],
+    }).onDelete('cascade'),
+  ],
+);
+
+/**
+ * A relation between two issues, stored once with a direction (`blocks`: issue blocks related issue). Both ends carry
+ * their team, so a team's shape can include relations that point into it; the other end may be in another team.
+ */
+export const issueRelation = pgTable(
+  'issue_relation',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id').notNull(),
+    teamId: uuid('team_id').notNull(),
+    issueId: uuid('issue_id').notNull(),
+    relatedTeamId: uuid('related_team_id').notNull(),
+    relatedIssueId: uuid('related_issue_id').notNull(),
+    type: issueRelationType('type').notNull(),
+    createdBy: uuid('created_by').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    unique('issue_relation_unique').on(t.issueId, t.relatedIssueId, t.type),
+    index('issue_relation_team_idx').on(t.teamId),
+    index('issue_relation_related_idx').on(t.relatedTeamId, t.relatedIssueId),
+    check('issue_relation_not_self', sql`${t.issueId} <> ${t.relatedIssueId}`),
+    foreignKey({
+      name: 'issue_relation_issue_fk',
+      columns: [t.workspaceId, t.teamId, t.issueId],
+      foreignColumns: [issue.workspaceId, issue.teamId, issue.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'issue_relation_related_fk',
+      columns: [t.workspaceId, t.relatedTeamId, t.relatedIssueId],
+      foreignColumns: [issue.workspaceId, issue.teamId, issue.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'issue_relation_created_by_fk',
+      columns: [t.workspaceId, t.createdBy],
+      foreignColumns: [member.workspaceId, member.id],
+    }),
+  ],
+);
+
+export const issueSubscriber = pgTable(
+  'issue_subscriber',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    teamId: uuid('team_id').notNull(),
+    issueId: uuid('issue_id').notNull(),
+    memberId: uuid('member_id').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.issueId, t.memberId] }),
+    index('issue_subscriber_team_idx').on(t.teamId),
+    foreignKey({
+      name: 'issue_subscriber_issue_fk',
+      columns: [t.workspaceId, t.teamId, t.issueId],
+      foreignColumns: [issue.workspaceId, issue.teamId, issue.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'issue_subscriber_member_fk',
+      columns: [t.workspaceId, t.memberId],
+      foreignColumns: [member.workspaceId, member.id],
+    }).onDelete('cascade'),
+  ],
+);
+
+/** An external link on an issue. Only http and https are stored; the page that renders it never sees another scheme. */
+export const issueLink = pgTable(
+  'issue_link',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id').notNull(),
+    teamId: uuid('team_id').notNull(),
+    issueId: uuid('issue_id').notNull(),
+    url: text('url').notNull(),
+    title: text('title'),
+    createdBy: uuid('created_by').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index('issue_link_team_idx').on(t.teamId),
+    index('issue_link_issue_idx').on(t.issueId),
+    check('issue_link_url_scheme', sql`${t.url} ~ '^https?://'`),
+    foreignKey({
+      name: 'issue_link_issue_fk',
+      columns: [t.workspaceId, t.teamId, t.issueId],
+      foreignColumns: [issue.workspaceId, issue.teamId, issue.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'issue_link_created_by_fk',
+      columns: [t.workspaceId, t.createdBy],
       foreignColumns: [member.workspaceId, member.id],
     }),
   ],
@@ -358,6 +553,11 @@ export type TeamRow = typeof team.$inferSelect;
 export type TeamMemberRow = typeof teamMember.$inferSelect;
 export type WorkflowStateRow = typeof workflowState.$inferSelect;
 export type IssueRow = typeof issue.$inferSelect;
+export type LabelRow = typeof label.$inferSelect;
+export type IssueLabelRow = typeof issueLabel.$inferSelect;
+export type IssueRelationRow = typeof issueRelation.$inferSelect;
+export type IssueSubscriberRow = typeof issueSubscriber.$inferSelect;
+export type IssueLinkRow = typeof issueLink.$inferSelect;
 export type LoginTokenRow = typeof loginToken.$inferSelect;
 export type SessionRow = typeof session.$inferSelect;
 export type InviteRow = typeof invite.$inferSelect;

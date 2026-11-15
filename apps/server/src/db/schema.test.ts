@@ -3,6 +3,11 @@ import {
   invite,
   inviteTeam,
   issue,
+  issueLabel,
+  issueLink,
+  issueRelation,
+  issueSubscriber,
+  label,
   loginToken,
   member,
   session,
@@ -12,7 +17,12 @@ import {
 } from '@torch/shared/db/schema';
 import { and, eq, sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
-import { createWorkspaceFixture, pgErrorCode, withTempDatabase } from '../test/fixtures.ts';
+import {
+  createWorkspaceFixture,
+  pgErrorCode,
+  type WorkspaceFixture,
+  withTempDatabase,
+} from '../test/fixtures.ts';
 import { runMigrations } from './migrate.ts';
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -32,6 +42,11 @@ const TABLES = [
   'team_member',
   'workflow_state',
   'issue',
+  'issue_label',
+  'issue_link',
+  'issue_relation',
+  'issue_subscriber',
+  'label',
   'login_token',
   'session',
   'invite',
@@ -496,6 +511,320 @@ describe.skipIf(!databaseUrl)('schema (Postgres)', () => {
           "select indexname from pg_indexes where tablename = 'audit_log'",
         );
         expect(indexes.rows.map((r) => r.indexname)).toContain('audit_log_workspace_created_idx');
+      });
+    });
+  });
+
+  describe('issue fields, labels, relations, subscribers and links', () => {
+    const outcome = (insertion: PromiseLike<unknown>) =>
+      Promise.resolve(insertion)
+        .then(() => 'inserted')
+        .catch((error) => pgErrorCode(error) ?? 'unknown error');
+    const issueBase = (f: WorkspaceFixture, number: number) => ({
+      workspaceId: f.workspaceId,
+      teamId: f.teams.eng.id,
+      number,
+      title: `Issue ${number}`,
+      stateId: f.states.eng.backlog.id,
+      creatorId: f.members.owner.id,
+    });
+    const firstIssue = (f: WorkspaceFixture) => {
+      const row = f.issues.eng[0];
+      if (!row) throw new Error('fixture has no ENG issue');
+      return row;
+    };
+
+    it('the new issue columns have defaults and the estimate stays within 0..64', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const [row] = await db.orm.insert(issue).values(issueBase(a, 10)).returning();
+        expect(row?.estimate).toBeNull();
+        expect(row?.dueDate).toBeNull();
+        expect(row?.parentId).toBeNull();
+        expect(row?.sortOrder).toBe(0);
+        expect(row?.startedAt).toBeNull();
+        expect(row?.completedAt).toBeNull();
+        expect(row?.canceledAt).toBeNull();
+
+        const withEstimate = (number: number, estimate: number) =>
+          outcome(db.orm.insert(issue).values({ ...issueBase(a, number), estimate }));
+        await expect(withEstimate(11, -1)).resolves.toBe('23514');
+        await expect(withEstimate(12, 65)).resolves.toBe('23514');
+        await expect(withEstimate(13, 0)).resolves.toBe('inserted');
+        await expect(withEstimate(14, 64)).resolves.toBe('inserted');
+      });
+    });
+
+    it('an issue cannot be its own parent, and a parent must be in the same workspace', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const ownId = '00000000-0000-4000-8000-000000000001';
+
+        await expect(
+          outcome(db.orm.insert(issue).values({ ...issueBase(a, 10), id: ownId, parentId: ownId })),
+        ).resolves.toBe('23514');
+        await expect(
+          outcome(db.orm.insert(issue).values({ ...issueBase(a, 11), parentId: firstIssue(b).id })),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(issue).values({ ...issueBase(a, 12), parentId: firstIssue(a).id })),
+        ).resolves.toBe('inserted');
+      });
+    });
+
+    it('a label cannot point at a team or a group of another workspace', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const [groupB] = await db.orm
+          .insert(label)
+          .values({ workspaceId: b.workspaceId, name: 'Group', color: '#112233', isGroup: true })
+          .returning();
+        if (!groupB) throw new Error('label insert returned no row');
+        const base = { workspaceId: a.workspaceId, color: '#112233' };
+
+        await expect(
+          outcome(
+            db.orm.insert(label).values({ ...base, name: 'Other team', teamId: b.teams.eng.id }),
+          ),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(
+            db.orm.insert(label).values({ ...base, name: 'Other group', parentId: groupB.id }),
+          ),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(label).values({ ...base, name: 'Workspace label' })),
+        ).resolves.toBe('inserted');
+      });
+    });
+
+    it('label names are unique per scope, case-insensitively, until archived', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const add = (name: string, teamId: string | null) =>
+          outcome(
+            db.orm
+              .insert(label)
+              .values({ workspaceId: a.workspaceId, teamId, name, color: '#aabbcc' }),
+          );
+
+        await expect(add('Bug', a.teams.eng.id)).resolves.toBe('inserted');
+        await expect(add('bug', a.teams.eng.id)).resolves.toBe('23505');
+        await expect(add('BUG', a.teams.eng.id)).resolves.toBe('23505');
+        // Another team, and the workspace level, are other scopes.
+        await expect(add('Bug', a.teams.ops.id)).resolves.toBe('inserted');
+        await expect(add('Bug', null)).resolves.toBe('inserted');
+        // Workspace-level labels have no team: the nil-uuid scope still makes the name unique.
+        await expect(add('bUg', null)).resolves.toBe('23505');
+
+        await db.orm
+          .update(label)
+          .set({ archivedAt: new Date() })
+          .where(and(eq(label.workspaceId, a.workspaceId), eq(label.teamId, a.teams.eng.id)));
+        await expect(add('bug', a.teams.eng.id)).resolves.toBe('inserted');
+      });
+    });
+
+    it('issue_label rows cannot cross workspaces or teams, and one label sits on an issue once', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const labelRow = async (f: WorkspaceFixture, name: string) => {
+          const [row] = await db.orm
+            .insert(label)
+            .values({ workspaceId: f.workspaceId, name, color: '#112233' })
+            .returning();
+          if (!row) throw new Error('label insert returned no row');
+          return row;
+        };
+        const labelA = await labelRow(a, 'A');
+        const labelB = await labelRow(b, 'B');
+        const issueA = firstIssue(a);
+        const row = (over: Partial<typeof issueLabel.$inferInsert>) => ({
+          workspaceId: a.workspaceId,
+          teamId: a.teams.eng.id,
+          issueId: issueA.id,
+          labelId: labelA.id,
+          ...over,
+        });
+
+        await expect(
+          outcome(db.orm.insert(issueLabel).values(row({ issueId: firstIssue(b).id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(issueLabel).values(row({ labelId: labelB.id }))),
+        ).resolves.toBe('23503');
+        // team_id must be the issue's team.
+        await expect(
+          outcome(db.orm.insert(issueLabel).values(row({ teamId: a.teams.ops.id }))),
+        ).resolves.toBe('23503');
+        await expect(outcome(db.orm.insert(issueLabel).values(row({})))).resolves.toBe('inserted');
+        await expect(outcome(db.orm.insert(issueLabel).values(row({})))).resolves.toBe('23505');
+      });
+    });
+
+    it('issue_relation rows cannot cross workspaces, name one issue twice or repeat', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const [first, second] = a.issues.eng;
+        if (!first || !second) throw new Error('fixture needs two ENG issues');
+        const row = (over: Partial<typeof issueRelation.$inferInsert>) => ({
+          workspaceId: a.workspaceId,
+          teamId: a.teams.eng.id,
+          issueId: first.id,
+          relatedTeamId: a.teams.eng.id,
+          relatedIssueId: second.id,
+          type: 'blocks' as const,
+          createdBy: a.members.owner.id,
+          ...over,
+        });
+
+        await expect(
+          outcome(db.orm.insert(issueRelation).values(row({ issueId: firstIssue(b).id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(
+            db.orm
+              .insert(issueRelation)
+              .values(row({ relatedIssueId: firstIssue(b).id, relatedTeamId: b.teams.eng.id })),
+          ),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(issueRelation).values(row({ createdBy: b.members.owner.id }))),
+        ).resolves.toBe('23503');
+        // related_team_id must be the related issue's team.
+        await expect(
+          outcome(db.orm.insert(issueRelation).values(row({ relatedTeamId: a.teams.ops.id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(issueRelation).values(row({ relatedIssueId: first.id }))),
+        ).resolves.toBe('23514');
+        await expect(outcome(db.orm.insert(issueRelation).values(row({})))).resolves.toBe(
+          'inserted',
+        );
+        await expect(outcome(db.orm.insert(issueRelation).values(row({})))).resolves.toBe('23505');
+        // Another type between the same pair is a different relation.
+        await expect(
+          outcome(db.orm.insert(issueRelation).values(row({ type: 'related' }))),
+        ).resolves.toBe('inserted');
+      });
+    });
+
+    it('issue_subscriber rows cannot cross workspaces and are unique per issue and member', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const row = (over: Partial<typeof issueSubscriber.$inferInsert>) => ({
+          workspaceId: a.workspaceId,
+          teamId: a.teams.eng.id,
+          issueId: firstIssue(a).id,
+          memberId: a.members.member.id,
+          ...over,
+        });
+
+        await expect(
+          outcome(db.orm.insert(issueSubscriber).values(row({ issueId: firstIssue(b).id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(issueSubscriber).values(row({ memberId: b.members.member.id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(issueSubscriber).values(row({ teamId: a.teams.ops.id }))),
+        ).resolves.toBe('23503');
+        await expect(outcome(db.orm.insert(issueSubscriber).values(row({})))).resolves.toBe(
+          'inserted',
+        );
+        await expect(outcome(db.orm.insert(issueSubscriber).values(row({})))).resolves.toBe(
+          '23505',
+        );
+      });
+    });
+
+    it('issue_link rows cannot cross workspaces and accept only http and https URLs', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const row = (over: Partial<typeof issueLink.$inferInsert>) => ({
+          workspaceId: a.workspaceId,
+          teamId: a.teams.eng.id,
+          issueId: firstIssue(a).id,
+          url: 'https://example.test/page',
+          createdBy: a.members.owner.id,
+          ...over,
+        });
+
+        await expect(
+          outcome(db.orm.insert(issueLink).values(row({ issueId: firstIssue(b).id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(issueLink).values(row({ createdBy: b.members.owner.id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(issueLink).values(row({ teamId: a.teams.ops.id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(issueLink).values(row({ url: 'javascript:alert(1)' }))),
+        ).resolves.toBe('23514');
+        await expect(
+          outcome(db.orm.insert(issueLink).values(row({ url: 'data:text/html,x' }))),
+        ).resolves.toBe('23514');
+        await expect(
+          outcome(db.orm.insert(issueLink).values(row({ url: 'ftp://example.test/x' }))),
+        ).resolves.toBe('23514');
+        await expect(outcome(db.orm.insert(issueLink).values(row({})))).resolves.toBe('inserted');
+        await expect(
+          outcome(
+            db.orm
+              .insert(issueLink)
+              .values(row({ url: 'http://example.test/plain', title: 'Plain' })),
+          ),
+        ).resolves.toBe('inserted');
+      });
+    });
+
+    it('deleting an issue removes its labels, relations, subscribers and links', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const [first, second] = a.issues.eng;
+        if (!first || !second) throw new Error('fixture needs two ENG issues');
+        const [tag] = await db.orm
+          .insert(label)
+          .values({ workspaceId: a.workspaceId, name: 'Tag', color: '#112233' })
+          .returning();
+        if (!tag) throw new Error('label insert returned no row');
+        const where = { workspaceId: a.workspaceId, teamId: a.teams.eng.id };
+        await db.orm.insert(issueLabel).values({ ...where, issueId: first.id, labelId: tag.id });
+        await db.orm
+          .insert(issueSubscriber)
+          .values({ ...where, issueId: first.id, memberId: a.members.member.id });
+        await db.orm.insert(issueLink).values({
+          ...where,
+          issueId: first.id,
+          url: 'https://example.test/x',
+          createdBy: a.members.owner.id,
+        });
+        await db.orm.insert(issueRelation).values({
+          ...where,
+          issueId: second.id,
+          relatedTeamId: a.teams.eng.id,
+          relatedIssueId: first.id,
+          type: 'blocks',
+          createdBy: a.members.owner.id,
+        });
+
+        await db.orm.delete(issue).where(eq(issue.id, first.id));
+
+        const count = async (table: string) =>
+          (await db.pool.query(`select count(*)::int as n from ${table}`)).rows[0]?.n;
+        expect(await count('issue_label')).toBe(0);
+        expect(await count('issue_subscriber')).toBe(0);
+        expect(await count('issue_link')).toBe(0);
+        expect(await count('issue_relation')).toBe(0);
+        // The label itself stays.
+        expect(await count('label')).toBe(1);
       });
     });
   });

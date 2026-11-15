@@ -164,6 +164,20 @@ describe.skipIf(!databaseUrl)('seedDev (Postgres)', () => {
     });
   });
 
+  it('issue_counter is never below the highest issue number of its team, so the next number is free', async () => {
+    await withTempDatabase(async (db) => {
+      await seedDev(db.orm, { issuesPerTeam: 5 });
+
+      const rows = await db.pool.query<{ key: string; counter: number; highest: number }>(
+        `select t.key, t.issue_counter as counter, max(i.number)::int as highest
+           from team t join issue i on i.team_id = t.id
+          group by t.id, t.key, t.issue_counter`,
+      );
+      expect(rows.rows).toHaveLength(2);
+      for (const row of rows.rows) expect(row.counter).toBeGreaterThanOrEqual(row.highest);
+    });
+  });
+
   it('seeds 50 issues per team by default', async () => {
     await withTempDatabase(async (db) => {
       await seedDev(db.orm);
