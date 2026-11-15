@@ -596,19 +596,37 @@ describe.skipIf(!databaseUrl)('removeTeamMember', () => {
     });
   });
 
-  it('removing somebody who is not in the team, or an unknown id, is a 200 no-op without an audit row', async () => {
+  it('removing a member of the workspace who is not in the team is a 200 no-op without an audit row', async () => {
+    await withTempDatabase(async (db) => {
+      const a = await createWorkspaceFixture(db.orm);
+      const owner = await actorOf(db, a.workspaceId, a.members.owner.id);
+      const before = await membersOf(db, a.teams.eng.id);
+
+      txidOf(await removeTeamMember(db.orm, owner, a.teams.eng.id, a.members.outsider.id));
+      // A deactivated member is still a member of the workspace.
+      await db.orm
+        .update(member)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(member.id, a.members.outsider.id));
+      txidOf(await removeTeamMember(db.orm, owner, a.teams.eng.id, a.members.outsider.id));
+
+      expect(await membersOf(db, a.teams.eng.id)).toEqual(before);
+      expect(await auditRows(db, a.workspaceId)).toHaveLength(0);
+    });
+  });
+
+  it('an id that is no member of this workspace (unknown, of another workspace, malformed) is 404 and changes nothing', async () => {
     await withTempDatabase(async (db) => {
       const a = await createWorkspaceFixture(db.orm);
       const b = await createWorkspaceFixture(db.orm);
       const owner = await actorOf(db, a.workspaceId, a.members.owner.id);
       const before = await membersOf(db, a.teams.eng.id);
 
-      for (const id of [a.members.outsider.id, UNKNOWN_UUID, b.members.member.id]) {
-        txidOf(await removeTeamMember(db.orm, owner, a.teams.eng.id, id));
+      for (const id of [UNKNOWN_UUID, b.members.member.id, 'not-a-uuid']) {
+        expect(await removeTeamMember(db.orm, owner, a.teams.eng.id, id), id).toEqual(
+          refusal('not_found', 404),
+        );
       }
-      expect(await removeTeamMember(db.orm, owner, a.teams.eng.id, 'not-a-uuid')).toEqual(
-        refusal('not_found', 404),
-      );
 
       expect(await membersOf(db, a.teams.eng.id)).toEqual(before);
       expect(await membersOf(db, b.teams.eng.id)).toContain(b.members.member.id);

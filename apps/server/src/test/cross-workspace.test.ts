@@ -41,18 +41,6 @@ if (!databaseUrl) {
   );
 }
 
-/**
- * Cases the server does not meet yet. They run as `it.fails`: once the server answers as the rules say they start
- * failing, which is the reminder to delete the entry.
- */
-const KNOWN_GAPS = new Set<string>([
-  // known gap
-  'a-one: teams: remove a member (public team) with memberId',
-  'a-one: teams: remove a member (private team) with memberId',
-  'a-one: teams: remove a member (public team with the owner only) with memberId',
-]);
-const test = (key: string) => (KNOWN_GAPS.has(key) ? it.fails : it);
-
 const UNKNOWN_UUID = '99999999-9999-4999-8999-999999999999';
 const isSuccess = (status: number) => status >= 200 && status < 300;
 
@@ -151,7 +139,7 @@ describe.skipIf(!databaseUrl)('workspace isolation over HTTP', () => {
     });
 
     for (const c of withOtherIds) {
-      test(`a: ${c.name}`)(`${c.name}: 404 not_found`, async () => {
+      it(`${c.name}: 404 not_found`, async () => {
         const own = await world.attempt(world.a, 'owner', c);
         const other = await world.attempt(world.b, 'owner', c);
 
@@ -170,17 +158,14 @@ describe.skipIf(!databaseUrl)('workspace isolation over HTTP', () => {
       const objects = [...idsUsedBy(c)].filter((key) => key !== 'workspaceId' && key !== 'uid');
       if (objects.length < 2) continue;
       for (const key of objects) {
-        test(`a-one: ${c.name} with ${key}`)(
-          `${c.name}: only ${key} is of another workspace: 404 not_found`,
-          async () => {
-            const own = await world.attempt(world.a, 'owner', c);
-            const other = await world.attempt(world.b, 'owner', c);
+        it(`${c.name}: only ${key} is of another workspace: 404 not_found`, async () => {
+          const own = await world.attempt(world.a, 'owner', c);
+          const other = await world.attempt(world.b, 'owner', c);
 
-            const res = await world.send(c, { ...own.ids, [key]: other.ids[key] }, own.cookie);
+          const res = await world.send(c, { ...own.ids, [key]: other.ids[key] }, own.cookie);
 
-            expect(res).toEqual({ status: 404, error: 'not_found' });
-          },
-        );
+          expect(res).toEqual({ status: 404, error: 'not_found' });
+        });
       }
     }
 
@@ -188,57 +173,51 @@ describe.skipIf(!databaseUrl)('workspace isolation over HTTP', () => {
     // caller that the object exists, whatever the role.
     for (const c of withOtherIds) {
       for (const role of ROLES) {
-        test(`a-oracle: ${c.name} as ${role}`)(
-          `${c.name} as ${role}: an id of another workspace answers like an id that does not exist`,
-          async () => {
-            const own = await world.attempt(world.a, role, c);
-            const other = await world.attempt(world.b, 'owner', c);
-            const nowhere = Object.fromEntries(
-              [...idsUsedBy(c)].map((key) => [key, UNKNOWN_UUID]),
-            ) as Partial<Ids>;
+        it(`${c.name} as ${role}: an id of another workspace answers like an id that does not exist`, async () => {
+          const own = await world.attempt(world.a, role, c);
+          const other = await world.attempt(world.b, 'owner', c);
+          const nowhere = Object.fromEntries(
+            [...idsUsedBy(c)].map((key) => [key, UNKNOWN_UUID]),
+          ) as Partial<Ids>;
 
-            const ofOther = await world.send(
-              c,
-              { ...other.ids, workspaceId: own.ids.workspaceId },
-              own.cookie,
-            );
-            const ofNowhere = await world.send(
-              c,
-              { ...own.ids, ...nowhere, workspaceId: own.ids.workspaceId, uid: own.ids.uid },
-              own.cookie,
-            );
+          const ofOther = await world.send(
+            c,
+            { ...other.ids, workspaceId: own.ids.workspaceId },
+            own.cookie,
+          );
+          const ofNowhere = await world.send(
+            c,
+            { ...own.ids, ...nowhere, workspaceId: own.ids.workspaceId, uid: own.ids.uid },
+            own.cookie,
+          );
 
-            expect([403, 404], `status ${ofOther.status}`).toContain(ofOther.status);
-            expect(ofOther).toEqual(ofNowhere);
-          },
-        );
+          expect([403, 404], `status ${ofOther.status}`).toContain(ofOther.status);
+          expect(ofOther).toEqual(ofNowhere);
+        });
       }
     }
 
     for (const c of withOtherIds) {
-      test(`a-malformed: ${c.name}`)(
-        `${c.name}: a malformed id is 400 or 404, never a server error`,
-        async () => {
-          const own = await world.attempt(world.a, 'owner');
-          const malformed = Object.fromEntries(
-            [...idsUsedBy(c)].map((key) => [key, 'not-a-uuid']),
-          ) as Partial<Ids>;
+      it(`${c.name}: a malformed id is 400 or 404, never a server error`, async () => {
+        const own = await world.attempt(world.a, 'owner');
+        const malformed = Object.fromEntries(
+          [...idsUsedBy(c)].map((key) => [key, 'not-a-uuid']),
+        ) as Partial<Ids>;
 
-          const res = await world.send(
-            c,
-            { ...own.ids, ...malformed, workspaceId: own.ids.workspaceId },
-            own.cookie,
-          );
+        const res = await world.send(
+          c,
+          { ...own.ids, ...malformed, workspaceId: own.ids.workspaceId },
+          own.cookie,
+        );
 
-          expect([400, 404], `status ${res.status}`).toContain(res.status);
-        },
-      );
+        expect([400, 404], `status ${res.status}`).toContain(res.status);
+      });
     }
   });
 
   describe('(b) a session of one workspace on the URL of another', () => {
     for (const c of ENDPOINTS) {
-      test(`b: ${c.name}`)(`${c.name}: 401 unauthenticated`, async () => {
+      it(`${c.name}: 401 unauthenticated`, async () => {
         const mine = await world.attempt(world.a, 'owner');
         const theirs = await world.attempt(world.b, 'owner', c);
 
@@ -251,7 +230,7 @@ describe.skipIf(!databaseUrl)('workspace isolation over HTTP', () => {
 
   describe('(c) no cookie', () => {
     for (const c of ENDPOINTS) {
-      test(`c: ${c.name}`)(`${c.name}: 401 unauthenticated`, async () => {
+      it(`${c.name}: 401 unauthenticated`, async () => {
         const own = await world.attempt(world.a, 'owner', c);
 
         const res = await world.send(c, own.ids);
@@ -265,22 +244,19 @@ describe.skipIf(!databaseUrl)('workspace isolation over HTTP', () => {
     for (const c of ENDPOINTS) {
       for (const role of ROLES) {
         const allowed = succeeds(c, role);
-        test(`de: ${c.name} as ${role}`)(
-          `${c.name} as ${role}: ${allowed ? 'succeeds' : 'is refused'}`,
-          async () => {
-            const own = await world.attempt(world.a, role, c);
+        it(`${c.name} as ${role}: ${allowed ? 'succeeds' : 'is refused'}`, async () => {
+          const own = await world.attempt(world.a, role, c);
 
-            const res = await world.send(c, own.ids, own.cookie);
+          const res = await world.send(c, own.ids, own.cookie);
 
-            if (allowed) {
-              expect(isSuccess(res.status), `status ${res.status} ${res.error ?? ''}`).toBe(true);
-              return;
-            }
-            // 403 where the actor sees the object, 404 where it is invisible to them; never anything else.
-            expect([403, 404], `status ${res.status}`).toContain(res.status);
-            expect(res.error).toBe(res.status === 403 ? 'forbidden' : 'not_found');
-          },
-        );
+          if (allowed) {
+            expect(isSuccess(res.status), `status ${res.status} ${res.error ?? ''}`).toBe(true);
+            return;
+          }
+          // 403 where the actor sees the object, 404 where it is invisible to them; never anything else.
+          expect([403, 404], `status ${res.status}`).toContain(res.status);
+          expect(res.error).toBe(res.status === 403 ? 'forbidden' : 'not_found');
+        });
       }
     }
   });
