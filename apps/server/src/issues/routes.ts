@@ -15,6 +15,7 @@ import { createIssue } from './create-issue.ts';
 import { errorResponse } from './errors.ts';
 import { actorOf, changeResponse, NO_STORE, readBody, tooLarge } from './http.ts';
 import { addLink, removeLink } from './links.ts';
+import { listIssues } from './list.ts';
 import { addRelation, listRelations, removeRelation } from './relations.ts';
 import { addSubscriber, removeSubscriber } from './subscribers.ts';
 import { type UpdateIssueResult, updateIssue } from './update-issue.ts';
@@ -41,6 +42,22 @@ const mutationResponse = (result: UpdateIssueResult): Response =>
  */
 export function createIssueRoutes(deps: IssueRouteDeps): Hono {
   const routes = new Hono();
+
+  routes.get('/w/:workspaceId/issues', async (c) => {
+    const actor = await actorOf(c, deps.auth);
+    if (actor instanceof Response) return actor;
+    const limit = c.req.query('limit');
+    const result = await listIssues(deps.orm, actor, {
+      teamId: c.req.query('teamId'),
+      updatedAfter: c.req.query('updatedAfter'),
+      externalRef: c.req.query('externalRef'),
+      includeArchived: c.req.query('includeArchived') === 'true',
+      includeDescription: c.req.query('include') === 'description',
+      limit: limit === undefined ? undefined : /^\d+$/.test(limit) ? Number(limit) : Number.NaN,
+      cursor: c.req.query('cursor'),
+    });
+    return result.ok ? Response.json(result.value, { headers: NO_STORE }) : errorResponse(result);
+  });
 
   routes.patch(
     '/w/:workspaceId/issues/:issueId',

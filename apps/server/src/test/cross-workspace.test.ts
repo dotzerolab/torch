@@ -117,6 +117,7 @@ const WITHOUT_OTHER_IDS = [
   'teams: create',
   'teams: private team directory',
   'invites: list',
+  'issues: list',
   'labels: list',
   'labels: create (workspace)',
   'invites: create (member role)',

@@ -433,6 +433,7 @@ export const ENDPOINTS: EndpointCase[] = [
   },
 
   // ---- the issue mutation ----
+  { name: 'issues: list', method: 'GET', path: (ids) => `${api(ids)}/issues`, minRole: 'guest' },
   ...TEAMS.map(
     ({ issue: key, label, see }): EndpointCase => ({
       name: `issues: update (${label})`,

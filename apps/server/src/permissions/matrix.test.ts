@@ -495,6 +495,7 @@ const HTTP_ROWS: HttpRow[] = [
   http('invites: revoke (admin role)', 200, 403, 403, 403),
 
   // Issues follow their team, for every role.
+  http('issues: list', 200, 200, 200, 200),
   http('issues: update (public team)', 200, 200, 200, 200),
   http('issues: update (private team)', 200, 404, 200, 404),
   http('issues: update (public team with the owner only)', 200, 200, 200, 404),
