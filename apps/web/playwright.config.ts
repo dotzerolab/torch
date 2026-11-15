@@ -7,11 +7,13 @@ import { defineConfig, type PlaywrightTestConfig } from '@playwright/test';
 const envFile = fileURLToPath(new URL('../../.env', import.meta.url));
 if (existsSync(envFile)) process.loadEnvFile(envFile);
 
-// High ports on purpose: 3000, 5173 and 5432 are often taken on a dev machine.
+// High ports on purpose: 3000, 5173 and 5432 are often taken on a dev machine. They stay BELOW the ephemeral range
+// (32768-60999 on Linux, 49152-65535 on macOS and Windows): the OS hands that range to outgoing connections, so on a
+// busy CI runner one of them can already hold the port when a server tries to bind it (EADDRINUSE).
 // Two stacks run side by side: the default brand, and one whose server reads a custom brand file.
 const stacks = {
-  default: { server: 43100, web: 43200 },
-  customBrand: { server: 43101, web: 43201 },
+  default: { server: 23100, web: 23200 },
+  customBrand: { server: 23101, web: 23201 },
 };
 const acmeBrandPath = fileURLToPath(new URL('./e2e/fixtures/brand.acme.json', import.meta.url));
 
