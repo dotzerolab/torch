@@ -184,17 +184,23 @@ export async function listSessionWorkspaces(
     .orderBy(asc(workspace.createdAt), asc(workspace.id));
 }
 
+/** A session that ended: whose it was, so the open requests of that person can end too. */
+export type RevokedSession = { workspaceId: string; memberId: string };
+
 /**
  * Revokes the cookie's session in every workspace: logout, and a sign-in made with a cookie that is already
  * signed in (then `orm` is the sign-in's transaction, so the old sessions end together with the new ones starting).
+ * Returns the sessions it ended (one cookie may carry sessions of several workspaces); the caller tells the access
+ * bus once the transaction it belongs to has committed.
  */
 export async function revokeSessions(
   orm: Pick<Orm, 'update'>,
   token: string,
   now: Date,
-): Promise<void> {
-  await orm
+): Promise<RevokedSession[]> {
+  return orm
     .update(session)
     .set({ revokedAt: now })
-    .where(and(eq(session.tokenHash, hashToken(token)), isNull(session.revokedAt)));
+    .where(and(eq(session.tokenHash, hashToken(token)), isNull(session.revokedAt)))
+    .returning({ workspaceId: session.workspaceId, memberId: session.memberId });
 }

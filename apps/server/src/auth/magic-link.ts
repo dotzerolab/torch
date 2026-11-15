@@ -4,7 +4,8 @@ import { loginToken, member } from '@torch/shared/db/schema';
 import type { Locale } from '@torch/shared/i18n';
 import { and, asc, eq, gt, gte, inArray, isNull, sql } from 'drizzle-orm';
 import type { Orm } from '../db.ts';
-import { createSessionsForMembers, revokeSessions } from './sessions.ts';
+import { type AccessNotifier, notifySessionsRevoked } from '../sync/access-bus.ts';
+import { createSessionsForMembers, type RevokedSession, revokeSessions } from './sessions.ts';
 import { generateToken, hashToken } from './tokens.ts';
 
 export const LOGIN_TOKEN_TTL_MS = 15 * 60 * 1000;
@@ -104,10 +105,18 @@ export async function previewMagicLink(
  */
 export async function consumeMagicLink(
   orm: Orm,
-  input: { token: string; now: Date; userAgent: string | null; revokeSessionToken?: string | null },
+  input: {
+    token: string;
+    now: Date;
+    userAgent: string | null;
+    revokeSessionToken?: string | null;
+    /** Told, after the commit, whose old sessions ended. */
+    accessBus?: AccessNotifier;
+  },
 ): Promise<{ sessionToken: string } | null> {
-  const { token, now, userAgent, revokeSessionToken } = input;
-  return orm.transaction(async (tx) => {
+  const { token, now, userAgent, revokeSessionToken, accessBus } = input;
+  let revoked: RevokedSession[] = [];
+  const result = await orm.transaction(async (tx) => {
     const consumed = await tx
       .update(loginToken)
       .set({ usedAt: now })
@@ -144,7 +153,9 @@ export async function consumeMagicLink(
     if (active.length === 0) return null;
 
     const sessionToken = await createSessionsForMembers(tx, active, { now, userAgent });
-    if (revokeSessionToken) await revokeSessions(tx, revokeSessionToken, now);
+    if (revokeSessionToken) revoked = await revokeSessions(tx, revokeSessionToken, now);
     return { sessionToken };
   });
+  notifySessionsRevoked(accessBus, revoked);
+  return result;
 }

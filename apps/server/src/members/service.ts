@@ -36,6 +36,7 @@ import { recordAudit } from '../audit/log.ts';
 import type { Orm, Tx } from '../db.ts';
 import { currentTxid } from '../mutations/txid.ts';
 import { currentActor } from '../permissions/current-actor.ts';
+import type { AccessNotifier } from '../sync/access-bus.ts';
 import { isUniqueViolation } from '../util/pg-error.ts';
 import { refuse, succeed } from '../util/refusal.ts';
 import type { ServiceResult } from '../util/result.ts';
@@ -147,6 +148,7 @@ export async function changeMemberRole(
   actor: Actor,
   memberId: string,
   role: MemberRole,
+  accessBus?: AccessNotifier,
 ): Promise<ServiceResult<{ txid: number }>> {
   // The type says "validated", the function does not rely on it.
   const parsed = memberRoleInput.safeParse({ role });
@@ -155,7 +157,8 @@ export async function changeMemberRole(
   if (!isUuid(memberId)) return refuse('not_found', 404);
   const newRole = parsed.data.role;
 
-  return orm.transaction(async (tx) => {
+  let changed = false;
+  const result = await orm.transaction(async (tx) => {
     await lockWorkspace(tx, actor.workspaceId);
     const target = await lockTarget(tx, actor.workspaceId, memberId);
     if (!target) return refuse('not_found', 404);
@@ -178,9 +181,13 @@ export async function changeMemberRole(
         targetId: target.id,
         metadata: { from: target.role, to: newRole },
       });
+      changed = true;
     }
     return succeed({ txid: await currentTxid(tx) });
   });
+  // After the commit: the role decides which teams and people the shapes of this member may hold.
+  if (result.ok && changed) accessBus?.accessChanged(actor.workspaceId, [memberId]);
+  return result;
 }
 
 /**
@@ -192,11 +199,13 @@ export async function setMemberActive(
   actor: Actor,
   memberId: string,
   active: boolean,
+  accessBus?: AccessNotifier,
 ): Promise<ServiceResult<{ txid: number }>> {
   if (!canManageMembers(actor)) return refuse('forbidden', 403);
   if (!isUuid(memberId)) return refuse('not_found', 404);
 
-  return orm.transaction(async (tx) => {
+  let changed = false;
+  const result = await orm.transaction(async (tx) => {
     await lockWorkspace(tx, actor.workspaceId);
     const target = await lockTarget(tx, actor.workspaceId, memberId);
     if (!target) return refuse('not_found', 404);
@@ -232,9 +241,13 @@ export async function setMemberActive(
         targetId: target.id,
         metadata: { role: target.role },
       });
+      changed = true;
     }
     return succeed({ txid: await currentTxid(tx) });
   });
+  // After the commit: a deactivated member's open requests end (their sessions are revoked, the next one is 401).
+  if (result.ok && changed) accessBus?.accessChanged(actor.workspaceId, [memberId]);
+  return result;
 }
 
 /** The caller edits their own name, handle, language or time zone. Nothing else about a member is a profile field. */

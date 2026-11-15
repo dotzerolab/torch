@@ -24,6 +24,7 @@ import {
 import type { Orm } from '../db.ts';
 import type { Mailer, MailMessage } from '../mail/mailer.ts';
 import type { ActorResolver } from '../permissions/load-actor.ts';
+import type { AccessNotifier } from '../sync/access-bus.ts';
 import { isUuid } from '../util/uuid.ts';
 import { renderInviteEmail } from './email.ts';
 import {
@@ -45,6 +46,8 @@ export type InviteRouteDeps = {
   appUrl: string;
   trustProxy: boolean;
   now?: () => Date;
+  /** Ends the open shape requests of the cookie an accepted invite replaces, and of a returning member. */
+  accessBus?: AccessNotifier;
 };
 
 /** Public routes: calls per client (one address, or one /64 for IPv6) and window; preview and accept share one budget. */
@@ -254,6 +257,7 @@ export function createInviteRoutes(deps: InviteRouteDeps): Hono {
       now: at,
       userAgent,
       revokeSessionToken: readSessionToken(c.req.raw, deps.appUrl),
+      accessBus: deps.accessBus,
     });
     if (!result.ok) return failure(c, result.code, result.status);
 

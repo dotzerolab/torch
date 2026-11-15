@@ -4,6 +4,7 @@ import { memberRoleInput, profileUpdateInput } from '@torch/shared/mutations/adm
 import { Hono } from 'hono';
 import type { Orm } from '../db.ts';
 import type { ActorResolver } from '../permissions/load-actor.ts';
+import type { AccessNotifier } from '../sync/access-bus.ts';
 import {
   actorOfRequest,
   adminFailure,
@@ -13,7 +14,7 @@ import {
 } from '../util/admin-http.ts';
 import { changeMemberRole, listMembers, setMemberActive, updateOwnProfile } from './service.ts';
 
-export type MemberRouteDeps = { orm: Orm; auth: ActorResolver };
+export type MemberRouteDeps = { orm: Orm; auth: ActorResolver; accessBus?: AccessNotifier };
 
 /**
  * `GET /w/:ws/members` -> `{ members }` (owners and admins);
@@ -37,7 +38,13 @@ export function createMemberRoutes(deps: MemberRouteDeps): Hono {
     const input = memberRoleInput.safeParse(json.body);
     if (!input.success) return invalidInput(input.error.issues);
     return respond(
-      await changeMemberRole(deps.orm, actor, c.req.param('memberId'), input.data.role),
+      await changeMemberRole(
+        deps.orm,
+        actor,
+        c.req.param('memberId'),
+        input.data.role,
+        deps.accessBus,
+      ),
       (value) => value,
     );
   });
@@ -50,7 +57,7 @@ export function createMemberRoutes(deps: MemberRouteDeps): Hono {
       const actor = await actorOfRequest(c, deps.auth);
       if (actor instanceof Response) return actor;
       return respond(
-        await setMemberActive(deps.orm, actor, c.req.param('memberId'), active),
+        await setMemberActive(deps.orm, actor, c.req.param('memberId'), active, deps.accessBus),
         (value) => value,
       );
     });

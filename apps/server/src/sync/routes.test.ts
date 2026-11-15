@@ -1,6 +1,6 @@
-import { ELECTRIC_PROTOCOL_QUERY_PARAMS } from '@electric-sql/client';
+import { ELECTRIC_PROTOCOL_QUERY_PARAMS, Shape, ShapeStream } from '@electric-sql/client';
 import type { Brand } from '@torch/shared/brand';
-import { issueRelation, label, member, teamMember } from '@torch/shared/db/schema';
+import { issue, issueRelation, label, member, teamMember } from '@torch/shared/db/schema';
 import { and, eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../app.ts';
@@ -18,6 +18,7 @@ import {
   TEST_MEMBER_HEADER,
   TEST_ORIGIN,
 } from '../test/header-actor-resolver.ts';
+import { type AccessBus, createAccessBus } from './access-bus.ts';
 import { SHAPE_CACHE_CONTROL, SYNC_FORWARDED_PARAMS } from './routes.ts';
 import { MEMBER_COLUMNS } from './shapes.ts';
 
@@ -72,7 +73,7 @@ const emptyShape = () =>
     headers: { 'content-type': 'application/json', 'electric-handle': 'h-1' },
   });
 
-function buildApp(db: Db, fetchUpstream?: typeof fetch) {
+function buildApp(db: Db, fetchUpstream?: typeof fetch, accessBus?: AccessBus) {
   return createApp({
     brand,
     db,
@@ -80,7 +81,20 @@ function buildApp(db: Db, fetchUpstream?: typeof fetch) {
     auth: headerActorResolver(db.orm),
     config: TEST_APP_CONFIG,
     fetchUpstream,
+    accessBus,
   });
+}
+
+/** An Electric that never answers until the proxy ends the request: the open long-poll. */
+function hangingUpstream() {
+  return fakeUpstream(
+    (call) =>
+      new Promise<Response>((_resolve, reject) => {
+        call.init?.signal?.addEventListener('abort', () =>
+          reject(new DOMException('aborted', 'AbortError')),
+        );
+      }),
+  );
 }
 
 const as = (memberId: string | undefined, init: RequestInit = {}): RequestInit => ({
@@ -594,6 +608,181 @@ describe.skipIf(!databaseUrl)('GET /api/sync (shape proxy, fake Electric)', () =
       expect(signal?.aborted).toBe(false);
       controller.abort();
       expect(signal?.aborted).toBe(true);
+    });
+  });
+
+  describe('access changes', () => {
+    it('a long-poll whose person loses access is answered like a timeout of the wait: up to date at the offset it holds', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const bus = createAccessBus();
+        const upstream = hangingUpstream();
+        const app = buildApp(db, upstream.fetchUpstream, bus);
+
+        const pending = get(
+          app,
+          `${issuesPath(f, 'eng')}?offset=5_1&handle=h-1&cursor=77&live=true`,
+          as(f.members.member.id),
+        );
+        await vi.waitFor(() => expect(bus.tracked()).toBe(1));
+        bus.accessChanged(f.workspaceId, [f.members.member.id]);
+        const res = await pending;
+
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual([{ headers: { control: 'up-to-date' } }]);
+        // Everything the pinned client needs on a live answer, and nothing that makes it drop its shape.
+        expect(res.headers.get('electric-handle')).toBe('h-1');
+        expect(res.headers.get('electric-offset')).toBe('5_1');
+        expect(res.headers.get('electric-cursor')).toBe('77');
+        expect(res.headers.get('electric-up-to-date')).toBe('');
+        expect(res.headers.get('cache-control')).toBe(SHAPE_CACHE_CONTROL);
+        expect(res.headers.get('vary')?.split(/\s*,\s*/)).toContain('Cookie');
+        expect(res.headers.get('etag')).toBeNull();
+        expect(bus.tracked()).toBe(0);
+      });
+    });
+
+    it('a first long-poll without a cursor still gets one, and a request that was not waiting gets a plain 503', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const bus = createAccessBus();
+        const upstream = hangingUpstream();
+        const app = buildApp(db, upstream.fetchUpstream, bus);
+        const as_ = as(f.members.member.id);
+
+        const first = get(app, `${issuesPath(f, 'eng')}?offset=0_0&handle=h-1&live=true`, as_);
+        const initial = get(app, `${issuesPath(f, 'eng')}?offset=-1`, as_);
+        const catchUp = get(app, `${issuesPath(f, 'eng')}?offset=3_2&handle=h-1`, as_);
+        const sse = get(app, `${issuesPath(f, 'eng')}?offset=3_2&handle=h-1&live_sse=true`, as_);
+        await vi.waitFor(() => expect(bus.tracked()).toBe(4));
+        bus.accessChanged(f.workspaceId, 'all');
+
+        const answered = await first;
+        expect(answered.status).toBe(200);
+        expect(answered.headers.get('electric-cursor')).toBeTruthy();
+        for (const request of [initial, catchUp, sse]) {
+          const res = await request;
+          expect(res.status).toBe(503);
+          expect(await res.json()).toEqual({ error: 'access_changed' });
+          expect(res.headers.get('cache-control')).toBe(SHAPE_CACHE_CONTROL);
+          expect(res.headers.get('electric-handle')).toBeNull();
+        }
+      });
+    });
+
+    it("another member's open request is left alone", async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const bus = createAccessBus();
+        const upstream = hangingUpstream();
+        const app = buildApp(db, upstream.fetchUpstream, bus);
+        const other = get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.owner.id));
+        await vi.waitFor(() => expect(bus.tracked()).toBe(1));
+
+        bus.accessChanged(f.workspaceId, [f.members.member.id]);
+
+        expect(bus.tracked()).toBe(1);
+        bus.accessChanged(f.workspaceId, 'all');
+        expect((await other).status).toBe(503);
+      });
+    });
+
+    it('a client that goes away is not answered and is unregistered', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const bus = createAccessBus();
+        const upstream = hangingUpstream();
+        const app = buildApp(db, upstream.fetchUpstream, bus);
+        const controller = new AbortController();
+
+        const pending = get(
+          app,
+          `${issuesPath(f, 'eng')}?offset=-1`,
+          as(f.members.member.id, { signal: controller.signal }),
+        );
+        await vi.waitFor(() => expect(bus.tracked()).toBe(1));
+        controller.abort();
+        await pending.catch(() => undefined);
+
+        await vi.waitFor(() => expect(bus.tracked()).toBe(0));
+      });
+    });
+
+    it('unregister on normal completion: after the body, a body-less answer, a refused status and a failure', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const bus = createAccessBus();
+        const answers: Array<() => Response | Promise<Response>> = [
+          emptyShape,
+          () => new Response(null, { status: 204, headers: { 'electric-handle': 'h-1' } }),
+          () => new Response('nope', { status: 401 }),
+          () => {
+            throw new TypeError('fetch failed');
+          },
+        ];
+        let call = 0;
+        const upstream = fakeUpstream(() => (answers[call++] as () => Response)());
+        const app = buildApp(db, upstream.fetchUpstream, bus);
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+
+        for (let i = 0; i < answers.length; i++) {
+          const res = await get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.member.id));
+          await res.text();
+          expect(bus.tracked(), `after answer ${i}`).toBe(0);
+        }
+      });
+    });
+
+    it('an answer that is still streaming when access changes is cut off, and unregisters', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const bus = createAccessBus();
+        const upstream = fakeUpstream((call) => {
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('[{"key":"1"}'));
+              call.init?.signal?.addEventListener('abort', () =>
+                controller.error(new DOMException('aborted', 'AbortError')),
+              );
+            },
+          });
+          return new Response(body, {
+            status: 200,
+            headers: { 'content-type': 'application/json', 'electric-handle': 'h-1' },
+          });
+        });
+        const app = buildApp(db, upstream.fetchUpstream, bus);
+
+        const res = await get(
+          app,
+          `${issuesPath(f, 'eng')}?offset=-1&live_sse=true`,
+          as(f.members.member.id),
+        );
+        const reader = res.body?.getReader();
+        expect((await reader?.read())?.done).toBe(false);
+        expect(bus.tracked()).toBe(1);
+        bus.accessChanged(f.workspaceId, [f.members.member.id]);
+
+        await expect(reader?.read()).rejects.toThrow();
+        expect(bus.tracked()).toBe(0);
+      });
+    });
+
+    it('a reader that cancels the answer unregisters it', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const bus = createAccessBus();
+        const upstream = fakeUpstream(
+          () => new Response(new ReadableStream<Uint8Array>({ start() {} }), { status: 200 }),
+        );
+        const app = buildApp(db, upstream.fetchUpstream, bus);
+
+        const res = await get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.member.id));
+        expect(bus.tracked()).toBe(1);
+        await res.body?.cancel();
+
+        expect(bus.tracked()).toBe(0);
+      });
     });
   });
 
@@ -1167,7 +1356,7 @@ describe.skipIf(!databaseUrl || !electricUrl)('GET /api/sync (real Electric)', (
   };
 
   async function removeWorkspace(db: Db, workspaceId: string) {
-    for (const table of ['issue', 'workflow_state', 'team_member', 'team', 'member']) {
+    for (const table of ['audit_log', 'issue', 'workflow_state', 'team_member', 'team', 'member']) {
       await db.pool.query(`delete from ${table} where workspace_id = $1`, [workspaceId]);
     }
     await db.pool.query('delete from workspace where id = $1', [workspaceId]);
@@ -1190,14 +1379,23 @@ describe.skipIf(!databaseUrl || !electricUrl)('GET /api/sync (real Electric)', (
     return messages.filter((m) => m.value).map((m) => m.value as Record<string, unknown>);
   }
 
-  const realApp = (db: Db) =>
+  const realApp = (db: Db, accessBus?: AccessBus) =>
     createApp({
       brand,
       db,
       electric: { url: electricUrl as string, secret: electricSecret },
       auth: headerActorResolver(db.orm),
       config: TEST_APP_CONFIG,
+      accessBus,
     });
+
+  async function waitUntil(condition: () => boolean, ms: number, what: string) {
+    const deadline = Date.now() + ms;
+    while (!condition()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
 
   it('real Electric returns only ENG rows for the ENG shape, without description', async () => {
     await withDevWorkspace(async (db, f) => {
@@ -1388,6 +1586,102 @@ describe.skipIf(!databaseUrl || !electricUrl)('GET /api/sync (real Electric)', (
       expect(change?.headers.operation).toBe('insert');
       expect(change?.value?.member_id).toBe(f.members.outsider.id);
       expect(elapsed).toBeLessThan(2000);
+    });
+  }, 30_000);
+
+  it('real Electric: the real client carries on after an access change ends its open long-poll', async () => {
+    await withDevWorkspace(async (db, f) => {
+      const bus = createAccessBus();
+      const app = realApp(db, bus);
+      const who = f.members.member.id;
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const stop = new AbortController();
+      const answers: string[] = [];
+      const stream = new ShapeStream({
+        url: `http://localhost${issuesPath(f, 'ops')}`,
+        signal: stop.signal,
+        fetchClient: async (input, init) => {
+          const headers = new Headers(init?.headers);
+          headers.set(TEST_MEMBER_HEADER, who);
+          const res = await app.fetch(new Request(input, { ...init, headers }));
+          void res
+            .clone()
+            .text()
+            .then((body) => answers.push(`${res.status} ${body.slice(0, 60)}`));
+          return res;
+        },
+      });
+      const shape = new Shape(stream);
+      try {
+        expect((await shape.rows).length).toBe(f.issues.ops.length);
+        await waitUntil(() => bus.tracked() > 0, 5000, 'the live request to open');
+
+        answers.length = 0;
+        const changedAt = Date.now();
+        bus.accessChanged(f.workspaceId, [who]);
+        await db.orm.insert(issue).values({
+          workspaceId: f.workspaceId,
+          teamId: f.teams.ops.id,
+          number: 99,
+          title: 'After the change',
+          stateId: f.states.ops.backlog.id,
+          creatorId: f.members.owner.id,
+        });
+
+        await waitUntil(
+          () => shape.currentRows.some((row) => row.title === 'After the change'),
+          8000,
+          'the new issue to reach the client',
+        );
+        // The open request really was ended by the change (the long-poll would have waited 20 s), the client asked
+        // again at once, and it neither complained about the proxy nor fell into a retry loop on the way.
+        expect(answers).toContain('200 [{"headers":{"control":"up-to-date"}}]');
+        expect(Date.now() - changedAt).toBeLessThan(2000);
+        expect(warn.mock.calls.filter((call) => String(call[0]).includes('[Electric]'))).toEqual(
+          [],
+        );
+      } finally {
+        stop.abort();
+      }
+    });
+  }, 30_000);
+
+  it('real Electric: no rows after revoke - a request opened before the removal never sees a later row', async () => {
+    await withDevWorkspace(async (db, f) => {
+      const bus = createAccessBus();
+      const app = realApp(db, bus);
+      const who = as(f.members.member.id);
+      const initial = await get(app, `${issuesPath(f, 'ops')}?offset=-1`, who);
+      expect((await rows(initial.clone())).length).toBe(f.issues.ops.length);
+      const handle = initial.headers.get('electric-handle');
+      const offset = initial.headers.get('electric-offset');
+
+      const live = get(app, `${issuesPath(f, 'ops')}?offset=${offset}&handle=${handle}&live=true`, {
+        ...who,
+        signal: AbortSignal.timeout(20_000),
+      });
+      await waitUntil(() => bus.tracked() > 0, 5000, 'the live request to open');
+
+      const removed = await get(
+        app,
+        `/api/w/${f.workspaceId}/teams/${f.teams.ops.id}/members/${f.members.member.id}`,
+        as(f.members.owner.id, { method: 'DELETE', headers: { origin: TEST_ORIGIN } }),
+      );
+      expect(removed.status).toBe(200);
+      await db.orm.insert(issue).values({
+        workspaceId: f.workspaceId,
+        teamId: f.teams.ops.id,
+        number: 99,
+        title: 'Created after the removal',
+        stateId: f.states.ops.backlog.id,
+        creatorId: f.members.owner.id,
+      });
+
+      const liveRes = await live;
+      // Ended by the removal: nothing but "up to date", never the row created after it.
+      expect(await liveRes.text()).toBe('[{"headers":{"control":"up-to-date"}}]');
+      const next = await get(app, `${issuesPath(f, 'ops')}?offset=${offset}&handle=${handle}`, who);
+      expect(next.status).toBe(404);
     });
   }, 30_000);
 });

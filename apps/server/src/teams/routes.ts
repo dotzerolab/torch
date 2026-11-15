@@ -4,6 +4,7 @@ import { teamCreateInput, teamMemberInput, teamUpdateInput } from '@torch/shared
 import { Hono } from 'hono';
 import type { Orm } from '../db.ts';
 import type { ActorResolver } from '../permissions/load-actor.ts';
+import type { AccessNotifier } from '../sync/access-bus.ts';
 import {
   actorOfRequest,
   adminFailure,
@@ -19,7 +20,7 @@ import {
   updateTeam,
 } from './service.ts';
 
-export type TeamRouteDeps = { orm: Orm; auth: ActorResolver };
+export type TeamRouteDeps = { orm: Orm; auth: ActorResolver; accessBus?: AccessNotifier };
 
 /**
  * `POST /w/:ws/teams` `{ key, name, private? }` -> 201 `{ teamId, txid }`;
@@ -49,7 +50,7 @@ export function createTeamRoutes(deps: TeamRouteDeps): Hono {
     const input = teamUpdateInput.safeParse(json.body);
     if (!input.success) return invalidInput(input.error.issues);
     return respond(
-      await updateTeam(deps.orm, actor, c.req.param('teamId'), input.data),
+      await updateTeam(deps.orm, actor, c.req.param('teamId'), input.data, deps.accessBus),
       (value) => value,
     );
   });
@@ -62,7 +63,13 @@ export function createTeamRoutes(deps: TeamRouteDeps): Hono {
     const input = teamMemberInput.safeParse(json.body);
     if (!input.success) return invalidInput(input.error.issues);
     return respond(
-      await addTeamMember(deps.orm, actor, c.req.param('teamId'), input.data.memberId),
+      await addTeamMember(
+        deps.orm,
+        actor,
+        c.req.param('teamId'),
+        input.data.memberId,
+        deps.accessBus,
+      ),
       (value) => value,
     );
   });
@@ -71,7 +78,13 @@ export function createTeamRoutes(deps: TeamRouteDeps): Hono {
     const actor = await actorOfRequest(c, deps.auth);
     if (actor instanceof Response) return actor;
     return respond(
-      await removeTeamMember(deps.orm, actor, c.req.param('teamId'), c.req.param('memberId')),
+      await removeTeamMember(
+        deps.orm,
+        actor,
+        c.req.param('teamId'),
+        c.req.param('memberId'),
+        deps.accessBus,
+      ),
       (value) => value,
     );
   });
