@@ -5,7 +5,7 @@ import { and, eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../app.ts';
 import { createDb, type Db } from '../db.ts';
-import { loadActor } from '../permissions/load-actor.ts';
+import { loadClientActor } from '../permissions/load-actor.ts';
 import {
   addMember,
   createWorkspaceFixture,
@@ -519,7 +519,7 @@ describe.skipIf(!databaseUrl)('GET /api/sync (shape proxy, fake Electric)', () =
       const upstream = fakeUpstream(emptyShape);
       const wrongWorkspaceResolver = {
         // A buggy resolver that ignores the workspace in the URL.
-        resolveActor: async () => loadActor(db.orm, b.workspaceId, b.members.owner.id),
+        resolveActor: async () => loadClientActor(db.orm, b.workspaceId, b.members.owner.id, 'web'),
       };
       const app = createApp({
         brand,

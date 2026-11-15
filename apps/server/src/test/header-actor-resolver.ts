@@ -3,7 +3,7 @@
 
 import type { Orm } from '../db.ts';
 import type { ActorResolver } from '../permissions/load-actor.ts';
-import { loadActor } from '../permissions/load-actor.ts';
+import { loadClientActor } from '../permissions/load-actor.ts';
 
 export const TEST_MEMBER_HEADER = 'x-test-member';
 
@@ -16,7 +16,7 @@ export function headerActorResolver(orm: Orm): ActorResolver {
   return {
     async resolveActor(req, workspaceId) {
       const memberId = req.headers.get(TEST_MEMBER_HEADER);
-      return memberId ? loadActor(orm, workspaceId, memberId) : null;
+      return memberId ? loadClientActor(orm, workspaceId, memberId, 'web') : null;
     },
   };
 }

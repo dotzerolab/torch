@@ -32,7 +32,11 @@ describe.skipIf(!databaseUrl)('createSessionActorResolver', () => {
 
       const actor = await t.auth.resolveActor(withCookie(cookie), f.workspaceId);
 
-      expect(actor).toEqual(await loadActor(db.orm, f.workspaceId, f.members.member.id));
+      // A session is the `web` client; the rest is the actor as the database says.
+      expect(actor).toEqual({
+        ...(await loadActor(db.orm, f.workspaceId, f.members.member.id)),
+        client: 'web',
+      });
       expect(actor).toMatchObject({ role: 'member', memberId: f.members.member.id });
     });
   });
