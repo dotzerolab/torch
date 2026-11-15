@@ -1049,6 +1049,114 @@ describe.skipIf(!databaseUrl)('GET /api/sync members and team members (fake Elec
   });
 });
 
+const ownMembershipsPath = (f: WorkspaceFixture) =>
+  `/api/sync/w/${f.workspaceId}/me/team-memberships`;
+
+describe.skipIf(!databaseUrl)(
+  'GET /api/sync/w/:workspaceId/me/team-memberships (fake Electric)',
+  () => {
+    it('the shape is built from the actor: member_id and where in the query are ignored', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const upstream = fakeUpstream(emptyShape);
+        const app = buildApp(db, upstream.fetchUpstream);
+        const hostile = new URLSearchParams({
+          offset: '-1',
+          member_id: f.members.owner.id,
+          memberId: f.members.owner.id,
+          where: '1=1',
+          table: 'member',
+          'params[2]': f.members.owner.id,
+        });
+
+        const res = await get(app, `${ownMembershipsPath(f)}?${hostile}`, as(f.members.guest.id));
+
+        expect(res.status).toBe(200);
+        expect(upstream.calls).toHaveLength(1);
+        const q = upstream.calls[0]?.url.searchParams;
+        expect(q?.getAll('table')).toEqual(['team_member']);
+        expect(q?.getAll('where')).toEqual(['workspace_id = $1 AND member_id = $2']);
+        expect(sentParams(upstream.calls[0])).toEqual([f.workspaceId, f.members.guest.id]);
+        expect(q?.get('columns')).toBe('team_id,member_id,workspace_id,created_at');
+        expect(q?.getAll('secret')).toEqual([SECRET]);
+        expect(res.headers.get('cache-control')).toBe('private, no-cache');
+        expect(res.headers.get('vary')).toContain('Cookie');
+      });
+    });
+
+    it('answers 401 without a session and 404 for a malformed workspace id, Electric never called', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const upstream = fakeUpstream(emptyShape);
+        const app = buildApp(db, upstream.fetchUpstream);
+
+        const anonymous = await get(app, `${ownMembershipsPath(f)}?offset=-1`);
+        const malformed = await get(
+          app,
+          '/api/sync/w/not-a-uuid/me/team-memberships?offset=-1',
+          as(f.members.member.id),
+        );
+
+        expect(anonymous.status).toBe(401);
+        expect(malformed.status).toBe(404);
+        // The same body as the `/teams` route gives a malformed id.
+        const teamsMalformed = await get(
+          app,
+          '/api/sync/w/not-a-uuid/teams?offset=-1',
+          as(f.members.member.id),
+        );
+        expect(await malformed.json()).toEqual(await teamsMalformed.json());
+        expect(upstream.calls).toHaveLength(0);
+      });
+    });
+
+    it('a deactivated member and an actor of another workspace -> 401, Electric never called', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const other = await createWorkspaceFixture(db.orm);
+        await db.orm
+          .update(member)
+          .set({ deactivatedAt: new Date() })
+          .where(eq(member.id, f.members.member.id));
+        const upstream = fakeUpstream(emptyShape);
+        const app = buildApp(db, upstream.fetchUpstream);
+
+        const deactivated = await get(
+          app,
+          `${ownMembershipsPath(f)}?offset=-1`,
+          as(f.members.member.id),
+        );
+        const foreign = await get(
+          app,
+          `${ownMembershipsPath(f)}?offset=-1`,
+          as(other.members.owner.id),
+        );
+
+        expect(deactivated.status).toBe(401);
+        expect(foreign.status).toBe(401);
+        expect(upstream.calls).toHaveLength(0);
+      });
+    });
+
+    it('only GET is served', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const upstream = fakeUpstream(emptyShape);
+        const app = buildApp(db, upstream.fetchUpstream);
+
+        const res = await get(
+          app,
+          ownMembershipsPath(f),
+          as(f.members.owner.id, { method: 'POST', headers: { origin: TEST_ORIGIN } }),
+        );
+
+        expect(res.status).toBeGreaterThanOrEqual(404);
+        expect(upstream.calls).toHaveLength(0);
+      });
+    });
+  },
+);
+
 // Real Electric reads the dev database (`torch`) itself, so these tests create their fixture THERE (not in a
 // temp database) and remove it again afterwards.
 describe.skipIf(!databaseUrl || !electricUrl)('GET /api/sync (real Electric)', () => {
@@ -1217,6 +1325,69 @@ describe.skipIf(!databaseUrl || !electricUrl)('GET /api/sync (real Electric)', (
         );
       }
       expect(guestOps.status).toBe(404);
+    });
+  }, 30_000);
+
+  it('real Electric: a guest gets only their own team rows, a member their own in several teams', async () => {
+    await withDevWorkspace(async (db, f) => {
+      const app = realApp(db);
+
+      const guest = await rows(
+        await get(app, `${ownMembershipsPath(f)}?offset=-1`, as(f.members.guest.id)),
+      );
+      const member = await rows(
+        await get(app, `${ownMembershipsPath(f)}?offset=-1`, as(f.members.member.id)),
+      );
+
+      expect(guest.map((r) => [r.team_id, r.member_id])).toEqual([
+        [f.teams.eng.id, f.members.guest.id],
+      ]);
+      expect(new Set(member.map((r) => r.team_id))).toEqual(
+        new Set([f.teams.eng.id, f.teams.ops.id]),
+      );
+      for (const row of [...guest, ...member]) {
+        expect(Object.keys(row).sort()).toEqual(
+          ['created_at', 'member_id', 'team_id', 'workspace_id'].sort(),
+        );
+      }
+    });
+  }, 30_000);
+
+  it('real Electric: joining a private team reaches the open live request in under 2 s', async () => {
+    await withDevWorkspace(async (db, f) => {
+      const app = realApp(db);
+      const who = as(f.members.outsider.id);
+      const initial = await get(app, `${ownMembershipsPath(f)}?offset=-1`, who);
+      expect(await rows(initial.clone())).toEqual([]);
+      const handle = initial.headers.get('electric-handle');
+      const offset = initial.headers.get('electric-offset');
+      expect(handle).toBeTruthy();
+
+      const live = get(
+        app,
+        `${ownMembershipsPath(f)}?offset=${offset}&handle=${handle}&live=true`,
+        {
+          ...who,
+          signal: AbortSignal.timeout(20_000),
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const started = Date.now();
+      await db.orm.insert(teamMember).values({
+        workspaceId: f.workspaceId,
+        teamId: f.teams.ops.id,
+        memberId: f.members.outsider.id,
+      });
+
+      const liveRes = await live;
+      const elapsed = Date.now() - started;
+      const joined = (await liveRes.json()) as Message[];
+      const change = joined.find((m) => m.value?.team_id === f.teams.ops.id);
+
+      expect(liveRes.status).toBe(200);
+      expect(change?.headers.operation).toBe('insert');
+      expect(change?.value?.member_id).toBe(f.members.outsider.id);
+      expect(elapsed).toBeLessThan(2000);
     });
   }, 30_000);
 });

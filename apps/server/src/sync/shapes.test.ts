@@ -5,6 +5,7 @@ import {
   issueDetailShape,
   MEMBER_COLUMNS,
   membersShape,
+  ownMembershipShape,
   type ShapeDefinition,
   teamDataShape,
   teamMembersShape,
@@ -356,5 +357,26 @@ describe('per-issue shapes', () => {
       'created_at',
     ]);
     expectParameterised(shape);
+  });
+});
+
+describe('ownMembershipShape', () => {
+  it("is the actor's own team_member rows, bound by the actor and nothing else", () => {
+    const shape = ownMembershipShape(actor('member', [TEAM_A]));
+
+    expect(shape.table).toBe('team_member');
+    expect(shape.where).toBe('workspace_id = $1 AND member_id = $2');
+    expect(shape.params).toEqual([WORKSPACE, SELF]);
+    expect(shape.columns).toEqual(['team_id', 'member_id', 'workspace_id', 'created_at']);
+    expectParameterised(shape);
+  });
+
+  it('is the same shape for every role: a guest sees only their own rows too', () => {
+    for (const role of ['owner', 'admin', 'member', 'guest'] as const) {
+      const shape = ownMembershipShape(actor(role, [TEAM_A, TEAM_B]));
+
+      expect(shape.where, role).toBe('workspace_id = $1 AND member_id = $2');
+      expect(shape.params, role).toEqual([WORKSPACE, SELF]);
+    }
   });
 });

@@ -13,6 +13,7 @@ import {
   issueActivityShape,
   issueDetailShape,
   membersShape,
+  ownMembershipShape,
   type ShapeDefinition,
   type TeamDataKind,
   teamDataShape,
@@ -161,6 +162,16 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
     const actor = await authenticate(c.req.raw, workspaceId);
     if (!actor) return unauthenticated();
     return proxy(c.req.raw, membersShape(actor, await loadVisibleMemberIds(orm, actor)));
+  });
+
+  // The actor's own team memberships: the signal that tells an open page its access changed (a private-team join
+  // or removal) without waiting for the next poll of the shapes it already holds.
+  routes.get('/w/:workspaceId/me/team-memberships', async (c) => {
+    const workspaceId = c.req.param('workspaceId');
+    if (!isUuid(workspaceId)) return notFound();
+    const actor = await authenticate(c.req.raw, workspaceId);
+    if (!actor) return unauthenticated();
+    return proxy(c.req.raw, ownMembershipShape(actor));
   });
 
   const teamRoute = (path: string, kind: 'issues' | 'workflow_states' | 'team_members') =>
