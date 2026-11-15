@@ -43,6 +43,9 @@ export function canEditIssues(actor: Actor, team: TeamAccess): boolean {
   return canSeeTeam(actor, team);
 }
 
+/** Creating an issue follows editing: whoever can edit the issues of a team can start one there, a guest included. */
+export const canCreateIssue = canEditIssues;
+
 /** The ids of the teams the actor can see, in the order of `teams`. */
 export function visibleTeamIds(actor: Actor, teams: readonly TeamAccess[]): string[] {
   return teams.filter((team) => canSeeTeam(actor, team)).map((team) => team.id);

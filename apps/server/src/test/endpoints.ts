@@ -364,6 +364,16 @@ export const ENDPOINTS: EndpointCase[] = [
     }),
   ),
 
+  ...TEAMS.map(
+    ({ team: key, label, see }): EndpointCase => ({
+      name: `issues: create (${label})`,
+      method: 'POST',
+      path: (ids) => `${api(ids)}/issues`,
+      body: (ids: Ids) => ({ teamId: ids[key], title: `Created ${ids.uid}` }),
+      ...see,
+    }),
+  ),
+
   // ---- sync shapes ----
   { name: 'sync: teams', method: 'GET', path: (ids) => `${sync(ids)}/teams`, minRole: 'guest' },
   { name: 'sync: members', method: 'GET', path: (ids) => `${sync(ids)}/members`, minRole: 'guest' },

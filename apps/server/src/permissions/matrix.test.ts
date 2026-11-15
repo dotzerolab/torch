@@ -13,6 +13,7 @@ import {
   type Actor,
   canAddSelfToTeam,
   canChangeMemberRole,
+  canCreateIssue,
   canDeactivateMember,
   canEditIssues,
   canGrantRole,
@@ -164,6 +165,11 @@ export const MATRIX: Record<ObjectType, MatrixRow[]> = {
     row('edit', true, true, true, false, 'not in team, public'),
     NOBODY('edit', 'not in team, private'),
     NOBODY('edit', 'other workspace'),
+    // Creating an issue follows editing: a guest creates issues in the teams they belong to, like everybody else.
+    row('create', true, true, true, true, 'in team'),
+    row('create', true, true, true, false, 'not in team, public'),
+    NOBODY('create', 'not in team, private'),
+    NOBODY('create', 'other workspace'),
   ],
 };
 
@@ -289,6 +295,7 @@ const EVALUATORS: Record<ObjectType, Record<string, Evaluate>> = {
   issue: {
     view: (s) => canSeeTeam(s.actor, s.team),
     edit: (s) => canEditIssues(s.actor, s.team),
+    create: (s) => canCreateIssue(s.actor, s.team),
   },
 };
 
@@ -465,6 +472,9 @@ const HTTP_ROWS: HttpRow[] = [
   http('issues: update (public team)', 200, 200, 200, 200),
   http('issues: update (private team)', 200, 404, 200, 404),
   http('issues: update (public team with the owner only)', 200, 200, 200, 404),
+  http('issues: create (public team)', 201, 201, 201, 201),
+  http('issues: create (private team)', 201, 404, 201, 404),
+  http('issues: create (public team with the owner only)', 201, 201, 201, 404),
 
   // Sync shapes: every role reads the team list and the member list (filtered by the server); a team's own shapes
   // follow the visibility of the team.
