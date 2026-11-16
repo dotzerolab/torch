@@ -195,3 +195,22 @@ describe('startMembershipWatcher', () => {
     expect(vi.isMockFunction(stop)).toBe(false);
   });
 });
+
+describe('persisted teams the person no longer sees', () => {
+  it('forgets the device copy of every team missing from the first answer of `teams`', () => {
+    const teams = fakeCollection(['t1']);
+    const quiet = fakeCollection([]);
+    const registry = {
+      get: (key: ShapeKey) => (key.kind === 'teams' ? teams.collection : quiet.collection),
+      restart() {},
+      dropTeam() {},
+      reinstateTeam() {},
+      isGone: () => false,
+      subscribe: () => () => {},
+    } as WatcherRegistry;
+    const forget = vi.fn();
+    const stop = startMembershipWatcher('w1', 'me', registry, forget);
+    expect(forget).toHaveBeenCalledWith('w1', new Set(['t1']));
+    stop();
+  });
+});

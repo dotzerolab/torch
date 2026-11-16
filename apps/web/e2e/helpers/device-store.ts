@@ -37,9 +37,10 @@ export function persistedRowCount(
         .catch(() => []);
       let total = 0;
       for (const { table_name } of registered) {
-        const [row] = await database.execute(
-          `SELECT COUNT(*) AS n FROM "${table_name.replaceAll('"', '""')}"`,
-        );
+        // A table dropped between the two reads (a delete is running) holds no rows.
+        const [row] = await database
+          .execute(`SELECT COUNT(*) AS n FROM "${table_name.replaceAll('"', '""')}"`)
+          .catch(() => [{ n: 0 }]);
         total += Number(row.n);
       }
       return total;

@@ -298,6 +298,30 @@ export async function deleteTeamRows(workspaceId: string, teamId: string): Promi
   await readStored(workspaceId, database);
 }
 
+/** Deletes the persisted shapes of every team whose id is not in `keep`: the device copy of teams that are gone. */
+export async function deleteTeamsExcept(workspaceId: string, keep: Set<string>): Promise<void> {
+  const open = stores.get(workspaceId);
+  if (!open) return;
+  const { database } = await open;
+  let registered: ReadonlyArray<{ collection_id: string }>;
+  try {
+    registered = await database.execute('SELECT collection_id FROM collection_registry');
+  } catch {
+    return;
+  }
+  const gone = new Set<string>();
+  for (const kind of TEAM_COLLECTION_KINDS) {
+    const prefix = `${kind}-${workspaceId}-`;
+    for (const { collection_id } of registered) {
+      if (!collection_id.startsWith(prefix)) continue;
+      // Workspace and team ids are fixed-length UUIDs; what follows is a restart suffix.
+      const teamId = collection_id.slice(prefix.length, prefix.length + 36);
+      if (!keep.has(teamId)) gone.add(teamId);
+    }
+  }
+  for (const teamId of gone) await deleteTeamRows(workspaceId, teamId);
+}
+
 /**
  * A shape started over (the person's access changed): what its old instances persisted may hold rows the person can
  * no longer see, and the next page load would show them first. Every instance of the shape but `keepId` goes.

@@ -2,6 +2,8 @@
 // asking, so when that changes (a private-team join or removal, a new role, a deactivation) the rows an open page
 // holds may be wrong in both directions: `teams` and `members` start over, and a team that is no longer in `teams`
 // loses its own shapes.
+
+import { deleteTeamsExcept } from './persistence.ts';
 import type { ShapeKey } from './registry.ts';
 import { syncRegistry } from './shapes.ts';
 
@@ -34,6 +36,8 @@ export function startMembershipWatcher(
   workspaceId: string,
   selfId: string,
   registry: WatcherRegistry = syncRegistry as unknown as WatcherRegistry,
+  forgetTeamsExcept: (workspaceId: string, keep: Set<string>) => unknown = (id, keep) =>
+    deleteTeamsExcept(id, keep).catch(() => {}),
 ): () => void {
   let stopped = false;
   const attached = new Map<string, { instance: Watchable; stop: () => void }>();
@@ -80,6 +84,10 @@ export function startMembershipWatcher(
     for (const id of now)
       if (registry.isGone(workspaceId, id)) registry.reinstateTeam(workspaceId, id);
     knownTeams = now;
+    // A team the device still holds rows of but `teams` does not list (access ended while the page was closed): nothing
+    // would ever open its shapes again, so its copy goes now. A stale copy of `teams` itself is corrected later, when
+    // the server's answer removes the team and `dropTeam` runs.
+    forgetTeamsExcept(workspaceId, now);
   }
 
   function attach(kind: 'ownMemberships' | 'members' | 'teams') {
