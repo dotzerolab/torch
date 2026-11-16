@@ -193,3 +193,50 @@ test('guest removed from team loses co-members', async ({ browser, baseURL }, te
   await guest.context.close();
   await owner.context.close();
 });
+
+test('a deleted issue leaves the device copy of a cold shape, resuming from the stored offset', async ({
+  browser,
+  baseURL,
+}, testInfo) => {
+  await restoreDemoLayoutNow();
+  const eng = await engTeamId();
+  const db = createDb(process.env.DATABASE_URL as string);
+  const prefix = `issues-${workspaceId()}-${eng}`;
+  try {
+    await db.pool.query(`delete from issue where team_id = $1 and number >= 900`, [eng]);
+    await db.pool.query(
+      `insert into issue (workspace_id, team_id, number, title, state_id, creator_id)
+       select workspace_id, team_id, 900, 'E2E temporary', state_id, creator_id
+         from issue where team_id = $1 and number = 1`,
+      [eng],
+    );
+    const owner = await open(browser, baseURL, 'owner');
+    await owner.page.goto('/');
+    await expect(owner.page.getByTestId('issue-title-3')).toHaveValue('ENG issue 3');
+    // The cold copy holds the seeded issues and the temporary one.
+    await warm(owner.page, prefix, SEEDED_ISSUES + 1);
+
+    const shapeRequests: string[] = [];
+    owner.page.on('request', (request) => {
+      const url = new URL(request.url());
+      if (url.pathname.endsWith(`/teams/${eng}/issues`)) shapeRequests.push(url.search);
+    });
+    await db.pool.query(`delete from issue where team_id = $1 and number = 900`, [eng]);
+    const deletedAt = Date.now();
+    await expect
+      .poll(() => persistedRowCount(owner.page, workspaceId(), prefix), { timeout: REVOCATION_MS })
+      .toBe(SEEDED_ISSUES);
+    testInfo.annotations.push({
+      type: 'delete-to-store-ms',
+      description: String(Date.now() - deletedAt),
+    });
+    // Resumed, not downloaded again: no request started the shape over (`offset=-1`), and the device copy's own pass
+    // asked from a stored position.
+    expect(shapeRequests.filter((search) => search.includes('offset=-1'))).toEqual([]);
+    expect(shapeRequests.some((search) => /offset=\d+_\d+/.test(search))).toBe(true);
+    await owner.context.close();
+  } finally {
+    await db.pool.query(`delete from issue where team_id = $1 and number >= 900`, [eng]);
+    await db.close();
+  }
+});
