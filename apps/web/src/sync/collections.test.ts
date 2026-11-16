@@ -9,6 +9,7 @@ vi.mock('../api.ts', async (importOriginal) => ({
 
 import { BACKOFF_OPTIONS, handleShapeError, sendIssueMutations } from './collections.ts';
 import type { OutboxWrite } from './outbox.ts';
+import { markSigningOut, resetSigningOut } from './signing-out.ts';
 
 const actions = () => ({ signIn: vi.fn(), dropTeam: vi.fn() });
 const fetchError = (status: number) =>
@@ -20,6 +21,17 @@ describe('handleShapeError', () => {
     handleShapeError(fetchError(401), { workspaceId: 'w' }, a);
     expect(a.signIn).toHaveBeenCalledOnce();
     expect(a.dropTeam).not.toHaveBeenCalled();
+  });
+
+  it('does not send the page to sign-in on a 401 while it signs the person out', () => {
+    markSigningOut();
+    try {
+      const a = actions();
+      handleShapeError(fetchError(401), { workspaceId: 'w' }, a);
+      expect(a.signIn).not.toHaveBeenCalled();
+    } finally {
+      resetSigningOut();
+    }
   });
 
   it('drops the team on a 404 of a team-scoped shape', () => {

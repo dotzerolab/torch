@@ -54,9 +54,15 @@ export const MAX_LIVE_SHAPES = 4;
 /** How long a team's shapes stay open after it left view, when the budget has room. */
 export const PAUSE_AFTER_MS = 30_000;
 
-/** Side effects of the registry the page wires in: what else must go when a team is gone for this person. */
+/** Side effects of the registry the page wires in: what else must go when a shape ends or a team is gone. */
 export type RegistryHooks = {
+  /** Called once the ended instances have stopped: the team is gone for this person. */
   onTeamDropped?: (workspaceId: string, teamId: string) => void;
+  /**
+   * Called once the old instance of a restarted shape has stopped. `baseId` is the shape's id without a restart suffix,
+   * `keepId` the id of the instance that replaces it: whatever else was stored under `baseId` is stale.
+   */
+  onShapeRestarted?: (key: ShapeKey, baseId: string, keepId: string) => void;
 };
 
 export function createRegistry<F extends Factories>(factories: F, hooks: RegistryHooks = {}) {
@@ -75,13 +81,18 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     for (const listener of [...listeners]) listener();
   };
 
-  function dispose(collection: Cleanable) {
+  function dispose(collection: Cleanable): Promise<void> {
     // `dependents: true` also ends the live queries that still read it; they re-bind on the notification. The call
-    // starts at once: the request of the shape must be aborted before its replacement is made.
+    // starts at once: the request of the shape must be aborted before its replacement is made. The promise settles
+    // when the instance has stopped, which is when its device copy may be deleted without a write racing it.
     try {
-      Promise.resolve(collection.cleanup({ dependents: true })).catch(() => {});
+      return Promise.resolve(collection.cleanup({ dependents: true })).then(
+        () => {},
+        () => {},
+      );
     } catch {
       // A collection that cannot be cleaned up right now ends with the page.
+      return Promise.resolve();
     }
   }
 
@@ -115,31 +126,32 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     return entry.collection as CollectionFor<F, K>;
   }
 
-  function replace(key: ShapeKey) {
+  /** Ends the instance of a shape; resolves when it has stopped, or at once when there was none. */
+  function replace(key: ShapeKey): Promise<void> | null {
     const k = keyOf(key);
     clearTimeout(pauseTimers.get(k));
     pauseTimers.delete(k);
     const old = entries.get(k);
-    if (old) dispose(old.collection);
     entries.delete(k);
-    return old !== undefined;
+    return old ? dispose(old.collection) : null;
   }
 
   /** Ends the shape and starts a fresh one the next time it is read; open readers are told to re-bind. */
   function restart(key: ShapeKey) {
-    const existed = replace(key);
+    const stopped = replace(key);
     // A shape nobody read yet has nothing to restart. Create it lazily on the next `get`.
-    if (existed) notify();
+    if (!stopped) return;
+    const keepId = `${baseId(key)}~${(generations.get(keyOf(key)) ?? 0) + 1}`;
+    void stopped.then(() => hooks.onShapeRestarted?.(key, baseId(key), keepId));
+    notify();
   }
 
   /** The team is no longer visible: end its shapes. Readers still on screen get empty collections. */
   function dropTeam(workspaceId: string, teamId: string) {
     gone.add(goneKey(workspaceId, teamId));
-    for (const kind of TEAM_KINDS) {
-      replace({ kind, workspaceId, teamId } as ShapeKey);
-    }
-    // The shapes are ended above; now the device copy and the queued writes of the team go too.
-    hooks.onTeamDropped?.(workspaceId, teamId);
+    const stopped = TEAM_KINDS.map((kind) => replace({ kind, workspaceId, teamId } as ShapeKey));
+    // The shapes are ended; once they have stopped writing, the device copy and the queued writes of the team go too.
+    void Promise.all(stopped).then(() => hooks.onTeamDropped?.(workspaceId, teamId));
     notify();
   }
 
@@ -154,9 +166,14 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     return gone.has(goneKey(workspaceId, teamId));
   }
 
-  /** Ends a team shape nobody reads. It starts again, from scratch, the next time it is read. */
+  /**
+   * Ends a team shape nobody reads. It starts again the next time it is read, under the SAME id: no live query reads it
+   * now, and the device copy it left (rows and resume position) is what the new instance starts from.
+   */
   function pause(key: ShapeKey) {
-    replace(key);
+    if (!replace(key)) return;
+    const k = keyOf(key);
+    generations.set(k, Math.max(0, (generations.get(k) ?? 1) - 1));
   }
 
   /**

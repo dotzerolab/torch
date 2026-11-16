@@ -59,6 +59,13 @@ export type Store = {
 };
 
 const stores = new Map<string, Promise<Store>>();
+// The stores that finished opening: a collection factory is synchronous and asks here whether a device copy exists.
+const openStores = new Map<string, Store>();
+
+/** The device copy of a workspace if it is open now, else null (the page then keeps the shape in memory only). */
+export function persistenceFor(workspaceId: string): PersistedCollectionPersistence | null {
+  return openStores.get(workspaceId)?.persistence ?? null;
+}
 
 /** `base`, `base-journal`, `base.lock` ...: every file the database engine keeps for one database. */
 const belongsTo = (entry: string, base: string) =>
@@ -100,7 +107,7 @@ export function openWorkspaceStore(
     await removeMatching(platform, workspacePrefix(workspaceId), name);
     const database = await platform.openDatabase(name);
     const persistence = createBrowserWASQLitePersistence({ database });
-    return {
+    const store: Store = {
       workspaceId,
       name,
       persistence,
@@ -109,6 +116,8 @@ export function openWorkspaceStore(
         await database.close?.();
       },
     };
+    openStores.set(workspaceId, store);
+    return store;
   })();
   stores.set(workspaceId, opened);
   opened.catch(() => stores.delete(workspaceId));
@@ -119,6 +128,7 @@ export function openWorkspaceStore(
 export async function closeWorkspaceStore(workspaceId: string): Promise<void> {
   const open = stores.get(workspaceId);
   stores.delete(workspaceId);
+  openStores.delete(workspaceId);
   if (open) await open.then((store) => store.close()).catch(() => {});
 }
 
@@ -151,6 +161,46 @@ const TEAM_COLLECTION_KINDS = ['issues', 'workflow-states', 'team-members'] as c
 const quote = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`;
 
 /**
+ * Removes the persisted rows of every collection whose id matches `like` (an SQL LIKE pattern) except `keepId`.
+ * A missing registry means nothing was ever persisted.
+ */
+async function removeCollections(
+  database: BrowserWASQLiteDatabase,
+  like: string,
+  keepId = '',
+): Promise<void> {
+  let registered: ReadonlyArray<{
+    collection_id: string;
+    table_name: string;
+    tombstone_table_name: string;
+  }>;
+  try {
+    registered = await database.execute(
+      'SELECT collection_id, table_name, tombstone_table_name FROM collection_registry WHERE collection_id LIKE ? AND collection_id != ?',
+      [like, keepId],
+    );
+  } catch {
+    return;
+  }
+  for (const row of registered) {
+    await database.execute(`DROP TABLE IF EXISTS ${quote(row.table_name)}`);
+    await database.execute(`DROP TABLE IF EXISTS ${quote(row.tombstone_table_name)}`);
+    for (const table of PER_COLLECTION_TABLES) {
+      await database.execute(`DELETE FROM ${table} WHERE collection_id = ?`, [row.collection_id]);
+    }
+    await database.execute('DELETE FROM collection_registry WHERE collection_id = ?', [
+      row.collection_id,
+    ]);
+  }
+  await database
+    .execute('DELETE FROM cache_generation WHERE physical_id LIKE ? AND physical_id != ?', [
+      like,
+      keepId,
+    ])
+    .catch(() => {});
+}
+
+/**
  * The team is gone for this person: delete the persisted rows of its shapes (issues, workflow states, members) while
  * the other teams of the workspace stay. Collection ids are `<kind>-<workspaceId>-<teamId>` plus a restart suffix;
  * workspace and team ids are fixed-length UUIDs, so a prefix match cannot reach another team.
@@ -160,37 +210,27 @@ export async function deleteTeamRows(workspaceId: string, teamId: string): Promi
   if (!open) return;
   const { database } = await open;
   for (const kind of TEAM_COLLECTION_KINDS) {
-    const prefix = `${kind}-${workspaceId}-${teamId}`;
-    let registered: ReadonlyArray<{
-      collection_id: string;
-      table_name: string;
-      tombstone_table_name: string;
-    }>;
-    try {
-      registered = await database.execute(
-        'SELECT collection_id, table_name, tombstone_table_name FROM collection_registry WHERE collection_id LIKE ?',
-        [`${prefix}%`],
-      );
-    } catch {
-      return; // nothing was ever persisted: no registry yet
-    }
-    for (const row of registered) {
-      await database.execute(`DROP TABLE IF EXISTS ${quote(row.table_name)}`);
-      await database.execute(`DROP TABLE IF EXISTS ${quote(row.tombstone_table_name)}`);
-      for (const table of PER_COLLECTION_TABLES) {
-        await database.execute(`DELETE FROM ${table} WHERE collection_id = ?`, [row.collection_id]);
-      }
-      await database.execute('DELETE FROM collection_registry WHERE collection_id = ?', [
-        row.collection_id,
-      ]);
-    }
-    await database
-      .execute('DELETE FROM cache_generation WHERE physical_id LIKE ?', [`${prefix}%`])
-      .catch(() => {});
+    await removeCollections(database, `${kind}-${workspaceId}-${teamId}%`);
   }
+}
+
+/**
+ * A shape started over (the person's access changed): what its old instances persisted may hold rows the person can
+ * no longer see, and the next page load would show them first. Every instance of the shape but `keepId` goes.
+ */
+export async function deleteShapeRows(
+  workspaceId: string,
+  baseId: string,
+  keepId: string,
+): Promise<void> {
+  const open = stores.get(workspaceId);
+  if (!open) return;
+  const { database } = await open;
+  await removeCollections(database, `${baseId}%`, keepId);
 }
 
 /** Test helper: forget the open stores without touching any file. */
 export function resetStoresForTests() {
   stores.clear();
+  openStores.clear();
 }

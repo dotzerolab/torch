@@ -2,7 +2,7 @@
 // collection: `useShape` re-renders its reader with the new instance, so live queries re-bind to it.
 import { collectionFactories } from './collections.ts';
 import { outbox } from './outbox.ts';
-import { deleteTeamRows } from './persistence.ts';
+import { deleteShapeRows, deleteTeamRows } from './persistence.ts';
 import { type CollectionFor, createRegistry, type ShapeKey, useShapeFrom } from './registry.ts';
 
 export const syncRegistry = createRegistry(collectionFactories, {
@@ -10,6 +10,10 @@ export const syncRegistry = createRegistry(collectionFactories, {
   onTeamDropped: (workspaceId, teamId) => {
     void deleteTeamRows(workspaceId, teamId).catch(() => {});
     void outbox.dropTeamWrites(workspaceId, teamId).catch(() => {});
+  },
+  // A shape that started over (access changed) must not leave its old rows on the device for the next page load.
+  onShapeRestarted: (key, baseId, keepId) => {
+    void deleteShapeRows(key.workspaceId, baseId, keepId).catch(() => {});
   },
 });
 

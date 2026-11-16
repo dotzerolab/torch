@@ -4,6 +4,7 @@
 import { signOut as endSession } from '../auth/useSession.ts';
 import { outbox } from './outbox.ts';
 import { wipeWorkspaceStore } from './persistence.ts';
+import { markSigningOut } from './signing-out.ts';
 
 export type SignOutDeps = {
   workspaceIds: string[];
@@ -20,6 +21,7 @@ export type SignOutDeps = {
 export async function runSignOut(deps: SignOutDeps): Promise<'signed-out' | 'cancelled'> {
   const pending = deps.workspaceIds.reduce((sum, id) => sum + deps.pendingCount(id), 0);
   if (pending > 0 && !(await deps.confirm(pending))) return 'cancelled';
+  markSigningOut();
   try {
     await deps.logout();
   } finally {

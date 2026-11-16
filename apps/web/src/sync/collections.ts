@@ -1,12 +1,16 @@
-// Electric shapes -> TanStack DB collections, in memory only: persistence, multi-tab and the offline outbox are P1
-// (ADR 0001 sections 5 and 6). The browser reads through the server's shape proxy (never Electric itself), and a
-// write is a PATCH whose txid the collection waits for, so the optimistic change stays until Electric confirms it.
+// Electric shapes -> TanStack DB collections. The browser reads through the server's shape proxy (never Electric
+// itself), and a write goes through the outbox as a PATCH whose txid the collection waits for, so the optimistic change
+// stays until Electric confirms it. When the workspace's device store is open (`persistence.ts`) every collection is
+// also kept there, so the next visit renders from the device before the network answers (ADR 0001 section 5).
 import { FetchError } from '@electric-sql/client';
+import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence';
 import { electricCollectionOptions } from '@tanstack/electric-db-collection';
 import { createCollection } from '@tanstack/react-db';
 import { toIssueUpdate } from './issue-update.ts';
 import { enqueueWrite, type OutboxWrite } from './outbox.ts';
+import { persistenceFor } from './persistence.ts';
 import type { Factories, ShapeContext } from './registry.ts';
+import { isSigningOut } from './signing-out.ts';
 
 /** A `team` row as the shape delivers it (column names as in the database). */
 export type SyncedTeam = {
@@ -93,10 +97,37 @@ export function handleShapeError(
   actions: ShapeErrorActions,
 ): void {
   if (!(error instanceof FetchError)) return;
-  if (error.status === 401) actions.signIn();
-  else if (error.status === 404 && scope.teamId !== undefined) {
+  if (error.status === 401) {
+    // Signing out ends the session on purpose; the sign-out flow leaves the page itself once the device is clean.
+    if (!isSigningOut()) actions.signIn();
+  } else if (error.status === 404 && scope.teamId !== undefined) {
     actions.dropTeam(scope.workspaceId, scope.teamId);
   }
+}
+
+/**
+ * How long a collection waits for the network before it shows what the device holds. A page that was closed a moment ago
+ * resumes its shapes in well under this; a page without a network shows the device copy after it.
+ */
+export const RENDER_FROM_DEVICE_AFTER_MS = 400;
+
+/**
+ * Keeps the rows of a collection on the device when the workspace has an open store (the page falls back to memory
+ * when the browser cannot keep files) and renders the stored rows when the network is slow or gone. A team that is gone
+ * for this person is never persisted.
+ */
+function persisted<T extends { id?: string }>(
+  workspaceId: string,
+  options: T,
+  context: ShapeContext,
+): T {
+  const persistence = context.inert ? null : persistenceFor(workspaceId);
+  if (!persistence) return options;
+  return persistedCollectionOptions({
+    ...(options as object),
+    persistence,
+    initialRender: { strategy: 'network-first', networkTimeoutMs: RENDER_FROM_DEVICE_AFTER_MS },
+  } as never) as unknown as T;
 }
 
 const signIn = () => window.location.assign('/login');
@@ -126,11 +157,15 @@ export function createTeamsCollection(
   context = NO_CONTEXT,
 ) {
   return createCollection(
-    electricCollectionOptions<SyncedTeam>({
-      id,
-      getKey: (team) => team.id,
-      shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/teams`, { workspaceId }, context),
-    }),
+    persisted(
+      workspaceId,
+      electricCollectionOptions<SyncedTeam>({
+        id,
+        getKey: (team) => team.id,
+        shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/teams`, { workspaceId }, context),
+      }),
+      context,
+    ),
   );
 }
 
@@ -140,11 +175,15 @@ export function createMembersCollection(
   context = NO_CONTEXT,
 ) {
   return createCollection(
-    electricCollectionOptions<SyncedMember>({
-      id,
-      getKey: (member) => member.id,
-      shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/members`, { workspaceId }, context),
-    }),
+    persisted(
+      workspaceId,
+      electricCollectionOptions<SyncedMember>({
+        id,
+        getKey: (member) => member.id,
+        shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/members`, { workspaceId }, context),
+      }),
+      context,
+    ),
   );
 }
 
@@ -155,15 +194,19 @@ export function createOwnMembershipsCollection(
   context = NO_CONTEXT,
 ) {
   return createCollection(
-    electricCollectionOptions<SyncedTeamMember>({
-      id,
-      getKey: (row) => `${row.team_id}:${row.member_id}`,
-      shapeOptions: shapeOptions(
-        `/api/sync/w/${workspaceId}/me/team-memberships`,
-        { workspaceId },
-        context,
-      ),
-    }),
+    persisted(
+      workspaceId,
+      electricCollectionOptions<SyncedTeamMember>({
+        id,
+        getKey: (row) => `${row.team_id}:${row.member_id}`,
+        shapeOptions: shapeOptions(
+          `/api/sync/w/${workspaceId}/me/team-memberships`,
+          { workspaceId },
+          context,
+        ),
+      }),
+      context,
+    ),
   );
 }
 
@@ -183,7 +226,9 @@ export function createTeamMembersCollection(
       context,
     ),
   });
-  return createCollection(context.inert ? { ...options, sync: inertSync } : options);
+  return createCollection(
+    context.inert ? { ...options, sync: inertSync } : persisted(workspaceId, options, context),
+  );
 }
 
 export function createWorkflowStatesCollection(
@@ -201,7 +246,9 @@ export function createWorkflowStatesCollection(
       context,
     ),
   });
-  return createCollection(context.inert ? { ...options, sync: inertSync } : options);
+  return createCollection(
+    context.inert ? { ...options, sync: inertSync } : persisted(workspaceId, options, context),
+  );
 }
 
 /**
@@ -255,7 +302,9 @@ export function createIssuesCollection(
       );
     },
   });
-  return createCollection(context.inert ? { ...options, sync: inertSync } : options);
+  return createCollection(
+    context.inert ? { ...options, sync: inertSync } : persisted(workspaceId, options, context),
+  );
 }
 
 /** How each shape kind is built. The registry owns the instances, the ids and the restarts. */

@@ -206,7 +206,8 @@ describe('live shape budget', () => {
     vi.advanceTimersByTime(1);
     await Promise.resolve();
     expect(fake.cleaned).toBe(1);
-    expect(registry.get(team('issues')).id).toBe('issues-w1-t1~2');
+    // Nobody reads it, so the instance that starts again keeps the id (and with it the device copy it resumes from).
+    expect(registry.get(team('issues')).id).toBe('issues-w1-t1');
   });
 
   it('coming back in time keeps the open shape', async () => {
