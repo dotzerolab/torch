@@ -124,6 +124,7 @@ const WITHOUT_OTHER_IDS = [
   'invites: create (admin role)',
   'sync: teams',
   'sync: members',
+  'sync: workspace labels',
 ];
 
 describe.skipIf(!databaseUrl)('workspace isolation over HTTP', () => {

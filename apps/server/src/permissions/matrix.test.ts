@@ -573,6 +573,30 @@ const HTTP_ROWS: HttpRow[] = [
   http('sync: issues (public team with the owner only)', 200, 200, 200, 404),
   http('sync: workflow states (public team with the owner only)', 200, 200, 200, 404),
   http('sync: team members (public team with the owner only)', 200, 200, 200, 404),
+
+  // The issue model's shapes: the workspace's labels are read by everybody; the rest follows the visibility of the team.
+  http('sync: workspace labels', 200, 200, 200, 200),
+  http('sync: labels (public team)', 200, 200, 200, 200),
+  http('sync: issue labels (public team)', 200, 200, 200, 200),
+  http('sync: issue subscribers (public team)', 200, 200, 200, 200),
+  http('sync: issue links (public team)', 200, 200, 200, 200),
+  http('sync: issue relations (public team)', 200, 200, 200, 200),
+  http('sync: issue detail (public team)', 200, 200, 200, 200),
+  http('sync: issue activity (public team)', 200, 200, 200, 200),
+  http('sync: labels (private team)', 200, 404, 200, 404),
+  http('sync: issue labels (private team)', 200, 404, 200, 404),
+  http('sync: issue subscribers (private team)', 200, 404, 200, 404),
+  http('sync: issue links (private team)', 200, 404, 200, 404),
+  http('sync: issue relations (private team)', 200, 404, 200, 404),
+  http('sync: issue detail (private team)', 200, 404, 200, 404),
+  http('sync: issue activity (private team)', 200, 404, 200, 404),
+  http('sync: labels (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue labels (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue subscribers (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue links (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue relations (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue detail (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue activity (public team with the owner only)', 200, 200, 200, 404),
 ];
 
 describe('permission matrix over HTTP: completeness', () => {

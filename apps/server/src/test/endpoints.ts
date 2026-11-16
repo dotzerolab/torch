@@ -608,6 +608,40 @@ export const ENDPOINTS: EndpointCase[] = [
       ...see,
     },
   ]),
+  // The issue model's own shapes: per team (the same visibility as the team), the workspace's labels (everybody), and
+  // per opened issue (the visibility of the issue's team).
+  {
+    name: 'sync: workspace labels',
+    method: 'GET',
+    path: (ids) => `${sync(ids)}/workspace-labels`,
+    minRole: 'guest',
+  },
+  ...TEAMS.flatMap(({ team: key, issue, label, see }): EndpointCase[] => [
+    ...(
+      [
+        ['labels', 'labels'],
+        ['issue labels', 'issue-labels'],
+        ['issue subscribers', 'issue-subscribers'],
+        ['issue links', 'issue-links'],
+        ['issue relations', 'issue-relations'],
+      ] as const
+    ).map(
+      ([title, route]): EndpointCase => ({
+        name: `sync: ${title} (${label})`,
+        method: 'GET',
+        path: (ids) => `${sync(ids)}/teams/${ids[key]}/${route}`,
+        ...see,
+      }),
+    ),
+    ...(['detail', 'activity'] as const).map(
+      (route): EndpointCase => ({
+        name: `sync: issue ${route} (${label})`,
+        method: 'GET',
+        path: (ids) => `${sync(ids)}/issues/${ids[issue]}/${route}`,
+        ...see,
+      }),
+    ),
+  ]),
 ];
 
 // ---- the world ----

@@ -1,12 +1,16 @@
 import type { Actor } from '@torch/shared/permissions';
 import { describe, expect, it } from 'vitest';
 import {
+  issueActivityShape,
+  issueDetailShape,
   MEMBER_COLUMNS,
   membersShape,
   type ShapeDefinition,
+  teamDataShape,
   teamMembersShape,
   teamScopedShape,
   teamsShape,
+  workspaceLabelsShape,
 } from './shapes.ts';
 
 const NIL_UUID = '00000000-0000-0000-0000-000000000000';
@@ -115,6 +119,13 @@ describe('teamScopedShape', () => {
       'created_at',
       'updated_at',
       'archived_at',
+      'estimate',
+      'due_date',
+      'parent_id',
+      'sort_order',
+      'started_at',
+      'completed_at',
+      'canceled_at',
     ]);
   });
 
@@ -132,6 +143,7 @@ describe('teamScopedShape', () => {
       'type',
       'position',
       'color',
+      'archived_at',
     ]);
   });
 });
@@ -218,6 +230,132 @@ describe('teamMembersShape', () => {
     expect(shape.where).toBe('team_id = $1');
     expect(shape.params).toEqual([TEAM_A]);
     expect(shape.columns).toEqual(['team_id', 'member_id', 'workspace_id', 'created_at']);
+    expectParameterised(shape);
+  });
+});
+
+describe('teamDataShape', () => {
+  it('labels, issue labels, subscribers and links: one shape per team, bound by parameter', () => {
+    for (const [kind, table] of [
+      ['labels', 'label'],
+      ['issue_labels', 'issue_label'],
+      ['issue_subscribers', 'issue_subscriber'],
+      ['issue_links', 'issue_link'],
+    ] as const) {
+      const shape = teamDataShape(kind, TEAM_A);
+
+      expect(shape.table, kind).toBe(table);
+      expect(shape.where, kind).toBe('team_id = $1');
+      expect(shape.params, kind).toEqual([TEAM_A]);
+      expectParameterised(shape);
+    }
+  });
+
+  it('pins the columns of each shape', () => {
+    expect(teamDataShape('labels', TEAM_A).columns).toEqual([
+      'id',
+      'workspace_id',
+      'team_id',
+      'parent_id',
+      'name',
+      'color',
+      'is_group',
+      'archived_at',
+      'created_at',
+    ]);
+    expect(teamDataShape('issue_labels', TEAM_A).columns).toEqual([
+      'workspace_id',
+      'team_id',
+      'issue_id',
+      'label_id',
+    ]);
+    expect(teamDataShape('issue_subscribers', TEAM_A).columns).toEqual([
+      'workspace_id',
+      'team_id',
+      'issue_id',
+      'member_id',
+      'created_at',
+    ]);
+    expect(teamDataShape('issue_links', TEAM_A).columns).toEqual([
+      'id',
+      'workspace_id',
+      'team_id',
+      'issue_id',
+      'url',
+      'title',
+      'created_by',
+      'created_at',
+    ]);
+  });
+
+  it('relations: rows that start or end in the team, ids only, never a title or a number', () => {
+    const shape = teamDataShape('issue_relations', TEAM_A);
+
+    expect(shape.table).toBe('issue_relation');
+    expect(shape.where).toBe('team_id = $1 OR related_team_id = $1');
+    expect(shape.params).toEqual([TEAM_A]);
+    expectParameterised(shape);
+    expect(shape.columns).toEqual([
+      'id',
+      'workspace_id',
+      'team_id',
+      'issue_id',
+      'related_team_id',
+      'related_issue_id',
+      'type',
+      'created_by',
+      'created_at',
+    ]);
+    for (const hidden of ['title', 'number', 'description', 'identifier']) {
+      expect(shape.columns).not.toContain(hidden);
+    }
+  });
+});
+
+describe('workspaceLabelsShape', () => {
+  it('holds the labels of the workspace that belong to no team', () => {
+    const shape = workspaceLabelsShape(WORKSPACE);
+
+    expect(shape.table).toBe('label');
+    expect(shape.where).toBe('workspace_id = $1 AND team_id IS NULL');
+    expect(shape.params).toEqual([WORKSPACE]);
+    expect(shape.columns).toEqual(teamDataShape('labels', TEAM_A).columns);
+    expectParameterised(shape);
+  });
+});
+
+describe('per-issue shapes', () => {
+  const ISSUE = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+
+  it('detail carries the description and nothing else of the issue', () => {
+    const shape = issueDetailShape(ISSUE);
+
+    expect(shape.table).toBe('issue');
+    expect(shape.where).toBe('id = $1');
+    expect(shape.params).toEqual([ISSUE]);
+    expect(shape.columns).toEqual(['id', 'workspace_id', 'team_id', 'description']);
+    expectParameterised(shape);
+  });
+
+  it('activity is the issue_activity rows of one issue', () => {
+    const shape = issueActivityShape(ISSUE);
+
+    expect(shape.table).toBe('issue_activity');
+    expect(shape.where).toBe('issue_id = $1');
+    expect(shape.params).toEqual([ISSUE]);
+    expect(shape.columns).toEqual([
+      'id',
+      'workspace_id',
+      'team_id',
+      'issue_id',
+      'actor_id',
+      'client',
+      'type',
+      'field',
+      'from_value',
+      'to_value',
+      'created_at',
+    ]);
     expectParameterised(shape);
   });
 });

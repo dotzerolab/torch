@@ -1,4 +1,14 @@
-import { issue, member, team, teamMember, workflowState, workspace } from '@torch/shared/db/schema';
+import {
+  issue,
+  issueLabel,
+  issueRelation,
+  label,
+  member,
+  team,
+  teamMember,
+  workflowState,
+  workspace,
+} from '@torch/shared/db/schema';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Orm } from '../db.ts';
@@ -133,6 +143,43 @@ describe.skipIf(!databaseUrl)('seedDev (Postgres)', () => {
       expect(second).toEqual({ created: false, workspaceSlug: 'demo' });
       expect(afterFirst).toEqual({ workspaces: 1, members: 5, teams: 2, states: 12, issues: 100 });
       expect(afterSecond).toEqual(afterFirst);
+    });
+  });
+
+  it('the demo workspace shows the issue model: labels (one workspace label, one team label, a group), a relation and a sub-issue', async () => {
+    await withTempDatabase(async (db) => {
+      await seedDev(db.orm);
+
+      const labels = await db.orm.select().from(label);
+      const workspaceLabels = labels.filter((l) => l.teamId === null);
+      const group = labels.find((l) => l.isGroup);
+      const children = labels.filter((l) => l.parentId !== null);
+      const relations = await db.orm.select().from(issueRelation);
+      const withParent = await db.orm
+        .select()
+        .from(issue)
+        .where(sql`${issue.parentId} is not null`);
+      const onIssues = await db.orm.select().from(issueLabel);
+
+      expect(workspaceLabels.length).toBeGreaterThanOrEqual(1);
+      expect(labels.some((l) => l.teamId !== null && !l.isGroup && l.parentId === null)).toBe(true);
+      expect(group).toBeDefined();
+      expect(children.every((l) => l.parentId === group?.id)).toBe(true);
+      expect(children.length).toBeGreaterThanOrEqual(2);
+      expect(relations).toHaveLength(1);
+      expect(relations[0]?.teamId).toBe(relations[0]?.relatedTeamId);
+      expect(withParent).toHaveLength(1);
+      expect(withParent[0]?.parentId).not.toBe(withParent[0]?.id);
+      expect(onIssues.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('a seed of fewer than three issues per team has no issue-model demo data and still works', async () => {
+    await withTempDatabase(async (db) => {
+      await seedDev(db.orm, { issuesPerTeam: 2 });
+
+      expect((await counts(db.orm)).issues).toBe(4);
+      expect(await db.orm.select().from(issueRelation)).toHaveLength(0);
     });
   });
 
