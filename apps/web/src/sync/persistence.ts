@@ -68,6 +68,22 @@ const stored = new Map<string, Set<string>>();
 export const hasDeviceCopy = (workspaceId: string, collectionId: string) =>
   stored.get(workspaceId)?.has(collectionId) ?? false;
 
+/**
+ * The newest restart generation the device holds for a shape, 0 when it holds none: `base` is generation 1, `base~N` is
+ * generation N (see `registry.ts`). A leader that starts the shape continues from it.
+ */
+export function storedGeneration(workspaceId: string, baseId: string): number {
+  let latest = 0;
+  for (const id of stored.get(workspaceId) ?? []) {
+    if (id === baseId) latest = Math.max(latest, 1);
+    else if (id.startsWith(`${baseId}~`)) {
+      const n = Number(id.slice(baseId.length + 1));
+      if (Number.isInteger(n)) latest = Math.max(latest, n);
+    }
+  }
+  return latest;
+}
+
 async function readStored(workspaceId: string, database: BrowserWASQLiteDatabase): Promise<void> {
   const rows = await database
     .execute<{ collection_id: string }>('SELECT collection_id FROM collection_registry')
@@ -224,6 +240,11 @@ export async function closeWorkspaceStore(workspaceId: string): Promise<void> {
   copyStops.delete(workspaceId);
   copyQueues.delete(workspaceId);
   if (open) await open.then((store) => store.close()).catch(() => {});
+}
+
+/** Closes every open store (another tab is about to delete the files). */
+export async function closeAllStores(): Promise<void> {
+  await Promise.all([...stores.keys()].map((workspaceId) => closeWorkspaceStore(workspaceId)));
 }
 
 /**

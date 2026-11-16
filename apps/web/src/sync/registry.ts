@@ -26,6 +26,11 @@ export type ShapeContext = {
   settled: () => void;
   /** True while the instance ends because it was paused (it starts again under the same id), false for a restart or a drop. */
   paused: () => boolean;
+  /**
+   * `leader`: this tab syncs the shape and keeps it on the device. `follower`: another tab does, and this instance
+   * reads what that tab mirrors (`mirror.ts`); it opens no request.
+   */
+  role: 'leader' | 'follower';
 };
 
 export type Factories = {
@@ -45,11 +50,25 @@ function keyOf(key: ShapeKey): string {
     : `${key.kind}:${key.workspaceId}`;
 }
 
+/** The name of a shape between tabs; the same in every tab. Ids are UUIDs, so `:` never occurs inside one. */
+export const shapeId = keyOf;
+
+/** The key a shape id names. */
+export function parseShapeId(id: string): ShapeKey {
+  const [kind, workspaceId, teamId] = id.split(':') as [ShapeKind, string, string | undefined];
+  return (teamId === undefined ? { kind, workspaceId } : { kind, workspaceId, teamId }) as ShapeKey;
+}
+
 function goneKey(workspaceId: string, teamId: string): string {
   return `${workspaceId}:${teamId}`;
 }
 
-type Entry = { collection: Cleanable; generation: number; state: { paused: boolean } };
+type Entry = {
+  key: ShapeKey;
+  collection: Cleanable;
+  generation: number;
+  state: { paused: boolean };
+};
 
 /**
  * How many shapes a page keeps open at once. The browser allows about six connections per origin on HTTP/1.1 and a
@@ -70,6 +89,14 @@ export type RegistryHooks = {
    * `keepId` the id of the instance that replaces it: whatever else was stored under `baseId` is stale.
    */
   onShapeRestarted?: (key: ShapeKey, baseId: string, keepId: string) => void;
+  /** The role of this tab for a workspace, read whenever an instance is made. Default: leader. */
+  role?: (workspaceId: string) => 'leader' | 'follower';
+  /**
+   * The generation the device already holds for a shape (0 when it holds none): a leader that starts a shape continues
+   * from the copy on the device, instead of starting a new one beside it. Tabs do not share their generation counters,
+   * so a leader that took over from another tab finds the id its predecessor used here.
+   */
+  storedGeneration?: (key: ShapeKey, baseId: string) => number;
 };
 
 export function createRegistry<F extends Factories>(factories: F, hooks: RegistryHooks = {}) {
@@ -112,9 +139,16 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
 
   function create(key: ShapeKey): Entry {
     const k = keyOf(key);
+    const role = hooks.role?.(key.workspaceId) ?? 'leader';
+    if (role === 'leader' && !generations.has(k)) {
+      generations.set(k, Math.max(0, (hooks.storedGeneration?.(key, baseId(key)) ?? 0) - 1));
+    }
     const generation = (generations.get(k) ?? 0) + 1;
     generations.set(k, generation);
-    const id = generation === 1 ? baseId(key) : `${baseId(key)}~${generation}`;
+    const storeId = generation === 1 ? baseId(key) : `${baseId(key)}~${generation}`;
+    // A follower reads through another tab: its ids never equal a device id, so the instance that replaces it when this
+    // tab becomes the leader is a different source for react-db (see the note at the top of this file).
+    const id = role === 'follower' ? `mirror-${storeId}` : storeId;
     const inert = isTeamKey(key) && gone.has(goneKey(key.workspaceId, key.teamId));
     const make = factories[key.kind] as (
       key: ShapeKey,
@@ -128,7 +162,8 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     };
     const state = { paused: false };
     return {
-      collection: make(key, id, { dropTeam, inert, settled, paused: () => state.paused }),
+      key,
+      collection: make(key, id, { dropTeam, inert, settled, paused: () => state.paused, role }),
       generation,
       state,
     };
@@ -177,6 +212,19 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
   function reinstateTeam(workspaceId: string, teamId: string) {
     if (!gone.delete(goneKey(workspaceId, teamId))) return;
     for (const kind of TEAM_KINDS) replace({ kind, workspaceId, teamId } as ShapeKey);
+    notify();
+  }
+
+  /**
+   * This tab became the leader of the workspace: its instances read from a leader that is gone, so they end and start
+   * again as leaders, from the device copy the old leader left.
+   */
+  function promote(workspaceId: string) {
+    for (const entry of [...entries.values()]) {
+      if (entry.key.workspaceId !== workspaceId) continue;
+      replace(entry.key);
+      generations.delete(keyOf(entry.key));
+    }
     notify();
   }
 
@@ -273,6 +321,7 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     restart,
     dropTeam,
     reinstateTeam,
+    promote,
     isGone,
     subscribe,
     onSettled,

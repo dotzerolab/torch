@@ -433,3 +433,41 @@ describe('a team that is left and then rejoined', () => {
     stop();
   });
 });
+
+describe('syncRegistry across tabs', () => {
+  it('a leader continues from the generation the device holds', () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories, { storedGeneration: () => 3 });
+    expect(registry.get({ kind: 'teams', workspaceId: ws }).id).toBe('teams-w1~3');
+    registry.restart({ kind: 'teams', workspaceId: ws });
+    expect(registry.get({ kind: 'teams', workspaceId: ws }).id).toBe('teams-w1~4');
+  });
+
+  it('a follower reads under ids that are never a device id, and ignores what the device holds', () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories, {
+      role: () => 'follower',
+      storedGeneration: () => 3,
+    });
+    expect(registry.get({ kind: 'teams', workspaceId: ws }).id).toBe('mirror-teams-w1');
+  });
+
+  it('promote ends the follower instances of the workspace and starts leader ones from the device copy', () => {
+    const { factories, made } = fakeFactories();
+    let role: 'leader' | 'follower' = 'follower';
+    const registry = createRegistry(factories, { role: () => role, storedGeneration: () => 2 });
+    const follower = registry.get({ kind: 'teams', workspaceId: ws });
+    const other = registry.get({ kind: 'teams', workspaceId: 'w2' });
+    const listener = vi.fn();
+    registry.subscribe(listener);
+    role = 'leader';
+    registry.promote(ws);
+    expect(follower.cleaned).toBe(1);
+    expect(other.cleaned).toBe(0);
+    expect(listener).toHaveBeenCalled();
+    const leader = registry.get({ kind: 'teams', workspaceId: ws });
+    expect(leader).not.toBe(follower);
+    expect(leader.id).toBe('teams-w1~2');
+    expect(made.map((fake) => fake.id)).toContain('teams-w1~2');
+  });
+});

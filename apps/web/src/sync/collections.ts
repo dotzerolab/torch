@@ -8,9 +8,10 @@ import { electricCollectionOptions } from '@tanstack/electric-db-collection';
 import { createCollection } from '@tanstack/react-db';
 import { createDeviceFollower } from './device-follow.ts';
 import { toIssueUpdate } from './issue-update.ts';
+import { hubFor, type MirrorOp } from './mirror.ts';
 import { enqueueWrite, type OutboxWrite } from './outbox.ts';
 import { hasDeviceCopy, persistenceFor, queueDeviceCopy, waitUntilStored } from './persistence.ts';
-import type { Factories, ShapeContext } from './registry.ts';
+import { type Factories, type ShapeContext, type ShapeKey, shapeId } from './registry.ts';
 import { isSigningOut } from './signing-out.ts';
 
 /** A `team` row as the shape delivers it (column names as in the database). */
@@ -314,6 +315,139 @@ function copyToDevice(
   });
 }
 
+type Row = Record<string, unknown>;
+type SyncMessage = { type: string; key?: string | number; value?: Row };
+
+/** What the follower and the leader's tap need of the sync parameters and the options of an Electric collection. */
+type MirrorableParams = SyncParams & {
+  begin: (...args: never[]) => void;
+  write: (message: SyncMessage) => void;
+  commit: () => void;
+};
+type Mirrorable = PersistableOptions & {
+  getKey: (row: never) => string | number;
+  utils?: Record<string, unknown>;
+};
+
+/**
+ * The shape of this tab, by role. A leader syncs it (and keeps it on the device when it can), and tells the follower tabs
+ * of the workspace what its collection receives. A follower opens no request: its collection reads what the leader tells
+ * it (`mirror.ts`), and a write of it waits for its txid through the leader, which owns the stream that brings it back.
+ */
+function shaped<T extends PersistableOptions>(
+  key: ShapeKey,
+  build: () => T,
+  context: ShapeContext,
+): T {
+  if (context.inert) return { ...build(), sync: inertSync };
+  if (context.role === 'follower') return followed(key, build() as T & Mirrorable, context) as T;
+  const options = persisted(key.workspaceId, build, context);
+  const hub = hubFor(key.workspaceId);
+  const getKey = (build() as T & Mirrorable).getKey as (row: Row) => string | number;
+  const inner = options.sync as SyncObject;
+  const shape = shapeId(key);
+  return {
+    ...options,
+    sync: {
+      ...inner,
+      sync: (params: MirrorableParams) => {
+        const tap = hub.publish(shape, getKey);
+        const result = inner.sync({
+          ...params,
+          // What the persistence layer returns (an applied receipt) must reach its caller.
+          write: (message: SyncMessage) => {
+            const result = (params.write as (m: SyncMessage) => unknown)(message);
+            tap.write(message);
+            return result;
+          },
+          truncate: (...args: never[]) => {
+            const result = (params.truncate as (...a: never[]) => unknown)(...args);
+            tap.truncate();
+            return result;
+          },
+          commit: () => {
+            const result = (params.commit as () => unknown)();
+            tap.commit();
+            return result;
+          },
+          markReady: () => {
+            const result = (params.markReady as () => unknown)();
+            tap.ready();
+            return result;
+          },
+        } as never);
+        if (typeof result === 'function') {
+          return () => {
+            tap.end();
+            return (result as () => unknown)();
+          };
+        }
+        const object = (result ?? {}) as { cleanup?: () => unknown };
+        return {
+          ...object,
+          cleanup: () => {
+            tap.end();
+            return object.cleanup?.();
+          },
+        };
+      },
+    },
+  };
+}
+
+function followed<T extends Mirrorable>(key: ShapeKey, base: T, context: ShapeContext): T {
+  const hub = hubFor(key.workspaceId);
+  const shape = shapeId(key);
+  const getKey = base.getKey as (row: Row) => string | number;
+  return {
+    ...base,
+    sync: {
+      sync: (params: MirrorableParams) => {
+        // The keys the collection holds from the leader: a row is inserted once, and updated after that.
+        const known = new Set<string | number>();
+        const apply = (ops: ReadonlyArray<MirrorOp>) => {
+          params.begin();
+          for (const op of ops) {
+            if (op.k === 'clear') {
+              params.truncate();
+              known.clear();
+            } else if (op.k === 'set') {
+              const rowKey = getKey(op.row);
+              params.write({ type: known.has(rowKey) ? 'update' : 'insert', value: op.row });
+              known.add(rowKey);
+            } else if (known.delete(op.key)) {
+              params.write({ type: 'delete', key: op.key });
+            }
+          }
+          params.commit();
+        };
+        const ready = () => {
+          params.markReady();
+          context.settled();
+        };
+        const stop = hub.follow(shape, {
+          snapshot: (rows, isReady) => {
+            apply([{ k: 'clear' }, ...rows.map((row): MirrorOp => ({ k: 'set', row }))]);
+            if (isReady) ready();
+          },
+          ops: apply,
+          ready,
+        });
+        return { cleanup: stop };
+      },
+    },
+    utils: {
+      ...base.utils,
+      awaitTxId: async (txid: number, timeoutMs = TXID_TIMEOUT_MS) => {
+        if (!(await hub.awaitTxId(shape, txid, timeoutMs))) {
+          throw new Error(`The write ${txid} did not come back in time`);
+        }
+        return true;
+      },
+    },
+  };
+}
+
 const signIn = () => window.location.assign('/login');
 
 function shapeOptions(
@@ -338,6 +472,7 @@ const NO_CONTEXT: ShapeContext = {
   inert: false,
   settled: () => {},
   paused: () => false,
+  role: 'leader',
 };
 
 export function createTeamsCollection(
@@ -351,7 +486,7 @@ export function createTeamsCollection(
       getKey: (team) => team.id,
       shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/teams`, { workspaceId }, context),
     });
-  return createCollection(persisted(workspaceId, build, context));
+  return createCollection(shaped({ kind: 'teams', workspaceId }, build, context));
 }
 
 export function createMembersCollection(
@@ -365,7 +500,7 @@ export function createMembersCollection(
       getKey: (member) => member.id,
       shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/members`, { workspaceId }, context),
     });
-  return createCollection(persisted(workspaceId, build, context));
+  return createCollection(shaped({ kind: 'members', workspaceId }, build, context));
 }
 
 /** The person's own team memberships: the signal that their access to teams changed. Not shown anywhere. */
@@ -384,7 +519,7 @@ export function createOwnMembershipsCollection(
         context,
       ),
     });
-  return createCollection(persisted(workspaceId, build, context));
+  return createCollection(shaped({ kind: 'ownMemberships', workspaceId }, build, context));
 }
 
 export function createTeamMembersCollection(
@@ -404,9 +539,7 @@ export function createTeamMembersCollection(
         context,
       ),
     });
-  return createCollection(
-    context.inert ? { ...build(), sync: inertSync } : persisted(workspaceId, build, context),
-  );
+  return createCollection(shaped({ kind: 'teamMembers', workspaceId, teamId }, build, context));
 }
 
 export function createWorkflowStatesCollection(
@@ -425,9 +558,7 @@ export function createWorkflowStatesCollection(
         context,
       ),
     });
-  return createCollection(
-    context.inert ? { ...build(), sync: inertSync } : persisted(workspaceId, build, context),
-  );
+  return createCollection(shaped({ kind: 'workflowStates', workspaceId, teamId }, build, context));
 }
 
 /**
@@ -482,9 +613,7 @@ export function createIssuesCollection(
         );
       },
     });
-  return createCollection(
-    context.inert ? { ...build(), sync: inertSync } : persisted(workspaceId, build, context),
-  );
+  return createCollection(shaped({ kind: 'issues', workspaceId, teamId }, build, context));
 }
 
 /** How each shape kind is built. The registry owns the instances, the ids and the restarts. */
