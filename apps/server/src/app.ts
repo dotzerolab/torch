@@ -13,6 +13,7 @@ import { createLabelRoutes } from './labels/routes.ts';
 import type { Mailer } from './mail/mailer.ts';
 import { createMemberRoutes } from './members/routes.ts';
 import type { ActorResolver } from './permissions/load-actor.ts';
+import { type AccessBus, createAccessBus } from './sync/access-bus.ts';
 import type { ElectricConfig } from './sync/config.ts';
 import { checkSyncHealth } from './sync/health.ts';
 import { createSyncRoutes } from './sync/routes.ts';
@@ -36,6 +37,8 @@ export type AppDeps = {
   fetchUpstream?: typeof fetch;
   /** Clock for sessions and tokens; tests move it. */
   now?: () => Date;
+  /** Ends open shape requests when access changes; created here when absent. Tests pass their own to signal it. */
+  accessBus?: AccessBus;
 };
 
 // The only surface tests and main.ts rely on; the web framework behind it stays an internal choice.
@@ -95,6 +98,8 @@ export function createApp(deps: AppDeps): App {
   }
 
   const app = new Hono();
+  // ONE bus per app: the shape proxy registers its open requests here, the services and the sign-out signal it.
+  const accessBus = deps.accessBus ?? createAccessBus();
 
   // Name and code only. Drizzle's error message carries the SQL and its parameters (emails, token hashes), and
   // Hono's default handler would log all of it and answer text/plain.
@@ -146,6 +151,7 @@ export function createApp(deps: AppDeps): App {
         appUrl: deps.config.appUrl,
         trustProxy: deps.config.trustProxy,
         now: deps.now,
+        accessBus,
       }),
     );
   }
@@ -154,8 +160,8 @@ export function createApp(deps: AppDeps): App {
     app.route('/api', createIssueRoutes({ orm: deps.db.orm, auth: deps.auth }));
     app.route('/api', createLabelRoutes({ orm: deps.db.orm, auth: deps.auth }));
     app.route('/api', createWorkflowRoutes({ orm: deps.db.orm, auth: deps.auth }));
-    app.route('/api', createMemberRoutes({ orm: deps.db.orm, auth: deps.auth }));
-    app.route('/api', createTeamRoutes({ orm: deps.db.orm, auth: deps.auth }));
+    app.route('/api', createMemberRoutes({ orm: deps.db.orm, auth: deps.auth, accessBus }));
+    app.route('/api', createTeamRoutes({ orm: deps.db.orm, auth: deps.auth, accessBus }));
   }
 
   if (deps.db?.orm && deps.auth && deps.mailer && deps.config) {
@@ -169,6 +175,7 @@ export function createApp(deps: AppDeps): App {
         appUrl: deps.config.appUrl,
         trustProxy: deps.config.trustProxy,
         now: deps.now,
+        accessBus,
       }),
     );
   }
@@ -181,6 +188,7 @@ export function createApp(deps: AppDeps): App {
         electric: deps.electric,
         auth: deps.auth,
         fetchUpstream: deps.fetchUpstream,
+        accessBus,
       }),
     );
   }

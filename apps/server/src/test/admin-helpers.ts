@@ -54,3 +54,24 @@ export async function openSession(
   });
   return { cookie: `${opts.cookieName ?? 'sid'}=${token}`, token };
 }
+
+/** What a service told the access bus: one entry per `accessChanged` call, in order. */
+export type BusCall = { workspaceId: string; memberIds: readonly string[] | 'all' };
+
+/**
+ * A stand-in for the access bus that records its calls. `probe` runs at the moment of each call; the services must
+ * call after their transaction committed, which a probe on a second connection can tell (it sees only committed rows).
+ */
+export function recordingBus(probe?: () => Promise<unknown>) {
+  const calls: BusCall[] = [];
+  const probed: Array<Promise<unknown>> = [];
+  return {
+    calls,
+    /** The probe results, one per call. */
+    probed: () => Promise.all(probed),
+    accessChanged(workspaceId: string, memberIds: readonly string[] | 'all') {
+      calls.push({ workspaceId, memberIds });
+      if (probe) probed.push(probe());
+    },
+  };
+}

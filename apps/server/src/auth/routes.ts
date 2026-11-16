@@ -6,6 +6,7 @@ import { deleteCookie } from 'hono/cookie';
 import type { Orm } from '../db.ts';
 import { renderMagicLinkEmail } from '../mail/magic-link-email.ts';
 import type { Mailer } from '../mail/mailer.ts';
+import { type AccessNotifier, notifySessionsRevoked } from '../sync/access-bus.ts';
 import {
   consumeMagicLink,
   issueMagicLink,
@@ -32,6 +33,8 @@ export type AuthDeps = {
   appUrl: string;
   trustProxy: boolean;
   now?: () => Date;
+  /** Ends the open shape requests of whoever signs out or is signed out by a new sign-in. */
+  accessBus?: AccessNotifier;
 };
 
 const IP_LIMIT = 20;
@@ -164,6 +167,7 @@ export function createAuthRoutes(deps: AuthDeps) {
       now: at,
       userAgent,
       revokeSessionToken: readSessionToken(c.req.raw, deps.appUrl),
+      accessBus: deps.accessBus,
     });
     if (!result) return invalidLink(c);
 
@@ -186,8 +190,11 @@ export function createAuthRoutes(deps: AuthDeps) {
 
   app.post('/logout', async (c) => {
     const token = readSessionToken(c.req.raw, deps.appUrl);
-    if (token) await revokeSessions(deps.orm, token, now());
+    if (token) notifySessionsRevoked(deps.accessBus, await revokeSessions(deps.orm, token, now()));
     deleteCookie(c, cookieName, { path: '/', secure: isSecureUrl(deps.appUrl) });
+    // The browser's HTTP cache may hold shape responses of this user. Only "cache": "storage" would also wipe the
+    // stores of every other workspace on this origin (the client wipes the signed-out workspace itself).
+    c.header('Clear-Site-Data', '"cache"');
     return c.body(null, 204);
   });
 

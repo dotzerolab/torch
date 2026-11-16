@@ -9,6 +9,7 @@ import {
   actorOf,
   auditRows,
   openSession,
+  recordingBus,
   refusal,
   successOf,
   txidOf,
@@ -704,6 +705,81 @@ describe.skipIf(!databaseUrl)('updateOwnProfile', () => {
       const text = JSON.stringify(rows);
       expect(text).not.toContain('@');
       expect(text).not.toContain('Private Name');
+    });
+  });
+});
+
+describe.skipIf(!databaseUrl)('member changes signal the access bus', () => {
+  it('a role change tells the bus about that member, after the commit; the same role tells nobody', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const owner = await actorOf(db, f.workspaceId, f.members.owner.id);
+      const bus = recordingBus(
+        async () =>
+          (await db.pool.query('select role from member where id = $1', [f.members.member.id]))
+            .rows[0]?.role,
+      );
+
+      successOf(await changeMemberRole(db.orm, owner, f.members.member.id, 'member', bus));
+      expect(bus.calls).toEqual([]);
+      successOf(await changeMemberRole(db.orm, owner, f.members.member.id, 'guest', bus));
+
+      expect(bus.calls).toEqual([{ workspaceId: f.workspaceId, memberIds: [f.members.member.id] }]);
+      expect(await bus.probed()).toEqual(['guest']);
+    });
+  });
+
+  it('a refused role change tells nobody', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const member = await actorOf(db, f.workspaceId, f.members.member.id);
+      const bus = recordingBus();
+
+      expect((await changeMemberRole(db.orm, member, f.members.guest.id, 'admin', bus)).ok).toBe(
+        false,
+      );
+
+      expect(bus.calls).toEqual([]);
+    });
+  });
+
+  it('deactivating and reactivating tell the bus about that member; repeating either tells nobody', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const owner = await actorOf(db, f.workspaceId, f.members.owner.id);
+      const bus = recordingBus(
+        async () =>
+          (
+            await db.pool.query(
+              'select deactivated_at is null as active from member where id = $1',
+              [f.members.member.id],
+            )
+          ).rows[0]?.active,
+      );
+
+      successOf(await setMemberActive(db.orm, owner, f.members.member.id, true, bus));
+      expect(bus.calls).toEqual([]);
+      successOf(await setMemberActive(db.orm, owner, f.members.member.id, false, bus));
+      successOf(await setMemberActive(db.orm, owner, f.members.member.id, false, bus));
+      successOf(await setMemberActive(db.orm, owner, f.members.member.id, true, bus));
+
+      const told = { workspaceId: f.workspaceId, memberIds: [f.members.member.id] };
+      expect(bus.calls).toEqual([told, told]);
+      expect(await bus.probed()).toEqual([false, true]);
+    });
+  });
+
+  it('a refused deactivation tells nobody', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const guest = await actorOf(db, f.workspaceId, f.members.guest.id);
+      const bus = recordingBus();
+
+      expect((await setMemberActive(db.orm, guest, f.members.member.id, false, bus)).ok).toBe(
+        false,
+      );
+
+      expect(bus.calls).toEqual([]);
     });
   });
 });

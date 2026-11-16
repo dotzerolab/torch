@@ -29,6 +29,7 @@ import { recordAudit } from '../audit/log.ts';
 import type { Orm, Tx } from '../db.ts';
 import { currentTxid } from '../mutations/txid.ts';
 import { currentActor } from '../permissions/current-actor.ts';
+import type { AccessNotifier } from '../sync/access-bus.ts';
 import { isUniqueViolation } from '../util/pg-error.ts';
 import { refuse, succeed } from '../util/refusal.ts';
 import type { ServiceResult } from '../util/result.ts';
@@ -120,13 +121,15 @@ export async function updateTeam(
   actor: Actor,
   teamId: string,
   input: TeamUpdateInput,
+  accessBus?: AccessNotifier,
 ): Promise<ServiceResult<{ txid: number }>> {
   const parsed = teamUpdateInput.safeParse(input);
   if (!parsed.success) return refuse('invalid_input', 400);
   if (!isUuid(teamId)) return refuse('not_found', 404);
   const changes = parsed.data;
 
-  return orm.transaction(async (tx) => {
+  let privacyFlipped = false;
+  const result = await orm.transaction(async (tx) => {
     const access = await lockTeam(tx, actor.workspaceId, teamId);
     if (!access) return refuse('not_found', 404);
     const now = await currentActor(tx, actor);
@@ -160,9 +163,13 @@ export async function updateTeam(
           ...(privacyChanged ? { private: changes.private ?? false } : {}),
         },
       });
+      privacyFlipped = privacyChanged;
     }
     return succeed({ txid: await currentTxid(tx) });
   });
+  // After the commit: who may read this team changed for everybody, so every open request of the workspace ends.
+  if (result.ok && privacyFlipped) accessBus?.accessChanged(actor.workspaceId, 'all');
+  return result;
 }
 
 /**
@@ -175,10 +182,12 @@ export async function addTeamMember(
   actor: Actor,
   teamId: string,
   memberId: string,
+  accessBus?: AccessNotifier,
 ): Promise<ServiceResult<{ txid: number }>> {
   if (!isUuid(teamId) || !isUuid(memberId)) return refuse('not_found', 404);
 
-  return orm.transaction(async (tx) => {
+  let added = false;
+  const result = await orm.transaction(async (tx) => {
     const access = await lockTeam(tx, actor.workspaceId, teamId);
     if (!access) return refuse('not_found', 404);
     const now = await currentActor(tx, actor);
@@ -219,9 +228,12 @@ export async function addTeamMember(
         targetId: memberId,
         metadata: joiningSelf && !sees ? { teamId } : { teamId, role: target.role },
       });
+      added = true;
     }
     return succeed({ txid: await currentTxid(tx) });
   });
+  if (result.ok && added) accessBus?.accessChanged(actor.workspaceId, [memberId]);
+  return result;
 }
 
 /**
@@ -234,10 +246,12 @@ export async function removeTeamMember(
   actor: Actor,
   teamId: string,
   memberId: string,
+  accessBus?: AccessNotifier,
 ): Promise<ServiceResult<{ txid: number }>> {
   if (!isUuid(teamId) || !isUuid(memberId)) return refuse('not_found', 404);
 
-  return orm.transaction(async (tx) => {
+  let removed = false;
+  const result = await orm.transaction(async (tx) => {
     const access = await lockTeam(tx, actor.workspaceId, teamId);
     if (!access) return refuse('not_found', 404);
     const now = await currentActor(tx, actor);
@@ -280,9 +294,13 @@ export async function removeTeamMember(
         targetId: memberId,
         metadata: { teamId },
       });
+      removed = true;
     }
     return succeed({ txid: await currentTxid(tx) });
   });
+  // After the commit: a request this person opened before the removal must not receive another row of the team.
+  if (result.ok && removed) accessBus?.accessChanged(actor.workspaceId, [memberId]);
+  return result;
 }
 
 /**

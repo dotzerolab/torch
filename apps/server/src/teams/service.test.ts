@@ -4,7 +4,14 @@ import { describe, expect, it } from 'vitest';
 import type { Db } from '../db.ts';
 import { updateIssue } from '../issues/update-issue.ts';
 import { loadActor } from '../permissions/load-actor.ts';
-import { actorOf, auditRows, refusal, successOf, txidOf } from '../test/admin-helpers.ts';
+import {
+  actorOf,
+  auditRows,
+  recordingBus,
+  refusal,
+  successOf,
+  txidOf,
+} from '../test/admin-helpers.ts';
 import {
   addMember,
   createWorkspaceFixture,
@@ -817,6 +824,101 @@ describe.skipIf(!databaseUrl)('listPrivateTeamDirectory', () => {
       expect(list).toEqual([
         { id: f.teams.ops.id, key: 'OPS', name: 'Operations', memberCount: 3, isMember: true },
       ]);
+    });
+  });
+});
+
+describe.skipIf(!databaseUrl)('team changes signal the access bus', () => {
+  const inTeam = (db: Db, teamId: string, memberId: string) => async () =>
+    (
+      await db.pool.query('select 1 from team_member where team_id = $1 and member_id = $2', [
+        teamId,
+        memberId,
+      ])
+    ).rowCount;
+
+  it('removing a member tells the bus about that member, after the commit', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const owner = await actorOf(db, f.workspaceId, f.members.owner.id);
+      const bus = recordingBus(inTeam(db, f.teams.ops.id, f.members.member.id));
+
+      successOf(await removeTeamMember(db.orm, owner, f.teams.ops.id, f.members.member.id, bus));
+
+      expect(bus.calls).toEqual([{ workspaceId: f.workspaceId, memberIds: [f.members.member.id] }]);
+      // Seen from another connection at the moment of the call: the removal was already committed.
+      expect(await bus.probed()).toEqual([0]);
+    });
+  });
+
+  it('adding a member tells the bus about that member, after the commit', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const owner = await actorOf(db, f.workspaceId, f.members.owner.id);
+      const bus = recordingBus(inTeam(db, f.teams.ops.id, f.members.guest.id));
+
+      successOf(await addTeamMember(db.orm, owner, f.teams.ops.id, f.members.guest.id, bus));
+
+      expect(bus.calls).toEqual([{ workspaceId: f.workspaceId, memberIds: [f.members.guest.id] }]);
+      expect(await bus.probed()).toEqual([1]);
+    });
+  });
+
+  it('a no-op or refused add and remove tells nobody', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const owner = await actorOf(db, f.workspaceId, f.members.owner.id);
+      const guest = await actorOf(db, f.workspaceId, f.members.guest.id);
+      const bus = recordingBus();
+
+      // Already in the team, not in the team, no right to manage it, and an unknown team.
+      successOf(await addTeamMember(db.orm, owner, f.teams.ops.id, f.members.member.id, bus));
+      successOf(await removeTeamMember(db.orm, owner, f.teams.ops.id, f.members.guest.id, bus));
+      expect(
+        (await addTeamMember(db.orm, guest, f.teams.eng.id, f.members.outsider.id, bus)).ok,
+      ).toBe(false);
+      expect(
+        (await removeTeamMember(db.orm, guest, f.teams.eng.id, f.members.owner.id, bus)).ok,
+      ).toBe(false);
+      expect((await addTeamMember(db.orm, owner, UNKNOWN_UUID, f.members.guest.id, bus)).ok).toBe(
+        false,
+      );
+
+      expect(bus.calls).toEqual([]);
+    });
+  });
+
+  it('turning a team private or public tells the whole workspace; a rename or the same privacy tells nobody', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const owner = await actorOf(db, f.workspaceId, f.members.owner.id);
+      const bus = recordingBus();
+
+      successOf(await updateTeam(db.orm, owner, f.teams.eng.id, { name: 'Renamed' }, bus));
+      successOf(await updateTeam(db.orm, owner, f.teams.eng.id, { private: false }, bus));
+      expect(bus.calls).toEqual([]);
+
+      successOf(await updateTeam(db.orm, owner, f.teams.eng.id, { private: true }, bus));
+      successOf(await updateTeam(db.orm, owner, f.teams.eng.id, { private: false }, bus));
+
+      expect(bus.calls).toEqual([
+        { workspaceId: f.workspaceId, memberIds: 'all' },
+        { workspaceId: f.workspaceId, memberIds: 'all' },
+      ]);
+    });
+  });
+
+  it('a refused update tells nobody', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const guest = await actorOf(db, f.workspaceId, f.members.guest.id);
+      const bus = recordingBus();
+
+      expect((await updateTeam(db.orm, guest, f.teams.eng.id, { private: true }, bus)).ok).toBe(
+        false,
+      );
+
+      expect(bus.calls).toEqual([]);
     });
   });
 });

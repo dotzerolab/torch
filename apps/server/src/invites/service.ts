@@ -30,11 +30,12 @@ import {
 } from '@torch/shared/permissions';
 import { and, desc, eq, gt, inArray, isNull, notExists, sql } from 'drizzle-orm';
 import { recordAudit } from '../audit/log.ts';
-import { createSessionsForMembers, revokeSessions } from '../auth/sessions.ts';
+import { createSessionsForMembers, type RevokedSession, revokeSessions } from '../auth/sessions.ts';
 import { generateToken, hashToken, isWellFormedToken } from '../auth/tokens.ts';
 import type { Orm, Tx } from '../db.ts';
 import { currentTxid } from '../mutations/txid.ts';
 import { currentActor } from '../permissions/current-actor.ts';
+import { type AccessNotifier, notifySessionsRevoked } from '../sync/access-bus.ts';
 import { isUniqueViolation } from '../util/pg-error.ts';
 import type { ServiceResult } from '../util/result.ts';
 import { isUuid } from '../util/uuid.ts';
@@ -581,9 +582,11 @@ export async function acceptInvite(
     now: Date;
     userAgent: string | null;
     revokeSessionToken?: string | null;
+    /** Told, after the commit, whose old sessions ended and which returning member got their access back. */
+    accessBus?: AccessNotifier;
   },
 ): Promise<ServiceResult<{ sessionToken: string; workspaceId: string; memberId: string }>> {
-  const { token, now, userAgent, revokeSessionToken } = input;
+  const { token, now, userAgent, revokeSessionToken, accessBus } = input;
   const name = input.name.trim();
   if (name.length < 1 || name.length > MAX_NAME_LENGTH) return refuse('invalid_input', 400);
   if (!isWellFormedToken(token)) return refuse('invite_invalid', 400);
@@ -593,8 +596,12 @@ export async function acceptInvite(
   // refuses the insert and the whole transaction (the burn of the token included) rolls back; running it again
   // picks the next free handle. Two attempts are enough in practice, a third only costs a few milliseconds.
   for (let attempt = 1; ; attempt++) {
+    let revoked: RevokedSession[] = [];
+    let reactivatedId: string | null = null;
     try {
-      return await orm.transaction(async (tx) => {
+      const accepted = await orm.transaction(async (tx) => {
+        revoked = [];
+        reactivatedId = null;
         // Workspace lock first (the order every service follows), so the unlocked read comes before it.
         const [found] = await tx
           .select({ workspaceId: invite.workspaceId })
@@ -737,9 +744,16 @@ export async function acceptInvite(
           .where(and(eq(member.email, consumed.email), isNull(member.deactivatedAt)))
           .for('share');
         const sessionToken = await createSessionsForMembers(tx, active, { now, userAgent });
-        if (revokeSessionToken) await revokeSessions(tx, revokeSessionToken, now);
+        if (revokeSessionToken) revoked = await revokeSessions(tx, revokeSessionToken, now);
+        if (reactivated) reactivatedId = memberId;
         return ok({ sessionToken, workspaceId, memberId });
       });
+      // After the commit: the old cookie's sessions are over, and a returning member holds new memberships.
+      notifySessionsRevoked(accessBus, revoked);
+      if (accepted.ok && reactivatedId) {
+        accessBus?.accessChanged(accepted.value.workspaceId, [reactivatedId]);
+      }
+      return accepted;
     } catch (error) {
       if (error instanceof Abort) return error.result;
       if (attempt < HANDLE_ATTEMPTS && isUniqueViolation(error, 'member_workspace_handle_unique')) {

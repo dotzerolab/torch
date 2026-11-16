@@ -8,12 +8,8 @@ import { IconButton } from '../design/components/IconButton.tsx';
 import { Select } from '../design/components/Select.tsx';
 import { useLocale, useT } from '../design/locale.tsx';
 import { adminFailureMessage } from '../errors.ts';
-import {
-  awaitSynced,
-  membersCollection,
-  type SyncedTeam,
-  teamMembersCollection,
-} from '../sync/collections.ts';
+import { awaitSynced, type SyncedTeam } from '../sync/collections.ts';
+import { useShape } from '../sync/shapes.ts';
 import { adminApi } from './admin-api.ts';
 
 /** Who is in one team, with a way to add and remove people. Opened only for people who may manage the team. */
@@ -28,8 +24,8 @@ export function TeamMembersDialog({
 }) {
   const t = useT();
   const locale = useLocale();
-  const memberRows = membersCollection(workspaceId);
-  const teamRows = teamMembersCollection(workspaceId, team.id);
+  const memberRows = useShape({ kind: 'members', workspaceId });
+  const teamRows = useShape({ kind: 'teamMembers', workspaceId, teamId: team.id });
   const people = useLiveQuery({
     query: (q) => q.from({ member: memberRows }).orderBy(({ member }) => member.name),
   });

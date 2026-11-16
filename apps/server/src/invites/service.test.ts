@@ -24,7 +24,7 @@ import {
   listPrivateTeamDirectory,
   removeTeamMember,
 } from '../teams/service.ts';
-import { actorOf, successOf, txidOf } from '../test/admin-helpers.ts';
+import { actorOf, recordingBus, successOf, txidOf } from '../test/admin-helpers.ts';
 import { addMember, createWorkspaceFixture } from '../test/fixtures.ts';
 import { useSharedDatabase } from '../test/shared-database.ts';
 import type { ServiceResult } from '../util/result.ts';
@@ -1246,6 +1246,85 @@ describe.skipIf(!databaseUrl)('invite service (Postgres)', () => {
         .from(session)
         .where(eq(session.tokenHash, hashToken(previous)));
       expect(old[0]?.revokedAt).toBeNull();
+    });
+
+    it('accepting tells the access bus about the old cookie people and about a returning member, after the commit', async () => {
+      const s = await setup();
+      const { db, f } = s;
+      const email = `back-${unique()}@example.test`;
+      const returning = await addMember(db.orm, f.workspaceId, 'member', { email });
+      await db.orm
+        .update(member)
+        .set({ deactivatedAt: new Date(Date.now() - DAY) })
+        .where(eq(member.id, returning.id));
+      const now = new Date();
+      const previous = await db.orm.transaction((tx) =>
+        createSessionsForMembers(
+          tx,
+          [{ workspaceId: f.workspaceId, memberId: f.members.member.id }],
+          { now, userAgent: null },
+        ),
+      );
+      const created = await pendingInvite(
+        s,
+        { email, role: 'guest', teamIds: [f.teams.eng.id] },
+        now,
+      );
+      const bus = recordingBus(
+        async () =>
+          (
+            await db.pool.query(
+              'select deactivated_at is null as active from member where id = $1',
+              [returning.id],
+            )
+          ).rows[0]?.active,
+      );
+
+      value(
+        await acceptInvite(db.orm, {
+          token: created.token,
+          name: 'Back Again',
+          now,
+          userAgent: null,
+          revokeSessionToken: previous,
+          accessBus: bus,
+        }),
+      );
+
+      expect(bus.calls).toEqual([
+        { workspaceId: f.workspaceId, memberIds: [f.members.member.id] },
+        { workspaceId: f.workspaceId, memberIds: [returning.id] },
+      ]);
+      // Committed by the time the bus was told: the returning member was already active for another connection.
+      expect(await bus.probed()).toEqual([true, true]);
+    });
+
+    it('a refused accept tells the access bus nothing, and a brand new member needs no signal of their own', async () => {
+      const s = await setup();
+      const { db } = s;
+      const bus = recordingBus();
+
+      const refused = await acceptInvite(db.orm, {
+        token: generateToken(),
+        name: 'Nobody',
+        now: new Date(),
+        userAgent: null,
+        accessBus: bus,
+      });
+      expect(refusal(refused)).toEqual({ code: 'invite_invalid', status: 400 });
+
+      const created = await pendingInvite(s, {}, new Date());
+      value(
+        await acceptInvite(db.orm, {
+          token: created.token,
+          name: 'Brand New',
+          now: new Date(),
+          userAgent: null,
+          accessBus: bus,
+        }),
+      );
+
+      expect(bus.calls).toEqual([]);
     });
 
     it('a deactivated member with that email is reactivated with the invited role, keeps their id, and gets exactly the invited teams', async () => {

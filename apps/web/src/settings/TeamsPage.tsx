@@ -12,12 +12,8 @@ import { useToast } from '../design/components/Toast.tsx';
 import { useLocale, useT } from '../design/locale.tsx';
 import { adminFailureMessage } from '../errors.ts';
 import { useTeams } from '../shell/useTeams.ts';
-import {
-  awaitSynced,
-  membersCollection,
-  type SyncedTeam,
-  teamsCollection,
-} from '../sync/collections.ts';
+import { awaitSynced, type SyncedTeam } from '../sync/collections.ts';
+import { membersCollection, teamsCollection } from '../sync/shapes.ts';
 import { actorOf } from './access.ts';
 import { adminApi, type DirectoryTeam } from './admin-api.ts';
 import { TeamMembersDialog } from './TeamMembersDialog.tsx';

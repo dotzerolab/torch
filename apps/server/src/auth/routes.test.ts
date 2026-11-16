@@ -3,6 +3,7 @@ import { loginToken, member, session } from '@torch/shared/db/schema';
 import { eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Db } from '../db.ts';
+import { createAccessBus } from '../sync/access-bus.ts';
 import { createAuthTestApp } from '../test/auth-app.ts';
 import { createWorkspaceFixture, withTempDatabase } from '../test/fixtures.ts';
 import { generateToken } from './tokens.ts';
@@ -926,6 +927,22 @@ describe.skipIf(!databaseUrl)('GET /api/auth/session and POST /api/auth/logout',
     });
   });
 
+  it('sign-out clears the HTTP cache', async () => {
+    await withTempDatabase(async (db) => {
+      const email = `owner-${unique()}@example.test`;
+      await createWorkspaceFixture(db.orm, { email: { owner: email } });
+      const t = createAuthTestApp(db);
+      const { cookie } = await t.signIn(email);
+
+      const res = await t.post('/api/auth/logout', undefined, { cookie });
+      const withoutCookie = await t.post('/api/auth/logout', undefined);
+
+      // Only "cache": "storage" would wipe every workspace stored on the origin.
+      expect(res.headers.get('clear-site-data')).toBe('"cache"');
+      expect(withoutCookie.headers.get('clear-site-data')).toBe('"cache"');
+    });
+  });
+
   it('logout leaves the sessions of another browser alone, and works without a cookie', async () => {
     await withTempDatabase(async (db) => {
       const email = `owner-${unique()}@example.test`;
@@ -995,6 +1012,91 @@ describe.skipIf(!databaseUrl)('rows written by sign-in', () => {
       expect(login?.expiresAt.getTime()).toBe(startedAt + 15 * MINUTE);
       expect(sess?.expiresAt.getTime()).toBe(startedAt + 30 * DAY);
       expect(sess?.createdAt.getTime()).toBe(startedAt);
+    });
+  });
+});
+
+describe.skipIf(!databaseUrl)('sign-out and sign-in end the open shape requests', () => {
+  /** Two workspaces that know the same person, so one cookie carries two sessions. */
+  async function twoWorkspaces(db: Db) {
+    const email = `owner-${unique()}@example.test`;
+    const a = await createWorkspaceFixture(db.orm, { email: { owner: email } });
+    const b = await createWorkspaceFixture(db.orm, { email: { owner: email } });
+    return { email, a, b };
+  }
+
+  it('sign-out ends the open requests of that person in every workspace of the cookie, and only theirs', async () => {
+    await withTempDatabase(async (db) => {
+      const { email, a, b } = await twoWorkspaces(db);
+      const bus = createAccessBus();
+      const t = createAuthTestApp(db, { accessBus: bus });
+      const { cookie } = await t.signIn(email);
+      const mine = [vi.fn(), vi.fn()];
+      const theirs = vi.fn();
+      bus.track(a.workspaceId, a.members.owner.id, mine[0] as () => void);
+      bus.track(b.workspaceId, b.members.owner.id, mine[1] as () => void);
+      bus.track(a.workspaceId, a.members.member.id, theirs);
+
+      const res = await t.post('/api/auth/logout', undefined, { cookie });
+
+      expect(res.status).toBe(204);
+      expect(mine[0]).toHaveBeenCalledTimes(1);
+      expect(mine[1]).toHaveBeenCalledTimes(1);
+      expect(theirs).not.toHaveBeenCalled();
+    });
+  });
+
+  it('sign-out without a cookie, or with one that is not a session, ends nothing', async () => {
+    await withTempDatabase(async (db) => {
+      const { email, a } = await twoWorkspaces(db);
+      const bus = createAccessBus();
+      const t = createAuthTestApp(db, { accessBus: bus });
+      await t.signIn(email);
+      const open = vi.fn();
+      bus.track(a.workspaceId, a.members.owner.id, open);
+
+      await t.post('/api/auth/logout', undefined);
+      await t.post('/api/auth/logout', undefined, { cookie: 'sid=not-a-session' });
+
+      expect(open).not.toHaveBeenCalled();
+    });
+  });
+
+  it('signing in with a cookie already present ends the open requests of the old sessions', async () => {
+    await withTempDatabase(async (db) => {
+      const { email, a, b } = await twoWorkspaces(db);
+      const bus = createAccessBus();
+      const t = createAuthTestApp(db, { accessBus: bus });
+      const first = await t.signIn(email);
+      const inA = vi.fn();
+      const inB = vi.fn();
+      bus.track(a.workspaceId, a.members.owner.id, inA);
+      bus.track(b.workspaceId, b.members.owner.id, inB);
+
+      await t.signIn(email, { cookie: first.cookie });
+
+      expect(inA).toHaveBeenCalledTimes(1);
+      expect(inB).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('a sign-in link that fails leaves the old cookie and its open requests alone', async () => {
+    await withTempDatabase(async (db) => {
+      const { email, a } = await twoWorkspaces(db);
+      const bus = createAccessBus();
+      const t = createAuthTestApp(db, { accessBus: bus });
+      const first = await t.signIn(email);
+      const open = vi.fn();
+      bus.track(a.workspaceId, a.members.owner.id, open);
+
+      const res = await t.post(
+        '/api/auth/verify',
+        { token: generateToken() },
+        { cookie: first.cookie },
+      );
+
+      expect(res.status).toBe(400);
+      expect(open).not.toHaveBeenCalled();
     });
   });
 });

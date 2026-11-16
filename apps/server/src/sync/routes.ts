@@ -1,18 +1,20 @@
 // The permission-filtered shape proxy (ADR 0001): the browser reads only through these routes. Electric itself is
 // never exposed. Per request the server decides who the caller is, which team they may read and exactly what shape
 // to ask Electric for; the only things taken from the client are the sync-protocol cursor parameters.
-import { canSeeTeam } from '@torch/shared/permissions';
+import { type Actor, canSeeTeam } from '@torch/shared/permissions';
 import { Hono } from 'hono';
 import type { Orm } from '../db.ts';
 import type { ActorResolver } from '../permissions/load-actor.ts';
 import { loadTeamAccess, loadVisibleMemberIds } from '../permissions/load-actor.ts';
 import { isUuid } from '../util/uuid.ts';
+import { type AccessBus, createAccessBus } from './access-bus.ts';
 import type { ElectricConfig } from './config.ts';
 import { loadIssueTeamAccess } from './issue-access.ts';
 import {
   issueActivityShape,
   issueDetailShape,
   membersShape,
+  ownMembershipShape,
   type ShapeDefinition,
   type TeamDataKind,
   teamDataShape,
@@ -28,6 +30,8 @@ export type SyncRouteDeps = {
   auth: ActorResolver;
   /** Replaces `fetch` in tests. */
   fetchUpstream?: typeof fetch;
+  /** Ends open shape requests when access changes. One instance per app, shared with the services that signal it. */
+  accessBus?: AccessBus;
 };
 
 /**
@@ -54,6 +58,9 @@ export const SYNC_FORWARDED_PARAMS: readonly string[] = [
 // session ending, so it becomes a plain 502.
 const PROTOCOL_STATUSES: ReadonlySet<number> = new Set([200, 204, 304, 400, 409]);
 
+// The upstream statuses whose Retry-After is relayed: Electric's way of saying "too busy, ask again later".
+const RETRY_AFTER_STATUSES: ReadonlySet<number> = new Set([429, 503]);
+
 // Hop-by-hop headers and the ones that stop describing the body once the runtime has decoded it (ADR section 9).
 // Electric's wildcard CORS headers go too: the browser reads this proxy same-origin only.
 const DROPPED_RESPONSE_HEADERS = [
@@ -64,18 +71,20 @@ const DROPPED_RESPONSE_HEADERS = [
   'keep-alive',
 ];
 
+/** Every relayed shape response, whatever Electric said: stored at most per user, revalidated on every use. */
+export const SHAPE_CACHE_CONTROL = 'private, no-cache';
+
 function relayHeaders(upstream: Headers): Headers {
   const headers = new Headers(upstream);
   for (const name of DROPPED_RESPONSE_HEADERS) headers.delete(name);
   for (const name of [...headers.keys()])
     if (name.startsWith('access-control-')) headers.delete(name);
 
-  // A shape response belongs to one user's permissions: no shared cache may keep it.
-  const cacheControl = headers.get('cache-control');
-  headers.set(
-    'cache-control',
-    cacheControl ? cacheControl.replace(/\bpublic\b/gi, 'private') : 'private',
-  );
+  // A shape response belongs to one user's permissions and one moment of them. The browser may keep it but must
+  // ask again before every use: the question reaches this proxy, which authorises the caller and then lets
+  // Electric answer 304 against the ETag. Electric's own `max-age` would serve the first snapshot to a user
+  // whose access has since ended.
+  headers.set('cache-control', SHAPE_CACHE_CONTROL);
   const vary = headers.get('vary');
   if (!vary || !/(^|,)\s*(cookie|\*)\s*(,|$)/i.test(vary)) {
     headers.set('vary', vary ? `${vary}, Cookie` : 'Cookie');
@@ -83,15 +92,88 @@ function relayHeaders(upstream: Headers): Headers {
   return headers;
 }
 
+/** Passes a body through and calls `release` once it has ended, failed or been cancelled by the reader. */
+function releasing(
+  body: ReadableStream<Uint8Array>,
+  release: () => void,
+): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          release();
+          controller.close();
+        } else {
+          controller.enqueue(chunk.value);
+        }
+      } catch (error) {
+        release();
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      release();
+      await reader.cancel(reason);
+    },
+  });
+}
+
+/**
+ * What a request is answered with when its person's access changed before Electric answered.
+ *
+ * A long-poll (`live=true`) gets exactly what Electric itself answers when its wait runs out with nothing new: "up to
+ * date at the offset you already hold". The client asks again at once, and the proxy then authorises that request
+ * against the new state (a removed member gets 404, a signed-out one 401). Anything else (a request that was not
+ * waiting for changes) gets a plain 503, which the client's fetch layer retries with a short backoff.
+ *
+ * Deliberately NOT a 409 must-refetch: the pinned client files the shape's current handle as expired on a 409, and as
+ * this shape did not change on Electric's side the next real answer carries the same handle, which the client then
+ * rejects as a stale cached response, retries, and warns about until it gives up and resets (a real-client test
+ * pins that the answer below does not do this).
+ */
+function accessChangedResponse(incoming: URLSearchParams): Response {
+  const headers = new Headers({
+    'cache-control': SHAPE_CACHE_CONTROL,
+    vary: 'Cookie',
+    'content-type': 'application/json',
+  });
+  const handle = incoming.get('handle');
+  const offset = incoming.get('offset');
+  if (incoming.get('live') === 'true' && handle && offset && offset !== '-1') {
+    headers.set('electric-handle', handle);
+    headers.set('electric-offset', offset);
+    // The client needs a cursor on every live answer; it only sends it back, so the one it sent is as good as any.
+    headers.set('electric-cursor', incoming.get('cursor') ?? '0');
+    headers.set('electric-up-to-date', '');
+    return new Response('[{"headers":{"control":"up-to-date"}}]', { status: 200, headers });
+  }
+  return new Response('{"error":"access_changed"}', { status: 503, headers });
+}
+
 export function createSyncRoutes(deps: SyncRouteDeps): Hono {
   const { orm, electric, auth } = deps;
   const fetchUpstream = deps.fetchUpstream ?? fetch;
+  const accessBus = deps.accessBus ?? createAccessBus();
   const routes = new Hono();
+
+  // Hono routes a HEAD request to the GET handler and drops the body of its answer: the request would stay
+  // registered and the upstream response unread. A shape is read with GET only.
+  routes.use('*', async (c, next) => {
+    if (c.req.method !== 'HEAD') return next();
+    return c.json({ error: 'method_not_allowed' }, 405, { allow: 'GET' });
+  });
 
   const notFound = () => Response.json({ error: 'not_found' }, { status: 404 });
   const unauthenticated = () => Response.json({ error: 'unauthenticated' }, { status: 401 });
 
-  async function proxy(req: Request, shape: ShapeDefinition): Promise<Response> {
+  async function proxy(
+    req: Request,
+    shape: ShapeDefinition,
+    actor: Actor,
+    since: number,
+  ): Promise<Response> {
     const url = new URL(`${electric.url}/v1/shape`);
     const incoming = new URL(req.url).searchParams;
     for (const name of SYNC_FORWARDED_PARAMS) {
@@ -106,12 +188,26 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
     url.searchParams.set('columns', shape.columns.join(','));
     url.searchParams.set('secret', electric.secret);
 
+    // The request ends when the client goes away or when this person's access changes (see access-bus.ts); the bus
+    // keeps it registered until the last byte of the answer has been sent, so a streamed answer ends too. `since` was
+    // read before the caller was authorised: a change that landed meanwhile ends the request here, before Electric.
+    const ended = new AbortController();
+    const release = accessBus.track(actor.workspaceId, actor.memberId, () => ended.abort(), since);
+    if (ended.signal.aborted) return accessChangedResponse(incoming);
+
     let upstream: Response;
     try {
-      upstream = await fetchUpstream(url, { signal: req.signal });
+      // The one request header that crosses: the validator of a response this proxy sent. Credentials stay here.
+      const ifNoneMatch = req.headers.get('if-none-match');
+      upstream = await fetchUpstream(url, {
+        signal: AbortSignal.any([req.signal, ended.signal]),
+        ...(ifNoneMatch ? { headers: { 'if-none-match': ifNoneMatch } } : {}),
+      });
     } catch (error) {
+      release();
       // The client went away mid long-poll: nothing to answer, nothing to log.
       if (req.signal.aborted) return new Response(null, { status: 499 });
+      if (ended.signal.aborted) return accessChangedResponse(incoming);
       // Category only: the message of a failed fetch can carry the URL, and the URL carries the secret.
       console.error(
         'sync upstream unreachable:',
@@ -120,12 +216,23 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
       return Response.json({ error: 'sync_unavailable' }, { status: 502 });
     }
     if (!PROTOCOL_STATUSES.has(upstream.status)) {
+      release();
       await upstream.body?.cancel();
       // The status only: the body can describe the configuration (and the URL carries the secret).
       console.error('sync upstream failed with status', upstream.status);
-      return Response.json({ error: 'sync_unavailable' }, { status: 502 });
+      // Electric's own overload answer carries how long to wait; the client's backoff takes it as a floor.
+      const retryAfter = RETRY_AFTER_STATUSES.has(upstream.status)
+        ? upstream.headers.get('retry-after')
+        : null;
+      return Response.json(
+        { error: 'sync_unavailable' },
+        { status: 502, ...(retryAfter ? { headers: { 'retry-after': retryAfter } } : {}) },
+      );
     }
-    return new Response(upstream.body, {
+    let body: ReadableStream<Uint8Array> | null = null;
+    if (upstream.body) body = releasing(upstream.body, release);
+    else release();
+    return new Response(body, {
       status: upstream.status,
       statusText: upstream.statusText,
       headers: relayHeaders(upstream.headers),
@@ -142,24 +249,39 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
   routes.get('/w/:workspaceId/teams', async (c) => {
     const workspaceId = c.req.param('workspaceId');
     if (!isUuid(workspaceId)) return notFound();
+    const since = accessBus.seq();
     const actor = await authenticate(c.req.raw, workspaceId);
     if (!actor) return unauthenticated();
-    return proxy(c.req.raw, teamsShape(actor));
+    return proxy(c.req.raw, teamsShape(actor), actor, since);
   });
 
   // Member profiles: the shape follows the actor's role and stored team memberships, never the URL or the query.
   routes.get('/w/:workspaceId/members', async (c) => {
     const workspaceId = c.req.param('workspaceId');
     if (!isUuid(workspaceId)) return notFound();
+    const since = accessBus.seq();
     const actor = await authenticate(c.req.raw, workspaceId);
     if (!actor) return unauthenticated();
-    return proxy(c.req.raw, membersShape(actor, await loadVisibleMemberIds(orm, actor)));
+    const shape = membersShape(actor, await loadVisibleMemberIds(orm, actor));
+    return proxy(c.req.raw, shape, actor, since);
+  });
+
+  // The actor's own team memberships: the signal that tells an open page its access changed (a private-team join
+  // or removal) without waiting for the next poll of the shapes it already holds.
+  routes.get('/w/:workspaceId/me/team-memberships', async (c) => {
+    const workspaceId = c.req.param('workspaceId');
+    if (!isUuid(workspaceId)) return notFound();
+    const since = accessBus.seq();
+    const actor = await authenticate(c.req.raw, workspaceId);
+    if (!actor) return unauthenticated();
+    return proxy(c.req.raw, ownMembershipShape(actor), actor, since);
   });
 
   const teamRoute = (path: string, kind: 'issues' | 'workflow_states' | 'team_members') =>
     routes.get(`/w/:workspaceId/teams/:teamId/${path}`, async (c) => {
       const workspaceId = c.req.param('workspaceId');
       if (!isUuid(workspaceId)) return notFound();
+      const since = accessBus.seq();
       const actor = await authenticate(c.req.raw, workspaceId);
       if (!actor) return unauthenticated();
 
@@ -172,6 +294,8 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
       return proxy(
         c.req.raw,
         kind === 'team_members' ? teamMembersShape(access.id) : teamScopedShape(kind, access.id),
+        actor,
+        since,
       );
     });
   teamRoute('issues', 'issues');
@@ -184,6 +308,7 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
     routes.get(`/w/:workspaceId/teams/:teamId/${path}`, async (c) => {
       const workspaceId = c.req.param('workspaceId');
       if (!isUuid(workspaceId)) return notFound();
+      const since = accessBus.seq();
       const actor = await authenticate(c.req.raw, workspaceId);
       if (!actor) return unauthenticated();
 
@@ -191,7 +316,7 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
       if (!isUuid(teamId)) return notFound();
       const access = await loadTeamAccess(orm, workspaceId, teamId);
       if (!access || !canSeeTeam(actor, access)) return notFound();
-      return proxy(c.req.raw, teamDataShape(kind, access.id));
+      return proxy(c.req.raw, teamDataShape(kind, access.id), actor, since);
     });
   teamDataRoute('labels', 'labels');
   teamDataRoute('issue-labels', 'issue_labels');
@@ -203,9 +328,10 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
   routes.get('/w/:workspaceId/workspace-labels', async (c) => {
     const workspaceId = c.req.param('workspaceId');
     if (!isUuid(workspaceId)) return notFound();
+    const since = accessBus.seq();
     const actor = await authenticate(c.req.raw, workspaceId);
     if (!actor) return unauthenticated();
-    return proxy(c.req.raw, workspaceLabelsShape(actor.workspaceId));
+    return proxy(c.req.raw, workspaceLabelsShape(actor.workspaceId), actor, since);
   });
 
   // Per opened issue. The issue is looked up first and its team decides visibility: an issue of a team the actor cannot
@@ -214,12 +340,13 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
     routes.get(`/w/:workspaceId/issues/:issueId/${path}`, async (c) => {
       const workspaceId = c.req.param('workspaceId');
       if (!isUuid(workspaceId)) return notFound();
+      const since = accessBus.seq();
       const actor = await authenticate(c.req.raw, workspaceId);
       if (!actor) return unauthenticated();
 
       const found = await loadIssueTeamAccess(orm, workspaceId, c.req.param('issueId'));
       if (!found || !canSeeTeam(actor, found.access)) return notFound();
-      return proxy(c.req.raw, build(found.issueId));
+      return proxy(c.req.raw, build(found.issueId), actor, since);
     });
   issueRoute('detail', issueDetailShape);
   issueRoute('activity', issueActivityShape);

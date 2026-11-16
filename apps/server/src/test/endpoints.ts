@@ -588,6 +588,12 @@ export const ENDPOINTS: EndpointCase[] = [
   // ---- sync shapes ----
   { name: 'sync: teams', method: 'GET', path: (ids) => `${sync(ids)}/teams`, minRole: 'guest' },
   { name: 'sync: members', method: 'GET', path: (ids) => `${sync(ids)}/members`, minRole: 'guest' },
+  {
+    name: 'sync: own team memberships',
+    method: 'GET',
+    path: (ids) => `${sync(ids)}/me/team-memberships`,
+    minRole: 'guest',
+  },
   ...TEAMS.flatMap(({ team: key, label, see }): EndpointCase[] => [
     {
       name: `sync: issues (${label})`,

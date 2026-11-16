@@ -260,3 +260,17 @@ export function issueActivityShape(issueId: string): ShapeDefinition {
     ],
   };
 }
+
+/**
+ * The actor's own team memberships, workspace-wide. Everything the client needs to notice that its own access
+ * changed (a join or removal of a private team) arrives here as one small shape. Both values come from the
+ * authenticated actor, never from the request.
+ */
+export function ownMembershipShape(actor: Actor): ShapeDefinition {
+  return {
+    table: 'team_member',
+    where: 'workspace_id = $1 AND member_id = $2',
+    params: [actor.workspaceId, actor.memberId],
+    columns: [...TEAM_MEMBER_COLUMNS],
+  };
+}

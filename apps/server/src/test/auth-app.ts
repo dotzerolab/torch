@@ -5,6 +5,7 @@ import { createApp } from '../app.ts';
 import { createSessionActorResolver } from '../auth/resolver.ts';
 import type { Db } from '../db.ts';
 import { createMemoryMailer } from '../mail/mailer.ts';
+import type { AccessBus } from '../sync/access-bus.ts';
 
 export const testBrand: Brand = {
   productName: 'Acme Tasks',
@@ -27,7 +28,12 @@ export type RequestOptions = {
 
 export function createAuthTestApp(
   db: Db,
-  opts: { appUrl?: string; trustProxy?: boolean; mailerFails?: boolean } = {},
+  opts: {
+    appUrl?: string;
+    trustProxy?: boolean;
+    mailerFails?: boolean;
+    accessBus?: AccessBus;
+  } = {},
 ) {
   const appUrl = opts.appUrl ?? 'http://app.example.test';
   const clock = { current: new Date() };
@@ -48,6 +54,7 @@ export function createAuthTestApp(
     mailer: sendingMailer,
     auth,
     now,
+    accessBus: opts.accessBus,
   });
   const origin = new URL(appUrl).origin;
 

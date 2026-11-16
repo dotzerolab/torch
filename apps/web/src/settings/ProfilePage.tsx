@@ -8,7 +8,8 @@ import { Select } from '../design/components/Select.tsx';
 import { useToast } from '../design/components/Toast.tsx';
 import { useLocale, useT } from '../design/locale.tsx';
 import { adminFailureMessage } from '../errors.ts';
-import { awaitSynced, membersCollection, type SyncedMember } from '../sync/collections.ts';
+import { awaitSynced, type SyncedMember } from '../sync/collections.ts';
+import { membersCollection, useShape } from '../sync/shapes.ts';
 import { adminApi } from './admin-api.ts';
 
 const deviceTimeZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -137,7 +138,7 @@ function ProfileForm({ workspaceId, me }: { workspaceId: string; me: SyncedMembe
 /** The signed-in person's own name, handle, language and time zone. Every role has this page. */
 export function ProfilePage({ workspace }: { workspace: SessionWorkspace }) {
   const t = useT();
-  const collection = membersCollection(workspace.id);
+  const collection = useShape({ kind: 'members', workspaceId: workspace.id });
   const { data, isReady } = useLiveQuery({ query: (q) => q.from({ member: collection }) });
   const me = data.find((member) => member.id === workspace.memberId);
 
