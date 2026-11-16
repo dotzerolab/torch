@@ -213,7 +213,8 @@ describe.skipIf(!databaseUrl)('createIssue', () => {
       subscriberIds: [f.members.member.id, f.members.admin.id, f.members.guest.id].sort(),
       linkIds: links.map((row) => row.id).sort(),
     };
-    const snapshot = (events[0]?.data as { issue: Record<string, unknown> }).issue;
+    const snapshot =
+      (events[0]?.data as { issue?: Record<string, unknown> } | undefined)?.issue ?? {};
     expect(sorted(snapshot.labelIds)).toEqual(startedWith.labelIds);
     expect(sorted(snapshot.subscriberIds)).toEqual(startedWith.subscriberIds);
     expect(sorted(snapshot.linkIds)).toEqual(startedWith.linkIds);
