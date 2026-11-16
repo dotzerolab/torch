@@ -206,6 +206,22 @@ describe.skipIf(!databaseUrl)('createIssue', () => {
       identifier: 'ALL-1',
       externalRefs: [{ source: 'tracker', id: 'REQ-1', url: 'https://example.test/r/1' }],
     });
+    // The snapshot (and the history row) carry what the issue started with: labels, subscribers and links.
+    const sorted = (value: unknown) => [...(value as string[])].sort();
+    const startedWith = {
+      labelIds: [teamLabel.id, workspaceLabel.id].sort(),
+      subscriberIds: [f.members.member.id, f.members.admin.id, f.members.guest.id].sort(),
+      linkIds: links.map((row) => row.id).sort(),
+    };
+    const snapshot = (events[0]?.data as { issue: Record<string, unknown> }).issue;
+    expect(sorted(snapshot.labelIds)).toEqual(startedWith.labelIds);
+    expect(sorted(snapshot.subscriberIds)).toEqual(startedWith.subscriberIds);
+    expect(sorted(snapshot.linkIds)).toEqual(startedWith.linkIds);
+    const created = activity[0]?.toValue as Record<string, unknown>;
+    expect(created).toMatchObject({ identifier: 'ALL-1', title: 'Everything at once' });
+    expect(sorted(created.labelIds)).toEqual(startedWith.labelIds);
+    expect(sorted(created.subscriberIds)).toEqual(startedWith.subscriberIds);
+    expect(sorted(created.linkIds)).toEqual(startedWith.linkIds);
     expect(await counterOf(db, t.team.id)).toBe(1);
   });
 

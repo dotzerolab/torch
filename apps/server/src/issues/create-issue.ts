@@ -247,15 +247,20 @@ async function createInTransaction(
   await tx
     .insert(issueSubscriber)
     .values([...subscribers].map((memberId) => ({ ...where, memberId })));
+  let linkIds: string[] = [];
   if (data.links?.length) {
-    await tx.insert(issueLink).values(
-      data.links.map((link) => ({
-        ...where,
-        url: link.url,
-        title: link.title ?? null,
-        createdBy: actor.memberId,
-      })),
-    );
+    const inserted = await tx
+      .insert(issueLink)
+      .values(
+        data.links.map((link) => ({
+          ...where,
+          url: link.url,
+          title: link.title ?? null,
+          createdBy: actor.memberId,
+        })),
+      )
+      .returning({ id: issueLink.id });
+    linkIds = inserted.map((row) => row.id);
   }
   let ref: ExternalRefRow | undefined;
   if (data.externalRef) {
@@ -272,7 +277,16 @@ async function createInTransaction(
       .returning();
   }
 
-  await recordIssueChange(tx, actor, { kind: 'created', issue: created, externalRef: ref });
+  await recordIssueChange(tx, actor, {
+    kind: 'created',
+    issue: created,
+    externalRef: ref,
+    initial: {
+      labelIds: keptLabels.map((row) => row.id),
+      subscriberIds: [...subscribers],
+      linkIds,
+    },
+  });
 
   const body: CreatedIssue = {
     issue: toIssueDto(created, {

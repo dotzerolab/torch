@@ -22,7 +22,13 @@ import type { Tx } from '../db.ts';
 import type { ClientActor } from '../permissions/load-actor.ts';
 
 export type IssueChange =
-  | { kind: 'created'; issue: IssueRow; externalRef?: ExternalRefRow }
+  | {
+      kind: 'created';
+      issue: IssueRow;
+      externalRef?: ExternalRefRow;
+      /** What the issue started with, so a consumer of the event never has to ask for it. */
+      initial?: { labelIds: string[]; subscriberIds: string[]; linkIds: string[] };
+    }
   | { kind: 'updated'; before: IssueRow; after: IssueRow }
   | { kind: 'labels'; issueId: string; added: string[]; removed: string[] }
   | {
@@ -125,9 +131,14 @@ export async function recordIssueChange(
 
   switch (change.kind) {
     case 'created': {
-      const fields = snapshot(change.issue);
+      const initial = change.initial ?? { labelIds: [], subscriberIds: [], linkIds: [] };
+      const fields = { ...snapshot(change.issue), ...initial };
       activity.push(
-        activityRow('issue.created', null, null, { identifier, title: change.issue.title }),
+        activityRow('issue.created', null, null, {
+          identifier,
+          title: change.issue.title,
+          ...initial,
+        }),
       );
       events.push(eventRow('issue.created', { issue: fields }));
       break;
