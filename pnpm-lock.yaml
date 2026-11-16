@@ -96,9 +96,6 @@ importers:
       '@tanstack/electric-db-collection':
         specifier: 1.0.0-rc.1.5
         version: 1.0.0-rc.1.5(typescript@6.0.3)
-      '@tanstack/offline-transactions':
-        specifier: 1.2.1
-        version: 1.2.1(@tanstack/db@1.0.0-rc.1.5(typescript@6.0.3))
       '@tanstack/react-db':
         specifier: 1.0.0-rc.1.5
         version: 1.0.0-rc.1.5(react@19.3.1)(typescript@6.0.3)
@@ -1239,18 +1236,6 @@ packages:
 
   '@tanstack/electric-db-collection@1.0.0-rc.1.5':
     resolution: {integrity: sha512-Q0A8Y6cgFIXyKEyDOjme3JzTaBbIxPcytLQO8nQ5Urtg39Zov7Bj0UmSEkuupXEUKTt2GkwofVTIlpKASWVT8w==}
-
-  '@tanstack/offline-transactions@1.2.1':
-    resolution: {integrity: sha512-/tOkmOis4xu56ARlCSvSzCkng1YjCrixv9EFRPZZ8qeBz8mr5PAcUuMZWJB1jwD2/ypgjuTiCNFHQz5M/wBWbA==}
-    peerDependencies:
-      '@react-native-community/netinfo': '>=11.0.0'
-      '@tanstack/db': ^1.0.0-rc.0
-      react-native: '>=0.70.0'
-    peerDependenciesMeta:
-      '@react-native-community/netinfo':
-        optional: true
-      react-native:
-        optional: true
 
   '@tanstack/pacer-lite@0.3.0':
     resolution: {integrity: sha512-+YeHKWX5Zd1Irga2smwAolGtzOcf8VVYhM2QI5XEA5TN58iKKufTjhvrbTCEgLLglR1ynHMGVT/l4m5PkwOdaw==}
@@ -2901,10 +2886,6 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
       - typescript
-
-  '@tanstack/offline-transactions@1.2.1(@tanstack/db@1.0.0-rc.1.5(typescript@6.0.3))':
-    dependencies:
-      '@tanstack/db': 1.0.0-rc.1.5(typescript@6.0.3)
 
   '@tanstack/pacer-lite@0.3.0': {}
 
