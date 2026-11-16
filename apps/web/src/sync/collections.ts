@@ -6,6 +6,7 @@ import { FetchError } from '@electric-sql/client';
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence';
 import { electricCollectionOptions } from '@tanstack/electric-db-collection';
 import { createCollection } from '@tanstack/react-db';
+import { createDeviceFollower } from './device-follow.ts';
 import { toIssueUpdate } from './issue-update.ts';
 import { enqueueWrite, type OutboxWrite } from './outbox.ts';
 import { hasDeviceCopy, persistenceFor, queueDeviceCopy, waitUntilStored } from './persistence.ts';
@@ -113,62 +114,147 @@ export const RENDER_FROM_DEVICE_AFTER_MS = 400;
 
 type PersistableOptions = { id?: string; sync?: unknown; onUpdate?: unknown };
 
+type SyncParams = {
+  markReady: () => void;
+  truncate: (...args: never[]) => void;
+  collection: unknown;
+};
+type SyncFunction = (params: SyncParams) => unknown;
+type SyncObject = { sync: SyncFunction } & Record<string, unknown>;
+
+/** What a wrapped sync tells its owner. */
+type SyncHooks = {
+  /** The shape applied an answer of the server: `markReady` is called after every `up-to-date`, not only the first. */
+  settled: (collection: { keys(): Iterable<string | number> }) => void;
+  /** A `must-refetch`: the shape started over. */
+  truncated: () => void;
+  /** The instance was cleaned up. */
+  cleanup: () => void;
+};
+
+/**
+ * The same options with a sync that reports what the rest of the page needs to know: that the shape settled (the access
+ * watcher compares rows when it does; nothing can subscribe to a removal of a row that came with the first sync), that
+ * it was truncated, and when it ended. It wraps the sync BEFORE the persistence layer does, so it works the same for a
+ * warm instance, a cold one and a page without a device copy.
+ */
+export function observeSync<T extends PersistableOptions>(options: T, hooks: SyncHooks): T {
+  const inner = options.sync as SyncObject;
+  return {
+    ...options,
+    sync: {
+      ...inner,
+      sync: (params: SyncParams) => {
+        const result = inner.sync({
+          ...params,
+          markReady: () => {
+            params.markReady();
+            hooks.settled(params.collection as { keys(): Iterable<string | number> });
+          },
+          truncate: (...args: never[]) => {
+            params.truncate(...args);
+            hooks.truncated();
+          },
+        });
+        const end = () => hooks.cleanup();
+        if (typeof result === 'function') {
+          return () => {
+            end();
+            return (result as () => unknown)();
+          };
+        }
+        const object = (result ?? {}) as { cleanup?: () => unknown };
+        return {
+          ...object,
+          cleanup: () => {
+            end();
+            return object.cleanup?.();
+          },
+        };
+      },
+    },
+  };
+}
+
 /**
  * What a shape does with the device store.
  *
  * Warm (the device already holds the collection): the instance is a persisted one. It renders the stored rows when the
- * network is slow or gone, resumes the shape from where the device copy stopped, and writes the small changes.
+ * network is slow or gone, resumes the shape from where the device copy stopped, and writes the small changes (the
+ * library also applies a delete or a truncate to the store).
  *
  * Cold (first visit, or the copy was deleted): the instance stays in memory. Writing a whole first snapshot through the
  * persistence layer takes seconds for 10,000 rows, and the layer admits the next change only after the write, so a
  * remote edit shortly after the load would wait for it. Once the shape is up to date a headless persisted instance of
  * the same shape reads it again and writes it in the background; nothing reads that instance, so it delays nothing.
- * The next visit is warm. A team that is gone for this person is never persisted.
+ * The next visit is warm. That instance ends after its write, so a follower (`device-follow.ts`) runs it again over the
+ * populated store when a row later leaves the shape or the shape starts over: the library applies the server's deletes to
+ * the store, resuming from the stored offset. A team that is gone for this person is never persisted.
  */
 function persisted<T extends PersistableOptions>(
   workspaceId: string,
   build: () => T,
   context: ShapeContext,
 ): T {
-  const options = build();
   const persistence = context.inert ? null : persistenceFor(workspaceId);
-  const id = options.id;
-  if (!persistence || !id) return options;
-  if (hasDeviceCopy(workspaceId, id)) {
-    return persistedCollectionOptions({
-      ...(options as object),
-      persistence,
-      initialRender: { strategy: 'network-first', networkTimeoutMs: RENDER_FROM_DEVICE_AFTER_MS },
-    } as never) as unknown as T;
-  }
-  const sync = options.sync as { sync: (params: { markReady: () => void }) => unknown };
-  let started = false;
-  return {
-    ...options,
-    sync: {
-      ...sync,
-      sync: (params: { markReady: () => void }) =>
-        sync.sync({
-          ...params,
-          markReady: () => {
-            params.markReady();
-            if (started) return;
-            started = true;
-            copyToDevice(workspaceId, id, build, persistence);
-          },
-        }),
+  const first = build();
+  const id = first.id;
+  const cold = !!persistence && !!id && !hasDeviceCopy(workspaceId, id);
+  // The copy job that is running for this instance, so that ending the instance can end it too.
+  const running: RunningCopy = { stop: null };
+  let liveKeys: () => Iterable<string | number> = () => [];
+  const follower =
+    cold && persistence && id
+      ? createDeviceFollower({
+          keys: () => liveKeys(),
+          copy: () => copyToDevice(workspaceId, id, build, persistence, running, 'copy'),
+          refresh: () => copyToDevice(workspaceId, id, build, persistence, running, 'refresh'),
+          onCancel: () => running.stop?.(),
+        })
+      : null;
+  const observed = observeSync(first, {
+    settled: (collection) => {
+      liveKeys = () => collection.keys();
+      follower?.settled();
+      context.settled();
     },
-  };
+    truncated: () => follower?.truncated(),
+    cleanup: () => {
+      running.cancelled = true;
+      follower?.cancel();
+    },
+  });
+  if (!persistence || !id || cold) return observed;
+  return persistedCollectionOptions({
+    ...(observed as object),
+    persistence,
+    initialRender: { strategy: 'network-first', networkTimeoutMs: RENDER_FROM_DEVICE_AFTER_MS },
+  } as never) as unknown as T;
 }
 
-/** Reads a shape that is up to date once more through a persisted instance nobody reads, and ends it when stored. */
+/** The stop of the copy job a shape instance has running, if any. */
+type RunningCopy = { stop: (() => void) | null; cancelled?: boolean };
+
+/** How long a refresh waits for the store to catch up: a changing shape must not hold the queue for a minute. */
+const REFRESH_STORE_TIMEOUT_MS = 15_000;
+/** How long a refresh waits for the network before it would fall back to the stored rows (it then changes nothing). */
+const REFRESH_NETWORK_TIMEOUT_MS = 30_000;
+
+/**
+ * Reads a shape through a persisted instance nobody reads and ends it once the store holds what it holds. The first copy
+ * starts from an empty store; a refresh starts from the populated one, so the library applies what the server removed
+ * (a delete message, or a reset after a `must-refetch`) and a plain delete resumes from the stored offset.
+ */
 function copyToDevice(
   workspaceId: string,
   id: string,
   build: () => PersistableOptions,
   persistence: NonNullable<ReturnType<typeof persistenceFor>>,
-): void {
-  queueDeviceCopy(workspaceId, async (registerStop) => {
+  running: RunningCopy,
+  mode: 'copy' | 'refresh',
+): Promise<void> {
+  return queueDeviceCopy(workspaceId, async (registerStop) => {
+    if (running.cancelled) return;
     const copy = createCollection(
       persistedCollectionOptions({
         ...(build() as object),
@@ -176,17 +262,40 @@ function copyToDevice(
         onUpdate: undefined,
         persistence,
         id,
+        // Over a populated store (a refresh) the network answer must win over the stored rows, however long it takes.
+        ...(mode === 'refresh'
+          ? {
+              initialRender: {
+                strategy: 'network-first',
+                networkTimeoutMs: REFRESH_NETWORK_TIMEOUT_MS,
+              },
+            }
+          : {}),
       } as never) as never,
     ) as unknown as { preload(): Promise<void>; size: number; cleanup(): Promise<void> | void };
     let stopped = false;
-    registerStop(() => {
-      stopped = true;
-      void Promise.resolve(copy.cleanup()).catch(() => {});
+    let ended!: () => void;
+    // `preload` of an instance that was cleaned up may never settle: the job must not wait for it, or the queue stalls.
+    const interrupted = new Promise<void>((resolve) => {
+      ended = resolve;
     });
+    const stop = () => {
+      stopped = true;
+      ended();
+      void Promise.resolve(copy.cleanup()).catch(() => {});
+    };
+    registerStop(stop);
+    running.stop = stop;
     try {
-      await copy.preload();
-      if (!stopped) await waitUntilStored(workspaceId, id, copy.size);
+      await Promise.race([copy.preload(), interrupted]);
+      if (!stopped) {
+        await waitUntilStored(workspaceId, id, () => copy.size, {
+          timeoutMs: mode === 'refresh' ? REFRESH_STORE_TIMEOUT_MS : undefined,
+          isCancelled: () => stopped,
+        });
+      }
     } finally {
+      if (running.stop === stop) running.stop = null;
       if (!stopped) await Promise.resolve(copy.cleanup()).catch(() => {});
     }
   });
@@ -211,7 +320,7 @@ function shapeOptions(
 /** A team the server no longer shows: an empty collection that never syncs, so nothing asks for it again. */
 const inertSync = { sync: ({ markReady }: { markReady: () => void }) => markReady() };
 
-const NO_CONTEXT: ShapeContext = { dropTeam: () => {}, inert: false };
+const NO_CONTEXT: ShapeContext = { dropTeam: () => {}, inert: false, settled: () => {} };
 
 export function createTeamsCollection(
   workspaceId: string,

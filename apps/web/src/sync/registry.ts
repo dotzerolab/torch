@@ -19,6 +19,11 @@ export type Cleanable = { cleanup(options?: { dependents?: boolean }): unknown }
 export type ShapeContext = {
   dropTeam: (workspaceId: string, teamId: string) => void;
   inert: boolean;
+  /**
+   * The shape has just applied an answer of the server (every `up-to-date`, and the one after a `must-refetch`): its rows
+   * are current. Only the instance the registry holds is heard; a replaced one may still answer once while it stops.
+   */
+  settled: () => void;
 };
 
 export type Factories = {
@@ -73,6 +78,7 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
   // again and loop; it is served an empty local collection until the team id comes back in the `teams` shape.
   const gone = new Set<string>();
   const listeners = new Set<() => void>();
+  const settledListeners = new Map<ShapeKind, Set<(workspaceId: string) => void>>();
   // Readers per team-scoped shape (React components holding it), and the timer that closes one nobody reads.
   const holds = new Map<string, number>();
   const pauseTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -113,7 +119,12 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
       id: string,
       context: ShapeContext,
     ) => Cleanable;
-    return { collection: make(key, id, { dropTeam, inert }), generation };
+    const settled = () => {
+      // Only the current instance of the shape: a restart or a drop already replaced the one that calls.
+      if (entries.get(k)?.generation !== generation) return;
+      for (const listener of [...(settledListeners.get(key.kind) ?? [])]) listener(key.workspaceId);
+    };
+    return { collection: make(key, id, { dropTeam, inert, settled }), generation };
   }
 
   function get<K extends ShapeKey>(key: K): CollectionFor<F, K> {
@@ -217,6 +228,16 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     return entries.size;
   }
 
+  /** `listener` hears every settle of the current instance of a shape of this kind (any workspace). */
+  function onSettled(kind: ShapeKind, listener: (workspaceId: string) => void): () => void {
+    const set = settledListeners.get(kind) ?? new Set();
+    settledListeners.set(kind, set);
+    set.add(listener);
+    return () => {
+      set.delete(listener);
+    };
+  }
+
   function subscribe(listener: () => void): () => void {
     listeners.add(listener);
     return () => {
@@ -236,7 +257,18 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     notify();
   }
 
-  return { get, hold, liveCount, restart, dropTeam, reinstateTeam, isGone, subscribe, reset };
+  return {
+    get,
+    hold,
+    liveCount,
+    restart,
+    dropTeam,
+    reinstateTeam,
+    isGone,
+    subscribe,
+    onSettled,
+    reset,
+  };
 }
 
 export type SyncRegistry<F extends Factories = Factories> = ReturnType<typeof createRegistry<F>>;

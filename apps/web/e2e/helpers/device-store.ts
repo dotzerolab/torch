@@ -78,3 +78,18 @@ export function deleteTeamRowsInPage(
     { module: STORE_MODULE, workspaceId, teamId },
   );
 }
+
+/** How many rows the page itself holds (in memory) of a shape of the workspace: what is on screen, not on the device. */
+export function liveRowCount(
+  page: Page,
+  workspaceId: string,
+  kind: 'teams' | 'members' | 'ownMemberships',
+): Promise<number> {
+  return page.evaluate(
+    async ({ module, workspaceId, kind }) => {
+      const { syncRegistry } = await import(/* @vite-ignore */ module);
+      return syncRegistry.get({ kind, workspaceId }).size as number;
+    },
+    { module: '/src/sync/shapes.ts', workspaceId, kind },
+  );
+}

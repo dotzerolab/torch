@@ -1,7 +1,7 @@
 import { type Browser, expect, type Page, test } from '@playwright/test';
 import { createDb } from '../../server/src/db.ts';
 import { restoreDemoLayoutNow } from './helpers/demo-layout.ts';
-import { persistedCollections, persistedRowCount } from './helpers/device-store.ts';
+import { liveRowCount, persistedCollections, persistedRowCount } from './helpers/device-store.ts';
 import { openSessionAs } from './helpers/session.ts';
 import { demoEmail } from './helpers/sign-in.ts';
 
@@ -148,5 +148,48 @@ test('a team lost while the app was closed: its rows never show once the network
     .poll(() => persistedRowCount(reopened, workspaceId(), opsPrefix()), { timeout: REVOCATION_MS })
     .toBe(0);
   await member.context.close();
+  await owner.context.close();
+});
+
+async function engTeamId(): Promise<string> {
+  const db = createDb(process.env.DATABASE_URL as string);
+  try {
+    const found = await db.pool.query<{ id: string }>(
+      `select id from team where workspace_id = $1 and key = 'ENG'`,
+      [workspaceId()],
+    );
+    return (found.rows[0] as { id: string }).id;
+  } finally {
+    await db.close();
+  }
+}
+
+test('guest removed from team loses co-members', async ({ browser, baseURL }, testInfo) => {
+  await restoreDemoLayoutNow();
+  const owner = await open(browser, baseURL, 'owner');
+  await owner.page.goto('/');
+  const guest = await open(browser, baseURL, 'guest');
+  await guest.page.goto('/');
+  await expect(guest.page.getByTestId('team-ENG')).toBeVisible();
+  // The guest shares ENG with the owner, the admin and the member: four profiles, itself included.
+  const members = `members-${workspaceId()}`;
+  await warm(guest.page, members, 4);
+  expect(await liveRowCount(guest.page, workspaceId(), 'members')).toBe(4);
+
+  await changeTeam(owner.page, 'remove', await engTeamId(), await memberId('guest'));
+  const removedAt = Date.now();
+  // The co-members are not the guest's to see any more: gone from the page and from the device, whose copy is what the
+  // next visit would show first.
+  await expect
+    .poll(() => liveRowCount(guest.page, workspaceId(), 'members'), { timeout: REVOCATION_MS })
+    .toBe(1);
+  await expect
+    .poll(() => persistedRowCount(guest.page, workspaceId(), members), { timeout: REVOCATION_MS })
+    .toBe(1);
+  const took = Date.now() - removedAt;
+  testInfo.annotations.push({ type: 'removal-to-store-ms', description: String(took) });
+  console.log(`removal to members store: ${took} ms`);
+  expect(took).toBeLessThan(REVOCATION_MS);
+  await guest.context.close();
   await owner.context.close();
 });

@@ -7,7 +7,12 @@ vi.mock('../api.ts', async (importOriginal) => ({
   apiFetch: vi.fn(),
 }));
 
-import { BACKOFF_OPTIONS, handleShapeError, sendIssueMutations } from './collections.ts';
+import {
+  BACKOFF_OPTIONS,
+  handleShapeError,
+  observeSync,
+  sendIssueMutations,
+} from './collections.ts';
 import type { OutboxWrite } from './outbox.ts';
 import { markSigningOut, resetSigningOut } from './signing-out.ts';
 
@@ -141,5 +146,94 @@ describe('sendIssueMutations (M9)', () => {
     ).rejects.toThrow('refused');
     expect(enqueue).toHaveBeenCalledTimes(1);
     expect(awaitTxId).not.toHaveBeenCalled();
+  });
+});
+
+describe('observeSync', () => {
+  /** A sync like the electric one: it reports ready after every answer and truncates on a must-refetch. */
+  function fakeSync(result: unknown) {
+    const seen: { params?: Parameters<ReturnType<typeof build>['sync']['sync']>[0] } = {};
+    const build = () => ({
+      id: 'c',
+      sync: {
+        getSyncMetadata: () => ({ relation: undefined }),
+        sync: (params: { markReady: () => void; truncate: () => void; collection: unknown }) => {
+          seen.params = params;
+          return result;
+        },
+      },
+    });
+    return { build, seen };
+  }
+  const hooks = () => ({ settled: vi.fn(), truncated: vi.fn(), cleanup: vi.fn() });
+
+  it('reports every markReady after the library took it, with the collection', () => {
+    const { build, seen } = fakeSync(undefined);
+    const h = hooks();
+    const order: string[] = [];
+    h.settled.mockImplementation(() => order.push('settled'));
+    const observed = observeSync(build(), h);
+    const collection = { keys: () => ['a'] };
+    const markReady = vi.fn(() => order.push('markReady'));
+    (observed.sync as { sync: (params: unknown) => unknown }).sync({
+      markReady,
+      truncate: vi.fn(),
+      collection,
+    });
+    seen.params?.markReady();
+    seen.params?.markReady();
+    expect(order).toEqual(['markReady', 'settled', 'markReady', 'settled']);
+    expect(h.settled).toHaveBeenCalledWith(collection);
+  });
+
+  it('reports a truncate and still truncates', () => {
+    const { build, seen } = fakeSync(undefined);
+    const h = hooks();
+    const observed = observeSync(build(), h);
+    const truncate = vi.fn();
+    (observed.sync as { sync: (params: unknown) => unknown }).sync({
+      markReady: vi.fn(),
+      truncate,
+      collection: {},
+    });
+    seen.params?.truncate();
+    expect(truncate).toHaveBeenCalledOnce();
+    expect(h.truncated).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the other parts of the sync, and runs both cleanups (object result)', () => {
+    const cleanup = vi.fn();
+    const loadSubset = vi.fn();
+    const { build } = fakeSync({ cleanup, loadSubset });
+    const h = hooks();
+    const observed = observeSync(build(), h);
+    expect((observed.sync as { getSyncMetadata: unknown }).getSyncMetadata).toBeTypeOf('function');
+    const result = (observed.sync as { sync: (params: unknown) => unknown }).sync({
+      markReady: vi.fn(),
+      truncate: vi.fn(),
+      collection: {},
+    }) as { cleanup: () => void; loadSubset: unknown };
+    expect(result.loadSubset).toBe(loadSubset);
+    result.cleanup();
+    expect(h.cleanup).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
+  it('runs both cleanups for a sync that returns a function, and for one that returns nothing', () => {
+    const cleanup = vi.fn();
+    const fnResult = fakeSync(cleanup);
+    const h1 = hooks();
+    const run = (o: ReturnType<typeof observeSync>) =>
+      (o.sync as { sync: (params: unknown) => unknown }).sync({
+        markReady: vi.fn(),
+        truncate: vi.fn(),
+        collection: {},
+      });
+    (run(observeSync(fnResult.build(), h1)) as () => void)();
+    expect(h1.cleanup).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledOnce();
+    const h2 = hooks();
+    (run(observeSync(fakeSync(undefined).build(), h2)) as { cleanup: () => void }).cleanup();
+    expect(h2.cleanup).toHaveBeenCalledOnce();
   });
 });
