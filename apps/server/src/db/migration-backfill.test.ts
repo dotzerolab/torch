@@ -58,9 +58,7 @@ describe.skipIf(!databaseUrl)('migration data steps', () => {
         [t.team.id],
       );
       await db.pool.query('drop index if exists workflow_state_team_name_unique');
-      await db.pool.query(
-        statementsOf('0004_workflow_state_archive.sql').find((s) => s.startsWith('CREATE UNIQUE')),
-      );
+      await db.pool.query(create);
     }
   });
 
