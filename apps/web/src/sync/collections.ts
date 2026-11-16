@@ -209,7 +209,12 @@ function persisted<T extends PersistableOptions>(
           keys: () => liveKeys(),
           copy: () => copyToDevice(workspaceId, id, build, persistence, running, 'copy'),
           refresh: () => copyToDevice(workspaceId, id, build, persistence, running, 'refresh'),
-          onCancel: () => running.stop?.(),
+          // Only a refresh is ended with the instance. The first copy finishes: a shape that is merely paused (it left
+          // view over the page's budget) starts again under the same id, and an interrupted first copy would leave
+          // the device without it.
+          onCancel: () => {
+            if (running.mode === 'refresh') running.stop?.();
+          },
         })
       : null;
   const observed = observeSync(first, {
@@ -233,7 +238,11 @@ function persisted<T extends PersistableOptions>(
 }
 
 /** The stop of the copy job a shape instance has running, if any. */
-type RunningCopy = { stop: (() => void) | null; cancelled?: boolean };
+type RunningCopy = {
+  stop: (() => void) | null;
+  mode?: 'copy' | 'refresh';
+  cancelled?: boolean;
+};
 
 /** How long a refresh waits for the store to catch up: a changing shape must not hold the queue for a minute. */
 const REFRESH_STORE_TIMEOUT_MS = 15_000;
@@ -254,7 +263,7 @@ function copyToDevice(
   mode: 'copy' | 'refresh',
 ): Promise<void> {
   return queueDeviceCopy(workspaceId, async (registerStop) => {
-    if (running.cancelled) return;
+    if (running.cancelled && mode === 'refresh') return;
     const copy = createCollection(
       persistedCollectionOptions({
         ...(build() as object),
@@ -286,6 +295,7 @@ function copyToDevice(
     };
     registerStop(stop);
     running.stop = stop;
+    running.mode = mode;
     try {
       await Promise.race([copy.preload(), interrupted]);
       if (!stopped) {
