@@ -24,6 +24,7 @@
     "test": "vitest run",
     "build": "pnpm -r build",
     "e2e": "pnpm --filter @torch/web e2e",
+    "e2e:perf": "pnpm --filter @torch/web e2e:perf",
     "i18n:check": "node scripts/check-i18n.ts",
     "brand:check": "node scripts/check-brand-strings.ts",
     "licenses:check": "node scripts/check-licenses.ts"

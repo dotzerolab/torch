@@ -17,6 +17,10 @@ const stacks = {
 };
 const acmeBrandPath = fileURLToPath(new URL('./e2e/fixtures/brand.acme.json', import.meta.url));
 
+// `pnpm e2e:perf` runs only the 10,000-issue performance spec (it seeds a big workspace and takes minutes); `pnpm e2e`
+// never includes it.
+const perfRun = process.env.E2E_PERF === '1';
+
 type WebServers = Extract<NonNullable<PlaywrightTestConfig['webServer']>, unknown[]>;
 
 function stackServers(
@@ -53,20 +57,30 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? 'github' : 'list',
   use: { trace: 'retain-on-failure' },
-  projects: [
-    {
-      name: 'chromium',
-      testIgnore: /-custom\.spec\.ts$/,
-      use: { browserName: 'chromium', baseURL: `http://localhost:${stacks.default.web}` },
-    },
-    {
-      name: 'custom-brand',
-      testMatch: /-custom\.spec\.ts$/,
-      use: { browserName: 'chromium', baseURL: `http://localhost:${stacks.customBrand.web}` },
-    },
-  ],
-  webServer: [
-    ...stackServers(stacks.default),
-    ...stackServers(stacks.customBrand, { BRAND_CONFIG_PATH: acmeBrandPath }),
-  ],
+  projects: perfRun
+    ? [
+        {
+          name: 'perf',
+          testMatch: /perf\.spec\.ts$/,
+          use: { browserName: 'chromium', baseURL: `http://localhost:${stacks.default.web}` },
+        },
+      ]
+    : [
+        {
+          name: 'chromium',
+          testIgnore: /(-custom|perf)\.spec\.ts$/,
+          use: { browserName: 'chromium', baseURL: `http://localhost:${stacks.default.web}` },
+        },
+        {
+          name: 'custom-brand',
+          testMatch: /-custom\.spec\.ts$/,
+          use: { browserName: 'chromium', baseURL: `http://localhost:${stacks.customBrand.web}` },
+        },
+      ],
+  webServer: perfRun
+    ? stackServers(stacks.default)
+    : [
+        ...stackServers(stacks.default),
+        ...stackServers(stacks.customBrand, { BRAND_CONFIG_PATH: acmeBrandPath }),
+      ],
 });

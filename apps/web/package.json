@@ -9,7 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p .",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "e2e:perf": "E2E_PERF=1 playwright test"
   },
   "dependencies": {
     "@electric-sql/client": "1.5.28",
