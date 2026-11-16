@@ -61,6 +61,84 @@ export type Store = {
 const stores = new Map<string, Promise<Store>>();
 // The stores that finished opening: a collection factory is synchronous and asks here whether a device copy exists.
 const openStores = new Map<string, Store>();
+// The collection ids each open store already holds rows for ("warm"), read when the store opened and kept current.
+const stored = new Map<string, Set<string>>();
+
+/** Does the device already hold a copy of this collection (so a persisted instance starts from it)? */
+export const hasDeviceCopy = (workspaceId: string, collectionId: string) =>
+  stored.get(workspaceId)?.has(collectionId) ?? false;
+
+async function readStored(workspaceId: string, database: BrowserWASQLiteDatabase): Promise<void> {
+  const rows = await database
+    .execute<{ collection_id: string }>('SELECT collection_id FROM collection_registry')
+    .catch(() => [] as { collection_id: string }[]);
+  stored.set(workspaceId, new Set(rows.map((row) => row.collection_id)));
+}
+
+/**
+ * Waits until the store holds at least `rows` rows of the collection: the persisted instance publishes before its rows
+ * are on the device, and ending it earlier would cut the write short. Gives up after `timeoutMs`.
+ */
+export async function waitUntilStored(
+  workspaceId: string,
+  collectionId: string,
+  rows: number,
+  timeoutMs = 60_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const store = openStores.get(workspaceId);
+    if (!store) return false;
+    try {
+      const [registered] = await store.database.execute<{ table_name: string }>(
+        'SELECT table_name FROM collection_registry WHERE collection_id = ?',
+        [collectionId],
+      );
+      if (registered) {
+        const [count] = await store.database.execute<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM ${quote(registered.table_name)}`,
+        );
+        if (Number(count?.n ?? 0) >= rows) {
+          await readStored(workspaceId, store.database);
+          return true;
+        }
+      }
+    } catch {
+      return false;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return false;
+}
+
+// Background copies of cold shapes (see `collections.ts`): one at a time, and all stopped when the store closes.
+const copyQueues = new Map<string, Promise<void>>();
+const copyStops = new Map<string, Set<() => void>>();
+
+/** Runs `job` after the earlier copies of the workspace. `stop` ends it early (the store is closing). */
+export function queueDeviceCopy(
+  workspaceId: string,
+  job: (registerStop: (stop: () => void) => void) => Promise<void>,
+): void {
+  const stops = copyStops.get(workspaceId) ?? new Set<() => void>();
+  copyStops.set(workspaceId, stops);
+  const previous = copyQueues.get(workspaceId) ?? Promise.resolve();
+  const next = previous.then(async () => {
+    if (!openStores.has(workspaceId)) return;
+    let stop: (() => void) | undefined;
+    try {
+      await job((fn) => {
+        stop = fn;
+        stops.add(fn);
+      });
+    } catch {
+      // The copy is an optimisation: the next visit tries again.
+    } finally {
+      if (stop) stops.delete(stop);
+    }
+  });
+  copyQueues.set(workspaceId, next);
+}
 
 /** The device copy of a workspace if it is open now, else null (the page then keeps the shape in memory only). */
 export function persistenceFor(workspaceId: string): PersistedCollectionPersistence | null {
@@ -117,6 +195,7 @@ export function openWorkspaceStore(
       },
     };
     openStores.set(workspaceId, store);
+    await readStored(workspaceId, database);
     return store;
   })();
   stores.set(workspaceId, opened);
@@ -129,6 +208,10 @@ export async function closeWorkspaceStore(workspaceId: string): Promise<void> {
   const open = stores.get(workspaceId);
   stores.delete(workspaceId);
   openStores.delete(workspaceId);
+  stored.delete(workspaceId);
+  for (const stop of copyStops.get(workspaceId) ?? []) stop();
+  copyStops.delete(workspaceId);
+  copyQueues.delete(workspaceId);
   if (open) await open.then((store) => store.close()).catch(() => {});
 }
 
@@ -212,6 +295,7 @@ export async function deleteTeamRows(workspaceId: string, teamId: string): Promi
   for (const kind of TEAM_COLLECTION_KINDS) {
     await removeCollections(database, `${kind}-${workspaceId}-${teamId}%`);
   }
+  await readStored(workspaceId, database);
 }
 
 /**
@@ -227,10 +311,14 @@ export async function deleteShapeRows(
   if (!open) return;
   const { database } = await open;
   await removeCollections(database, `${baseId}%`, keepId);
+  await readStored(workspaceId, database);
 }
 
 /** Test helper: forget the open stores without touching any file. */
 export function resetStoresForTests() {
   stores.clear();
   openStores.clear();
+  stored.clear();
+  copyStops.clear();
+  copyQueues.clear();
 }

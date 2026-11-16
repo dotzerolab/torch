@@ -8,7 +8,7 @@ import { electricCollectionOptions } from '@tanstack/electric-db-collection';
 import { createCollection } from '@tanstack/react-db';
 import { toIssueUpdate } from './issue-update.ts';
 import { enqueueWrite, type OutboxWrite } from './outbox.ts';
-import { persistenceFor } from './persistence.ts';
+import { hasDeviceCopy, persistenceFor, queueDeviceCopy, waitUntilStored } from './persistence.ts';
 import type { Factories, ShapeContext } from './registry.ts';
 import { isSigningOut } from './signing-out.ts';
 
@@ -111,23 +111,85 @@ export function handleShapeError(
  */
 export const RENDER_FROM_DEVICE_AFTER_MS = 400;
 
+type PersistableOptions = { id?: string; sync?: unknown; onUpdate?: unknown };
+
 /**
- * Keeps the rows of a collection on the device when the workspace has an open store (the page falls back to memory
- * when the browser cannot keep files) and renders the stored rows when the network is slow or gone. A team that is gone
- * for this person is never persisted.
+ * What a shape does with the device store.
+ *
+ * Warm (the device already holds the collection): the instance is a persisted one. It renders the stored rows when the
+ * network is slow or gone, resumes the shape from where the device copy stopped, and writes the small changes.
+ *
+ * Cold (first visit, or the copy was deleted): the instance stays in memory. Writing a whole first snapshot through the
+ * persistence layer takes seconds for 10,000 rows, and the layer admits the next change only after the write, so a
+ * remote edit shortly after the load would wait for it. Once the shape is up to date a headless persisted instance of
+ * the same shape reads it again and writes it in the background; nothing reads that instance, so it delays nothing.
+ * The next visit is warm. A team that is gone for this person is never persisted.
  */
-function persisted<T extends { id?: string }>(
+function persisted<T extends PersistableOptions>(
   workspaceId: string,
-  options: T,
+  build: () => T,
   context: ShapeContext,
 ): T {
+  const options = build();
   const persistence = context.inert ? null : persistenceFor(workspaceId);
-  if (!persistence) return options;
-  return persistedCollectionOptions({
-    ...(options as object),
-    persistence,
-    initialRender: { strategy: 'network-first', networkTimeoutMs: RENDER_FROM_DEVICE_AFTER_MS },
-  } as never) as unknown as T;
+  const id = options.id;
+  if (!persistence || !id) return options;
+  if (hasDeviceCopy(workspaceId, id)) {
+    return persistedCollectionOptions({
+      ...(options as object),
+      persistence,
+      initialRender: { strategy: 'network-first', networkTimeoutMs: RENDER_FROM_DEVICE_AFTER_MS },
+    } as never) as unknown as T;
+  }
+  const sync = options.sync as { sync: (params: { markReady: () => void }) => unknown };
+  let started = false;
+  return {
+    ...options,
+    sync: {
+      ...sync,
+      sync: (params: { markReady: () => void }) =>
+        sync.sync({
+          ...params,
+          markReady: () => {
+            params.markReady();
+            if (started) return;
+            started = true;
+            copyToDevice(workspaceId, id, build, persistence);
+          },
+        }),
+    },
+  };
+}
+
+/** Reads a shape that is up to date once more through a persisted instance nobody reads, and ends it when stored. */
+function copyToDevice(
+  workspaceId: string,
+  id: string,
+  build: () => PersistableOptions,
+  persistence: NonNullable<ReturnType<typeof persistenceFor>>,
+): void {
+  queueDeviceCopy(workspaceId, async (registerStop) => {
+    const copy = createCollection(
+      persistedCollectionOptions({
+        ...(build() as object),
+        // Nothing writes through this instance.
+        onUpdate: undefined,
+        persistence,
+        id,
+      } as never) as never,
+    ) as unknown as { preload(): Promise<void>; size: number; cleanup(): Promise<void> | void };
+    let stopped = false;
+    registerStop(() => {
+      stopped = true;
+      void Promise.resolve(copy.cleanup()).catch(() => {});
+    });
+    try {
+      await copy.preload();
+      if (!stopped) await waitUntilStored(workspaceId, id, copy.size);
+    } finally {
+      if (!stopped) await Promise.resolve(copy.cleanup()).catch(() => {});
+    }
+  });
 }
 
 const signIn = () => window.location.assign('/login');
@@ -156,17 +218,13 @@ export function createTeamsCollection(
   id = `teams-${workspaceId}`,
   context = NO_CONTEXT,
 ) {
-  return createCollection(
-    persisted(
-      workspaceId,
-      electricCollectionOptions<SyncedTeam>({
-        id,
-        getKey: (team) => team.id,
-        shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/teams`, { workspaceId }, context),
-      }),
-      context,
-    ),
-  );
+  const build = () =>
+    electricCollectionOptions<SyncedTeam>({
+      id,
+      getKey: (team) => team.id,
+      shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/teams`, { workspaceId }, context),
+    });
+  return createCollection(persisted(workspaceId, build, context));
 }
 
 export function createMembersCollection(
@@ -174,17 +232,13 @@ export function createMembersCollection(
   id = `members-${workspaceId}`,
   context = NO_CONTEXT,
 ) {
-  return createCollection(
-    persisted(
-      workspaceId,
-      electricCollectionOptions<SyncedMember>({
-        id,
-        getKey: (member) => member.id,
-        shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/members`, { workspaceId }, context),
-      }),
-      context,
-    ),
-  );
+  const build = () =>
+    electricCollectionOptions<SyncedMember>({
+      id,
+      getKey: (member) => member.id,
+      shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/members`, { workspaceId }, context),
+    });
+  return createCollection(persisted(workspaceId, build, context));
 }
 
 /** The person's own team memberships: the signal that their access to teams changed. Not shown anywhere. */
@@ -193,21 +247,17 @@ export function createOwnMembershipsCollection(
   id = `own-memberships-${workspaceId}`,
   context = NO_CONTEXT,
 ) {
-  return createCollection(
-    persisted(
-      workspaceId,
-      electricCollectionOptions<SyncedTeamMember>({
-        id,
-        getKey: (row) => `${row.team_id}:${row.member_id}`,
-        shapeOptions: shapeOptions(
-          `/api/sync/w/${workspaceId}/me/team-memberships`,
-          { workspaceId },
-          context,
-        ),
-      }),
-      context,
-    ),
-  );
+  const build = () =>
+    electricCollectionOptions<SyncedTeamMember>({
+      id,
+      getKey: (row) => `${row.team_id}:${row.member_id}`,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/me/team-memberships`,
+        { workspaceId },
+        context,
+      ),
+    });
+  return createCollection(persisted(workspaceId, build, context));
 }
 
 export function createTeamMembersCollection(
@@ -216,18 +266,19 @@ export function createTeamMembersCollection(
   id = `team-members-${workspaceId}-${teamId}`,
   context = NO_CONTEXT,
 ) {
-  const options = electricCollectionOptions<SyncedTeamMember>({
-    id,
-    // A person is in a team once: the pair is the key.
-    getKey: (row) => `${row.team_id}:${row.member_id}`,
-    shapeOptions: shapeOptions(
-      `/api/sync/w/${workspaceId}/teams/${teamId}/members`,
-      { workspaceId, teamId },
-      context,
-    ),
-  });
+  const build = () =>
+    electricCollectionOptions<SyncedTeamMember>({
+      id,
+      // A person is in a team once: the pair is the key.
+      getKey: (row) => `${row.team_id}:${row.member_id}`,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/teams/${teamId}/members`,
+        { workspaceId, teamId },
+        context,
+      ),
+    });
   return createCollection(
-    context.inert ? { ...options, sync: inertSync } : persisted(workspaceId, options, context),
+    context.inert ? { ...build(), sync: inertSync } : persisted(workspaceId, build, context),
   );
 }
 
@@ -237,17 +288,18 @@ export function createWorkflowStatesCollection(
   id = `workflow-states-${workspaceId}-${teamId}`,
   context = NO_CONTEXT,
 ) {
-  const options = electricCollectionOptions<SyncedWorkflowState>({
-    id,
-    getKey: (state) => state.id,
-    shapeOptions: shapeOptions(
-      `/api/sync/w/${workspaceId}/teams/${teamId}/workflow-states`,
-      { workspaceId, teamId },
-      context,
-    ),
-  });
+  const build = () =>
+    electricCollectionOptions<SyncedWorkflowState>({
+      id,
+      getKey: (state) => state.id,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/teams/${teamId}/workflow-states`,
+        { workspaceId, teamId },
+        context,
+      ),
+    });
   return createCollection(
-    context.inert ? { ...options, sync: inertSync } : persisted(workspaceId, options, context),
+    context.inert ? { ...build(), sync: inertSync } : persisted(workspaceId, build, context),
   );
 }
 
@@ -286,24 +338,25 @@ export function createIssuesCollection(
   id = `issues-${workspaceId}-${teamId}`,
   context = NO_CONTEXT,
 ) {
-  const options = electricCollectionOptions<SyncedIssue>({
-    id,
-    getKey: (issue) => issue.id,
-    shapeOptions: shapeOptions(
-      `/api/sync/w/${workspaceId}/teams/${teamId}/issues`,
-      { workspaceId, teamId },
-      context,
-    ),
-    // M9: every mutation of the transaction is sent, one PATCH each in order, and every txid is awaited. Sending
-    // only the first would confirm the transaction while the others were never written.
-    onUpdate: async ({ transaction, collection }) => {
-      await sendIssueMutations(workspaceId, teamId, transaction.mutations, (txid) =>
-        collection.utils.awaitTxId(txid, TXID_TIMEOUT_MS),
-      );
-    },
-  });
+  const build = () =>
+    electricCollectionOptions<SyncedIssue>({
+      id,
+      getKey: (issue) => issue.id,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/teams/${teamId}/issues`,
+        { workspaceId, teamId },
+        context,
+      ),
+      // M9: every mutation of the transaction is sent, one PATCH each in order, and every txid is awaited. Sending
+      // only the first would confirm the transaction while the others were never written.
+      onUpdate: async ({ transaction, collection }) => {
+        await sendIssueMutations(workspaceId, teamId, transaction.mutations, (txid) =>
+          collection.utils.awaitTxId(txid, TXID_TIMEOUT_MS),
+        );
+      },
+    });
   return createCollection(
-    context.inert ? { ...options, sync: inertSync } : persisted(workspaceId, options, context),
+    context.inert ? { ...build(), sync: inertSync } : persisted(workspaceId, build, context),
   );
 }
 
