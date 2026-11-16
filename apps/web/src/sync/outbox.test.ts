@@ -147,6 +147,47 @@ describe('outbox', () => {
     expect(box.pendingCount(WS)).toBe(0);
   });
 
+  it('tells subscribers about a dropped write, for as long as they listen', async () => {
+    const box = createOutbox({
+      storage: memoryStorage(),
+      send: async () => {
+        throw new ApiError(422, 'invalid', 'The title is too long.');
+      },
+      sleep: async () => {},
+    });
+    const heard: string[] = [];
+    const handled: boolean[] = [];
+    const stop = box.subscribeDropped((_w, error, isHandled) => {
+      heard.push(error.message);
+      handled.push(isHandled);
+    });
+    await expect(box.enqueueWrite(write(1))).rejects.toBeInstanceOf(WriteDropped);
+    expect(heard).toEqual(['The title is too long.']);
+    // A caller was waiting on it, so the screen shows the refusal itself.
+    expect(handled).toEqual([true]);
+    stop();
+    await expect(box.enqueueWrite(write(2))).rejects.toBeInstanceOf(WriteDropped);
+    expect(heard).toHaveLength(1);
+  });
+
+  it('a write left by an earlier visit has no caller: the listener is told it is not handled', async () => {
+    const storage = memoryStorage();
+    await storage.save(WS, [write(1)]);
+    const box = createOutbox({
+      storage,
+      send: async () => {
+        throw new ApiError(404, 'not_found', 'Not found.');
+      },
+      sleep: async () => {},
+    });
+    const handled: boolean[] = [];
+    box.subscribeDropped((_w, _e, isHandled) => handled.push(isHandled));
+    await box.resume(WS);
+    await flush();
+    expect(handled).toEqual([false]);
+    expect(box.pendingCount(WS)).toBe(0);
+  });
+
   it('drops the queued writes of a team the person lost, and keeps the others', async () => {
     const net = network();
     const storage = memoryStorage();

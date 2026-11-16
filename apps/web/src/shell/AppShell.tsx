@@ -17,6 +17,7 @@ import { Sidebar } from './Sidebar.tsx';
 import { StatusBar } from './StatusBar.tsx';
 import { useDeviceStore } from './useDeviceStore.ts';
 import { useMembershipWatcher } from './useMembershipWatcher.ts';
+import { useOutboxEvents } from './useOutboxEvents.ts';
 import { useTeams } from './useTeams.ts';
 
 /** Below this width the sidebar is a drawer opened from the header. */
@@ -41,6 +42,7 @@ function ShellFrame({
   const pathname = usePathname();
   const { teams, ready } = useTeams(workspace.id);
   useMembershipWatcher(workspace.id, workspace.memberId);
+  useOutboxEvents(workspace.id);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 

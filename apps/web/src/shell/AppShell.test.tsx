@@ -9,6 +9,7 @@ import { AppShell } from './AppShell.tsx';
 
 vi.mock('./useDeviceStore.ts', () => ({ useDeviceStore: () => true }));
 vi.mock('./useMembershipWatcher.ts', () => ({ useMembershipWatcher: () => {} }));
+vi.mock('./useOutboxEvents.ts', () => ({ useOutboxEvents: () => {} }));
 vi.mock('./useTeams.ts', () => ({
   useTeams: () => ({
     ready: true,

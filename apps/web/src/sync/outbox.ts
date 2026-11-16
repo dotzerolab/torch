@@ -104,6 +104,9 @@ type Item = {
   settle?: { resolve: (result: { txid: number }) => void; reject: (error: unknown) => void };
 };
 
+/** `handled` is true when a caller is still waiting on the write and takes the refusal itself (a screen rolling back). */
+export type DroppedListener = (write: OutboxWrite, error: WriteDropped, handled: boolean) => void;
+
 export type OutboxOptions = {
   storage: OutboxStorage;
   send?: (write: OutboxWrite) => Promise<{ txid: number }>;
@@ -139,6 +142,7 @@ export function createOutbox(options: OutboxOptions) {
   const hydrating = new Map<string, Promise<Item[]>>();
   const draining = new Set<string>();
   const listeners = new Set<() => void>();
+  const droppedListeners = new Set<DroppedListener>();
   const notify = () => {
     for (const listener of [...listeners]) listener();
   };
@@ -172,6 +176,8 @@ export function createOutbox(options: OutboxOptions) {
     );
     item.settle?.reject(error);
     onDropped?.(item.write, error);
+    for (const listener of [...droppedListeners])
+      listener(item.write, error, item.settle !== undefined);
   }
 
   async function drain(workspaceId: string) {
@@ -220,7 +226,9 @@ export function createOutbox(options: OutboxOptions) {
 
   /** Queues a write and resolves with the server's `txid` once it is applied; rejects with `WriteDropped`. */
   async function enqueueWrite(write: OutboxWrite): Promise<{ txid: number }> {
-    const queue = await hydrate(write.workspaceId);
+    await hydrate(write.workspaceId);
+    // Read the queue after loading: every send replaces the array, so one taken earlier may be a dead copy.
+    const queue = queues.get(write.workspaceId) ?? [];
     const result = new Promise<{ txid: number }>((resolve, reject) => {
       queue.push({ write, settle: { resolve, reject } });
     });
@@ -240,7 +248,8 @@ export function createOutbox(options: OutboxOptions) {
 
   /** The team is gone for this person: its queued writes will never be accepted. */
   async function dropTeamWrites(workspaceId: string, teamId: string) {
-    const queue = await hydrate(workspaceId);
+    await hydrate(workspaceId);
+    const queue = queues.get(workspaceId) ?? [];
     const inFlight = draining.has(workspaceId) ? queue[0] : undefined;
     for (const item of [...queue]) {
       if (item.write.teamId === teamId && item !== inFlight) {
@@ -275,7 +284,15 @@ export function createOutbox(options: OutboxOptions) {
     };
   }
 
-  return { enqueueWrite, resume, pendingCount, dropTeamWrites, wipe, subscribe };
+  /** Calls `listener` for every write that ends without being applied. */
+  function subscribeDropped(listener: DroppedListener): () => void {
+    droppedListeners.add(listener);
+    return () => {
+      droppedListeners.delete(listener);
+    };
+  }
+
+  return { enqueueWrite, resume, pendingCount, dropTeamWrites, wipe, subscribe, subscribeDropped };
 }
 
 export type Outbox = ReturnType<typeof createOutbox>;
