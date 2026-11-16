@@ -90,7 +90,7 @@ by its reference, call `GET /issues?externalRef=<source>:<id>`.
 | Query            | Meaning                                                                                        |
 | ---------------- | ---------------------------------------------------------------------------------------------- |
 | `teamId`         | Only this team. A team the caller cannot see is 404.                                           |
-| `updatedAfter`   | ISO 8601 date-time: issues updated after it.                                                   |
+| `updatedAfter`   | ISO 8601 date-time: issues updated after it (and at least 10 seconds ago, see below).          |
 | `externalRef`    | `<source>:<id>`: the issue with this reference, if any.                                        |
 | `includeArchived`| `true` to include archived issues (default: not included).                                     |
 | `include`        | `description` adds the description to every issue.                                             |
@@ -101,12 +101,20 @@ The answer is `{ issues, nextCursor }`. Issues come in ascending `(updatedAt, id
 cursor sees an issue that changes mid-walk again and never skips one. `nextCursor` is `null` on the last page. A cursor
 is opaque; do not build or parse one.
 
-To poll for changes: keep the `updatedAt` of the last issue you processed, call `GET /issues?updatedAfter=<it>` and
-follow `nextCursor` to the end. `updatedAfter` is compared at millisecond precision and is strictly greater, while
-`updatedAt` has finer precision, so the last issue of the previous poll can come back once more. **Polling is
-at-least-once: treat every issue as an upsert by `id` (or by the `updatedAt` you already hold).** Archiving an issue
-moves its `updatedAt`, so with `includeArchived=true` an archive shows up in the poll like any other change. Any change
-to an issue's relations, subscribers or links moves it too.
+To poll for changes: keep the `updatedAt` of the last issue you received (the watermark), call
+`GET /issues?updatedAfter=<it>` and follow `nextCursor` to the end. Then store the `updatedAt` of the last issue of that
+walk as the new watermark.
+
+- **Settle lag.** An issue is listed only once its `updatedAt` is at least 10 seconds old. A change shows up in the
+  list about 10 seconds after it was made. The lag is what makes polling safe: the server stamps `updatedAt` before the
+  transaction commits, and it keeps every transaction shorter than the lag, so an issue that is not listed yet can only
+  be newer than every issue that is. A watermark therefore never moves past a change that has not been listed. The
+  exact lookup `externalRef=<source>:<id>` is not delayed.
+- **At-least-once.** `updatedAfter` is compared at millisecond precision and is strictly greater, while `updatedAt`
+  has finer precision, so the last issue of the previous poll can come back once more. Treat every issue as an upsert,
+  and drop one you already hold by `id` and `updatedAt`.
+- Archiving an issue moves its `updatedAt`, so with `includeArchived=true` an archive shows up in the poll like any
+  other change. Any change to an issue's relations, subscribers or links moves it too.
 
 ### Archived and canceled
 

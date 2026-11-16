@@ -1,10 +1,11 @@
 // The issue list (spec section 6): `updatedAfter` polling in a stable order, an external reference lookup and opaque
 // cursors. Order is `(updated_at, id)` ascending, so an issue that changes between two pages is seen again, never skipped
-// or repeated within a walk that follows `updated_at`. Only teams the actor can see are listed.
+// or repeated within a walk that follows `updated_at`. Only rows older than the settle window are listed (the stamp is
+// taken before the commit, see `POLL_SETTLE_MS` in db.ts). Only teams the actor can see are listed.
 import { externalRef, type IssueRow, issue, issueLabel, team } from '@torch/shared/db/schema';
 import { canSeeTeam } from '@torch/shared/permissions';
 import { and, asc, eq, inArray, isNull, type SQL, sql } from 'drizzle-orm';
-import type { Orm, Tx } from '../db.ts';
+import { type Orm, POLL_SETTLE_MS, type Tx } from '../db.ts';
 import { currentActor } from '../permissions/current-actor.ts';
 import type { ClientActor } from '../permissions/load-actor.ts';
 import { isUuid } from '../util/uuid.ts';
@@ -20,11 +21,14 @@ export type ListIssuesOptions = {
   includeDescription?: boolean;
   limit?: number;
   cursor?: string;
+  /** Only rows last updated at least this long ago are listed (see `POLL_SETTLE_MS`). Tests lower it; the API never does. */
+  settleMs?: number;
 };
 export type ListIssuesResult =
   | { ok: true; value: { issues: IssueDto[]; nextCursor: string | null } }
   | Failure;
 
+export { POLL_SETTLE_MS };
 export const DEFAULT_LIMIT = 50;
 export const MAX_LIMIT = 100;
 
@@ -94,6 +98,11 @@ async function run(
     eq(issue.workspaceId, actor.workspaceId),
     inArray(issue.teamId, [...keyOf.keys()]),
     options.includeArchived ? undefined : isNull(issue.archivedAt),
+    // The settle window: a row stamped inside a transaction that is still open is not listed yet, so a client that
+    // follows `updatedAt` never moves past it. Not for the exact external reference lookup, which is no change feed.
+    ref
+      ? undefined
+      : sql`${issue.updatedAt} <= now() - make_interval(secs => ${(options.settleMs ?? POLL_SETTLE_MS) / 1000}::float8)`,
     after ? sql`${issue.updatedAt} > ${after.toISOString()}::timestamptz` : undefined,
     cursor
       ? sql`(${issue.updatedAt}, ${issue.id}) > (${cursor.stamp}::timestamptz, ${cursor.id}::uuid)`

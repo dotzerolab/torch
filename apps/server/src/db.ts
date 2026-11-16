@@ -26,6 +26,22 @@ export function interpretWalLevel(walLevel: string): DbHealth {
   };
 }
 
+/**
+ * The `updated_at` of a row is stamped before its transaction commits, so a poll can see a quicker row first and move
+ * its watermark past a slower one that commits later. The issue list therefore returns only rows older than this
+ * window, and the pool below keeps every transaction shorter than it: whatever a client can still miss is older than
+ * any transaction that is still open. Keep the three bounds under `POLL_SETTLE_MS`.
+ */
+export const POLL_SETTLE_MS = 10_000;
+export const TRANSACTION_BOUNDS_MS = {
+  /** One statement (a lock wait included). */
+  statement: 5_000,
+  /** A transaction that sits open doing nothing. */
+  idleInTransaction: 5_000,
+  /** The whole transaction, from `begin` to `commit` (Postgres 17 and later, which the stack runs). */
+  transaction: 8_000,
+} as const;
+
 /** Longest `close` waits for the sockets to close after the pool let go of its clients. */
 const POOL_CLOSE_TIMEOUT_MS = 5000;
 
@@ -69,6 +85,9 @@ export function createDb(databaseUrl: string): Db {
     connectionString: databaseUrl,
     max: 5,
     connectionTimeoutMillis: 3000,
+    statement_timeout: TRANSACTION_BOUNDS_MS.statement,
+    idle_in_transaction_session_timeout: TRANSACTION_BOUNDS_MS.idleInTransaction,
+    options: `-c transaction_timeout=${TRANSACTION_BOUNDS_MS.transaction}`,
   });
 
   return {
