@@ -318,8 +318,9 @@ export const issueLabel = pgTable(
 );
 
 /**
- * A relation between two issues, stored once with a direction (`blocks`: issue blocks related issue). Both ends carry
- * their team, so a team's shape can include relations that point into it; the other end may be in another team.
+ * A relation between two issues, stored once with a direction (`blocks`: issue blocks related issue; `duplicate`: issue
+ * duplicates related issue). `related` is symmetric and is stored with the lower id first. Both ends carry their team,
+ * so a team's shape can include relations that point into it; the other end may be in another team.
  */
 export const issueRelation = pgTable(
   'issue_relation',
@@ -336,6 +337,14 @@ export const issueRelation = pgTable(
   },
   (t) => [
     unique('issue_relation_unique').on(t.issueId, t.relatedIssueId, t.type),
+    // `related` and `duplicate` hold between two issues whichever end they were added from: one row per pair and type.
+    uniqueIndex('issue_relation_pair_unique')
+      .on(
+        sql`least(${t.issueId}, ${t.relatedIssueId})`,
+        sql`greatest(${t.issueId}, ${t.relatedIssueId})`,
+        t.type,
+      )
+      .where(sql`${t.type} in ('related', 'duplicate')`),
     index('issue_relation_team_idx').on(t.teamId),
     index('issue_relation_related_idx').on(t.relatedTeamId, t.relatedIssueId),
     check('issue_relation_not_self', sql`${t.issueId} <> ${t.relatedIssueId}`),

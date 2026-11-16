@@ -115,6 +115,36 @@ describe.skipIf(!databaseUrl)('issue relations, subscribers and links', () => {
       }
     });
 
+    it('related is stored once with the lower id first, whichever end it was added from', async () => {
+      const w = await world('RLO');
+      const [low, high] = [w.a.id, w.b.id].sort();
+      if (!low || !high) throw new Error('two issues expected');
+      // Added from the higher id: still stored as low -> high; the same pair from the lower id is the same row.
+      const added = await addRelation(w.db.orm, w.member, high, {
+        relatedIssueId: low,
+        type: 'related',
+      });
+      expect(added.ok).toBe(true);
+      if (!added.ok) return;
+      const [row] = await w.db.orm
+        .select()
+        .from(issueRelation)
+        .where(eq(issueRelation.id, added.value.id));
+      expect(row).toMatchObject({ issueId: low, relatedIssueId: high, type: 'related' });
+      const again = await addRelation(w.db.orm, w.member, low, {
+        relatedIssueId: high,
+        type: 'related',
+      });
+      expect(again).toMatchObject({ ok: false, status: 409, code: 'relation_exists' });
+      // Both ends read it back as `related`, pointing at the other one.
+      expect((await listRelations(w.db.orm, w.member, high)).ok).toBe(true);
+      const fromHigh = await listRelations(w.db.orm, w.member, high);
+      const fromLow = await listRelations(w.db.orm, w.member, low);
+      if (!fromHigh.ok || !fromLow.ok) throw new Error('relations expected');
+      expect(fromHigh.relations).toMatchObject([{ type: 'related', issueId: low }]);
+      expect(fromLow.relations).toMatchObject([{ type: 'related', issueId: high }]);
+    });
+
     it('an issue related to itself is 422 invalid_reference; a missing or hidden other issue is 404', async () => {
       const w = await world('RLS');
       const self = await addRelation(w.db.orm, w.member, w.a.id, {

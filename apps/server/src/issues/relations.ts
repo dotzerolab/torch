@@ -1,4 +1,5 @@
-// Relations between issues (spec section 6): `blocks`, `related`, `duplicate`, stored once with a direction.
+// Relations between issues (spec section 6): `blocks`, `related`, `duplicate`, stored once. `blocks` and `duplicate`
+// have a direction; `related` is symmetric and is stored with the lower id first.
 // `blocked_by` is `blocks` read from the other end. The other issue may be in another team; the actor must be able to
 // see it, and a hidden issue is "not found" like a missing one. A read never gives a hidden issue's title or number.
 import { issue, issueRelation, team } from '@torch/shared/db/schema';
@@ -45,7 +46,9 @@ export async function addRelation(
       const reversed = data.type === 'blocked_by';
       const stored = data.type === 'blocked_by' ? 'blocks' : data.type;
       const here = { id: issueId, teamId: row.teamId };
-      const [from, to] = reversed ? [other, here] : [here, other];
+      let [from, to] = reversed ? [other, here] : [here, other];
+      // `related` has no direction: it is stored with the lower id first, so the unique key sees both ends as one row.
+      if (stored === 'related' && from.id > to.id) [from, to] = [to, from];
       const forward = and(
         eq(issueRelation.issueId, from.id),
         eq(issueRelation.relatedIssueId, to.id),
@@ -92,7 +95,12 @@ export async function addRelation(
     });
   } catch (error) {
     // Two identical requests raced past the check above: the unique key lets one of them in.
-    if (isUniqueViolation(error, 'issue_relation_unique')) return refuse('relation_exists', 409);
+    if (
+      isUniqueViolation(error, 'issue_relation_unique') ||
+      isUniqueViolation(error, 'issue_relation_pair_unique')
+    ) {
+      return refuse('relation_exists', 409);
+    }
     throw error;
   }
 }

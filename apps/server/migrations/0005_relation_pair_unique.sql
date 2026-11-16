@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "issue_relation_pair_unique" ON "issue_relation" USING btree (least("issue_id", "related_issue_id"),greatest("issue_id", "related_issue_id"),"type") WHERE "issue_relation"."type" in ('related', 'duplicate');

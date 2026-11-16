@@ -115,6 +115,25 @@ describe.skipIf(!databaseUrl)('issue writers never deadlock each other', () => {
     }
   });
 
+  for (const type of ['related', 'duplicate'] as const) {
+    it(`(a2) ${type} added from both ends at once keeps one row and answers 409 to the other`, async () => {
+      const w = await world(type === 'related' ? 'LRR' : 'LRU');
+      const a = await makeIssue(w.db, w.f, w.t.team.id, 'A');
+      const b = await makeIssue(w.db, w.f, w.t.team.id, 'B');
+      const drop = await slowTrigger(w.db, 'insert', 'issue_relation', 'statement');
+      try {
+        const outcomes = await race(
+          w.db,
+          () => addRelation(w.db.orm, w.member, a.id, { relatedIssueId: b.id, type }),
+          () => addRelation(w.db.orm, w.member, b.id, { relatedIssueId: a.id, type }),
+        );
+        expect([...outcomes].sort()).toEqual(['ok', 'relation_exists']);
+      } finally {
+        await drop();
+      }
+    });
+  }
+
   it('(b) an edit of an issue against the archive of the state it sits in', async () => {
     const w = await world('LRB');
     const started = w.t.stateId('started');

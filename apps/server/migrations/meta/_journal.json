@@ -36,6 +36,13 @@
       "when": 1794762005411,
       "tag": "0004_workflow_state_archive",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794817517261,
+      "tag": "0005_relation_pair_unique",
+      "breakpoints": true
     }
   ]
 }
