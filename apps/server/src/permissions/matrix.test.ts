@@ -13,15 +13,18 @@ import {
   type Actor,
   canAddSelfToTeam,
   canChangeMemberRole,
+  canCreateIssue,
   canDeactivateMember,
   canEditIssues,
   canGrantRole,
   canInvite,
   canListPrivateTeams,
   canManageInvite,
+  canManageLabels,
   canManageMembers,
   canManageTeamMembership,
   canManageTeams,
+  canManageWorkflow,
   canSeeMember,
   canSeeMemberEmail,
   canSeeTeam,
@@ -164,6 +167,27 @@ export const MATRIX: Record<ObjectType, MatrixRow[]> = {
     row('edit', true, true, true, false, 'not in team, public'),
     NOBODY('edit', 'not in team, private'),
     NOBODY('edit', 'other workspace'),
+    // Creating an issue follows editing: a guest creates issues in the teams they belong to, like everybody else.
+    row('create', true, true, true, true, 'in team'),
+    row('create', true, true, true, false, 'not in team, public'),
+    NOBODY('create', 'not in team, private'),
+    NOBODY('create', 'other workspace'),
+  ],
+  label: [
+    // A workspace label: owners and admins. It has no team, so there is no relation to ask about.
+    row('manage workspace label', true, true, false, false),
+    // A team label: anybody but a guest who can see the team.
+    row('manage team label', true, true, true, false, 'in team'),
+    row('manage team label', true, true, true, false, 'not in team, public'),
+    NOBODY('manage team label', 'not in team, private'),
+    NOBODY('manage team label', 'other workspace'),
+  ],
+  workflow_state: [
+    // Owners and admins, for a team they can see.
+    row('manage', true, true, false, false, 'in team'),
+    row('manage', true, true, false, false, 'not in team, public'),
+    NOBODY('manage', 'not in team, private'),
+    NOBODY('manage', 'other workspace'),
   ],
 };
 
@@ -289,6 +313,14 @@ const EVALUATORS: Record<ObjectType, Record<string, Evaluate>> = {
   issue: {
     view: (s) => canSeeTeam(s.actor, s.team),
     edit: (s) => canEditIssues(s.actor, s.team),
+    create: (s) => canCreateIssue(s.actor, s.team),
+  },
+  label: {
+    'manage workspace label': (s) => canManageLabels(s.actor, null),
+    'manage team label': (s) => canManageLabels(s.actor, s.team),
+  },
+  workflow_state: {
+    manage: (s) => canManageWorkflow(s.actor, s.team),
   },
 };
 
@@ -310,6 +342,7 @@ const ROLE_ONLY = new Set([
   'invite: create for a deactivated owner',
   'team: create',
   'team: list private directory',
+  'label: manage workspace label',
 ]);
 
 const keyOf = (r: MatrixRow) => `${r.action} [${r.relation ?? '-'}]`;
@@ -462,12 +495,73 @@ const HTTP_ROWS: HttpRow[] = [
   http('invites: revoke (admin role)', 200, 403, 403, 403),
 
   // Issues follow their team, for every role.
+  http('issues: list', 200, 200, 200, 200),
   http('issues: update (public team)', 200, 200, 200, 200),
   http('issues: update (private team)', 200, 404, 200, 404),
   http('issues: update (public team with the owner only)', 200, 200, 200, 404),
+  http('issues: archive (public team)', 200, 200, 200, 200),
+  http('issues: archive (private team)', 200, 404, 200, 404),
+  http('issues: archive (public team with the owner only)', 200, 200, 200, 404),
+  http('issues: unarchive (public team)', 200, 200, 200, 200),
+  http('issues: unarchive (private team)', 200, 404, 200, 404),
+  http('issues: unarchive (public team with the owner only)', 200, 200, 200, 404),
+  http('issues: create (public team)', 201, 201, 201, 201),
+  http('issues: create (private team)', 201, 404, 201, 404),
+  http('issues: create (public team with the owner only)', 201, 201, 201, 404),
+
+  // Relations, subscribers and links follow the issue's team: the same visibility, and a guest may also use them.
+  http('issues: list relations (public team)', 200, 200, 200, 200),
+  http('issues: add relation (public team)', 201, 201, 201, 201),
+  http('issues: remove relation (public team)', 200, 200, 200, 200),
+  http('issues: subscribe (public team)', 200, 200, 200, 200),
+  http('issues: unsubscribe (public team)', 200, 200, 200, 200),
+  http('issues: add link (public team)', 201, 201, 201, 201),
+  http('issues: remove link (public team)', 200, 200, 200, 200),
+  http('issues: list relations (private team)', 200, 404, 200, 404),
+  http('issues: add relation (private team)', 201, 404, 201, 404),
+  http('issues: remove relation (private team)', 200, 404, 200, 404),
+  http('issues: subscribe (private team)', 200, 404, 200, 404),
+  http('issues: unsubscribe (private team)', 200, 404, 200, 404),
+  http('issues: add link (private team)', 201, 404, 201, 404),
+  http('issues: remove link (private team)', 200, 404, 200, 404),
+  http('issues: list relations (public team with the owner only)', 200, 200, 200, 404),
+  http('issues: add relation (public team with the owner only)', 201, 201, 201, 404),
+  http('issues: remove relation (public team with the owner only)', 200, 200, 200, 404),
+  http('issues: subscribe (public team with the owner only)', 200, 200, 200, 404),
+  http('issues: unsubscribe (public team with the owner only)', 200, 200, 200, 404),
+  http('issues: add link (public team with the owner only)', 201, 201, 201, 404),
+  http('issues: remove link (public team with the owner only)', 200, 200, 200, 404),
 
   // Sync shapes: every role reads the team list and the member list (filtered by the server); a team's own shapes
   // follow the visibility of the team.
+  // Labels: the workspace's are for owners and admins; a team's for anybody but a guest who sees the team. Everybody
+  // reads. Workflow states: owners and admins, for the teams they can see; everybody who sees the team reads them.
+  http('labels: list', 200, 200, 200, 200),
+  http('labels: create (workspace)', 201, 201, 403, 403),
+  http('labels: update (workspace)', 200, 200, 403, 403),
+  http('labels: archive (workspace)', 200, 200, 403, 403),
+  http('labels: create (public team)', 201, 201, 201, 403),
+  http('labels: update (public team)', 200, 200, 200, 403),
+  http('labels: archive (public team)', 200, 200, 200, 403),
+  http('labels: create (private team)', 201, 404, 201, 404),
+  http('labels: update (private team)', 200, 404, 200, 404),
+  http('labels: archive (private team)', 200, 404, 200, 404),
+  http('labels: create (public team with the owner only)', 201, 201, 201, 404),
+  http('labels: update (public team with the owner only)', 200, 200, 200, 404),
+  http('labels: archive (public team with the owner only)', 200, 200, 200, 404),
+  http('workflow states: list (public team)', 200, 200, 200, 200),
+  http('workflow states: create (public team)', 201, 201, 403, 403),
+  http('workflow states: update (public team)', 200, 200, 403, 403),
+  http('workflow states: archive (public team)', 200, 200, 403, 403),
+  http('workflow states: list (private team)', 200, 404, 200, 404),
+  http('workflow states: create (private team)', 201, 404, 403, 404),
+  http('workflow states: update (private team)', 200, 404, 403, 404),
+  http('workflow states: archive (private team)', 200, 404, 403, 404),
+  http('workflow states: list (public team with the owner only)', 200, 200, 200, 404),
+  http('workflow states: create (public team with the owner only)', 201, 201, 403, 404),
+  http('workflow states: update (public team with the owner only)', 200, 200, 403, 404),
+  http('workflow states: archive (public team with the owner only)', 200, 200, 403, 404),
+
   http('sync: teams', 200, 200, 200, 200),
   http('sync: members', 200, 200, 200, 200),
   http('sync: issues (public team)', 200, 200, 200, 200),
@@ -479,6 +573,30 @@ const HTTP_ROWS: HttpRow[] = [
   http('sync: issues (public team with the owner only)', 200, 200, 200, 404),
   http('sync: workflow states (public team with the owner only)', 200, 200, 200, 404),
   http('sync: team members (public team with the owner only)', 200, 200, 200, 404),
+
+  // The issue model's shapes: the workspace's labels are read by everybody; the rest follows the visibility of the team.
+  http('sync: workspace labels', 200, 200, 200, 200),
+  http('sync: labels (public team)', 200, 200, 200, 200),
+  http('sync: issue labels (public team)', 200, 200, 200, 200),
+  http('sync: issue subscribers (public team)', 200, 200, 200, 200),
+  http('sync: issue links (public team)', 200, 200, 200, 200),
+  http('sync: issue relations (public team)', 200, 200, 200, 200),
+  http('sync: issue detail (public team)', 200, 200, 200, 200),
+  http('sync: issue activity (public team)', 200, 200, 200, 200),
+  http('sync: labels (private team)', 200, 404, 200, 404),
+  http('sync: issue labels (private team)', 200, 404, 200, 404),
+  http('sync: issue subscribers (private team)', 200, 404, 200, 404),
+  http('sync: issue links (private team)', 200, 404, 200, 404),
+  http('sync: issue relations (private team)', 200, 404, 200, 404),
+  http('sync: issue detail (private team)', 200, 404, 200, 404),
+  http('sync: issue activity (private team)', 200, 404, 200, 404),
+  http('sync: labels (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue labels (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue subscribers (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue links (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue relations (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue detail (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue activity (public team with the owner only)', 200, 200, 200, 404),
 ];
 
 describe('permission matrix over HTTP: completeness', () => {

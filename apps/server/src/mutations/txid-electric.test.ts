@@ -93,7 +93,18 @@ describe.skipIf(!databaseUrl || !electricUrl)('mutation txid and Electric', () =
       expect(change?.value?.title).toBe('Renamed through the mutation');
       expect(change?.headers.txids).toContain(txid);
     } finally {
-      for (const table of ['issue', 'workflow_state', 'team_member', 'team', 'member']) {
+      // The mutation wrote an outbox event (it points at the team) and an idempotency or external reference could too.
+      for (const table of [
+        'event',
+        'idempotency_key',
+        'external_ref',
+        'label',
+        'issue',
+        'workflow_state',
+        'team_member',
+        'team',
+        'member',
+      ]) {
         await db.pool.query(`delete from ${table} where workspace_id = $1`, [f.workspaceId]);
       }
       await db.pool.query('delete from workspace where id = $1', [f.workspaceId]);

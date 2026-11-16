@@ -1,13 +1,20 @@
 // Turns a (workspace, member) pair into the `Actor` the shared permission module decides on.
-import { member, team, teamMember } from '@torch/shared/db/schema';
+import { type ActivityClient, member, team, teamMember } from '@torch/shared/db/schema';
 import { type Actor, canSeeMember, type TeamAccess } from '@torch/shared/permissions';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import type { Orm } from '../db.ts';
 import { isUuid } from '../util/uuid.ts';
 
-/** Resolves who is calling for one workspace; the session layer (Task 5) implements it. */
+/**
+ * An actor plus how the call authenticated. The client is set by the resolver (a session is `web`; API tokens, the MCP
+ * server and imports get their own value when they exist), never read from a request header, and ends up on every
+ * activity row and event the call writes.
+ */
+export type ClientActor = Actor & { readonly client: ActivityClient };
+
+/** Resolves who is calling for one workspace; the session layer implements it. */
 export type ActorResolver = {
-  resolveActor(req: Request, workspaceId: string): Promise<Actor | null>;
+  resolveActor(req: Request, workspaceId: string): Promise<ClientActor | null>;
 };
 
 /**
@@ -46,6 +53,17 @@ export async function loadActor(
   const teamIds = new Set<string>();
   for (const row of rows) if (row.teamId) teamIds.add(row.teamId);
   return { workspaceId: first.workspaceId, memberId: first.memberId, role: first.role, teamIds };
+}
+
+/** `loadActor` for a call that authenticated as `client`. */
+export async function loadClientActor(
+  orm: Orm,
+  workspaceId: string,
+  memberId: string,
+  client: ActivityClient,
+): Promise<ClientActor | null> {
+  const actor = await loadActor(orm, workspaceId, memberId);
+  return actor ? { ...actor, client } : null;
 }
 
 /** What the permission module needs to know about a team; null when the team is not in this workspace. */

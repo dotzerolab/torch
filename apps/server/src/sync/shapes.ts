@@ -30,6 +30,13 @@ const ISSUE_COLUMNS = [
   'created_at',
   'updated_at',
   'archived_at',
+  'estimate',
+  'due_date',
+  'parent_id',
+  'sort_order',
+  'started_at',
+  'completed_at',
+  'canceled_at',
 ];
 /**
  * The synced member profile: an allowlist, so a column added to `member` later stays private until someone adds
@@ -54,6 +61,8 @@ const WORKFLOW_STATE_COLUMNS = [
   'type',
   'position',
   'color',
+  // Clients hide archived states (an archived state keeps the issues it had, but takes no new ones).
+  'archived_at',
 ];
 
 /**
@@ -133,5 +142,121 @@ export function teamMembersShape(teamId: string): ShapeDefinition {
     where: 'team_id = $1',
     params: [teamId],
     columns: [...TEAM_MEMBER_COLUMNS],
+  };
+}
+
+// ---- the issue model (labels, issue join rows, per-issue detail and activity) ----
+
+const LABEL_COLUMNS = [
+  'id',
+  'workspace_id',
+  'team_id',
+  'parent_id',
+  'name',
+  'color',
+  'is_group',
+  'archived_at',
+  'created_at',
+];
+
+/**
+ * The join rows and labels of one team. Each shape is filtered by the denormalised `team_id`, so a team's shape never
+ * holds a row of another team. A relation ends in two issues that may belong to two teams, so its shape holds the rows
+ * that start or end in the team; its columns are ids only (never a title, number or identifier), so the end that lies in
+ * a team the actor cannot see reveals nothing but an id.
+ */
+const TEAM_DATA_SHAPES = {
+  labels: { table: 'label', where: 'team_id = $1', columns: LABEL_COLUMNS },
+  issue_labels: {
+    table: 'issue_label',
+    where: 'team_id = $1',
+    columns: ['workspace_id', 'team_id', 'issue_id', 'label_id'],
+  },
+  issue_subscribers: {
+    table: 'issue_subscriber',
+    where: 'team_id = $1',
+    columns: ['workspace_id', 'team_id', 'issue_id', 'member_id', 'created_at'],
+  },
+  issue_links: {
+    table: 'issue_link',
+    where: 'team_id = $1',
+    columns: [
+      'id',
+      'workspace_id',
+      'team_id',
+      'issue_id',
+      'url',
+      'title',
+      'created_by',
+      'created_at',
+    ],
+  },
+  issue_relations: {
+    table: 'issue_relation',
+    where: 'team_id = $1 OR related_team_id = $1',
+    // `team_id` and `related_team_id` filter the rows (where) but are not sent: a client that sees one end knows its
+    // team, and the other end's team id (a private team's id) is not needed to draw the relation.
+    columns: [
+      'id',
+      'workspace_id',
+      'issue_id',
+      'related_issue_id',
+      'type',
+      'created_by',
+      'created_at',
+    ],
+  },
+} as const;
+
+export type TeamDataKind = keyof typeof TEAM_DATA_SHAPES;
+
+/** One of the team data shapes. The caller has already checked that the actor can see `teamId`. */
+export function teamDataShape(kind: TeamDataKind, teamId: string): ShapeDefinition {
+  const { table, where, columns } = TEAM_DATA_SHAPES[kind];
+  return { table, where, params: [teamId], columns: [...columns] };
+}
+
+/** The labels of no team: they apply workspace-wide and every member of the workspace reads them. */
+export function workspaceLabelsShape(workspaceId: string): ShapeDefinition {
+  return {
+    table: 'label',
+    where: 'workspace_id = $1 AND team_id IS NULL',
+    params: [workspaceId],
+    columns: [...LABEL_COLUMNS],
+  };
+}
+
+/**
+ * The description of one opened issue (ADR 0001 section 4: large text syncs per object, never in a list). The caller
+ * has already checked that the actor can see the issue's team.
+ */
+export function issueDetailShape(issueId: string): ShapeDefinition {
+  return {
+    table: 'issue',
+    where: 'id = $1',
+    params: [issueId],
+    columns: ['id', 'workspace_id', 'team_id', 'description'],
+  };
+}
+
+/** The history of one opened issue. Same precondition as `issueDetailShape`. */
+export function issueActivityShape(issueId: string): ShapeDefinition {
+  return {
+    table: 'issue_activity',
+    where: 'issue_id = $1',
+    params: [issueId],
+    columns: [
+      'id',
+      'workspace_id',
+      'team_id',
+      'issue_id',
+      'actor_id',
+      'client',
+      'type',
+      'field',
+      'from_value',
+      'to_value',
+      'created_at',
+    ],
   };
 }

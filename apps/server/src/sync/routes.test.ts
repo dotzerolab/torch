@@ -1,11 +1,11 @@
 import { ELECTRIC_PROTOCOL_QUERY_PARAMS } from '@electric-sql/client';
 import type { Brand } from '@torch/shared/brand';
-import { member, teamMember } from '@torch/shared/db/schema';
+import { issueRelation, label, member, teamMember } from '@torch/shared/db/schema';
 import { and, eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../app.ts';
 import { createDb, type Db } from '../db.ts';
-import { loadActor } from '../permissions/load-actor.ts';
+import { loadClientActor } from '../permissions/load-actor.ts';
 import {
   addMember,
   createWorkspaceFixture,
@@ -519,7 +519,7 @@ describe.skipIf(!databaseUrl)('GET /api/sync (shape proxy, fake Electric)', () =
       const upstream = fakeUpstream(emptyShape);
       const wrongWorkspaceResolver = {
         // A buggy resolver that ignores the workspace in the URL.
-        resolveActor: async () => loadActor(db.orm, b.workspaceId, b.members.owner.id),
+        resolveActor: async () => loadClientActor(db.orm, b.workspaceId, b.members.owner.id, 'web'),
       };
       const app = createApp({
         brand,
@@ -994,7 +994,7 @@ describe.skipIf(!databaseUrl || !electricUrl)('GET /api/sync (real Electric)', (
   }
 
   async function rows(res: Response): Promise<Record<string, unknown>[]> {
-    expect(res.status).toBe(200);
+    expect(res.status, await res.clone().text()).toBe(200);
     const messages = (await res.json()) as Message[];
     return messages.filter((m) => m.value).map((m) => m.value as Record<string, unknown>);
   }
@@ -1137,3 +1137,430 @@ describe.skipIf(!databaseUrl || !electricUrl)('GET /api/sync (real Electric)', (
     });
   }, 30_000);
 });
+
+const TEAM_DATA_ROUTES = [
+  [
+    'labels',
+    'label',
+    'id,workspace_id,team_id,parent_id,name,color,is_group,archived_at,created_at',
+  ],
+  ['issue-labels', 'issue_label', 'workspace_id,team_id,issue_id,label_id'],
+  ['issue-subscribers', 'issue_subscriber', 'workspace_id,team_id,issue_id,member_id,created_at'],
+  ['issue-links', 'issue_link', 'id,workspace_id,team_id,issue_id,url,title,created_by,created_at'],
+  [
+    'issue-relations',
+    'issue_relation',
+    'id,workspace_id,issue_id,related_issue_id,type,created_by,created_at',
+  ],
+] as const;
+
+const teamDataPath = (f: WorkspaceFixture, team: 'eng' | 'ops', route: string) =>
+  `/api/sync/w/${f.workspaceId}/teams/${f.teams[team].id}/${route}`;
+const issuePath = (f: WorkspaceFixture, issueId: string, route: 'detail' | 'activity') =>
+  `/api/sync/w/${f.workspaceId}/issues/${issueId}/${route}`;
+
+describe.skipIf(!databaseUrl)('GET /api/sync data of the issue model (fake Electric)', () => {
+  it('team data shapes: a visible team is served with params[1] = its stored id', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      for (const [route, table, columns] of TEAM_DATA_ROUTES) {
+        for (const [who, team] of [
+          ['guest', 'eng'],
+          ['member', 'ops'],
+          ['owner', 'ops'],
+        ] as const) {
+          upstream.calls.length = 0;
+          const res = await get(
+            app,
+            `${teamDataPath(f, team, route)}?offset=-1`,
+            as(f.members[who].id),
+          );
+
+          expect(res.status, `${route} ${who} ${team}`).toBe(200);
+          const q = upstream.calls[0]?.url.searchParams;
+          expect(q?.get('table')).toBe(table);
+          expect(q?.get('where')).toBe(
+            route === 'issue-relations' ? 'team_id = $1 OR related_team_id = $1' : 'team_id = $1',
+          );
+          expect(sentParams(upstream.calls[0])).toEqual([f.teams[team].id]);
+          expect(q?.get('columns')).toBe(columns);
+        }
+      }
+    });
+  });
+
+  it('team data shapes: an invisible, foreign or malformed team answers 404 with the body of an unknown id, and Electric is not called', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const other = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const body = JSON.stringify({ error: 'not_found' });
+
+      for (const [route] of TEAM_DATA_ROUTES) {
+        const base = `/api/sync/w/${f.workspaceId}/teams`;
+        const attempts: [string, string, string][] = [
+          ['guest on OPS', teamDataPath(f, 'ops', route), f.members.guest.id],
+          ['admin on OPS', teamDataPath(f, 'ops', route), f.members.admin.id],
+          ['outsider on OPS', teamDataPath(f, 'ops', route), f.members.outsider.id],
+          ['unknown team', `${base}/${UNKNOWN_UUID}/${route}`, f.members.owner.id],
+          ['foreign team', `${base}/${other.teams.eng.id}/${route}`, f.members.owner.id],
+          ['malformed team', `${base}/not-a-uuid/${route}`, f.members.owner.id],
+          [
+            'upper-case team',
+            `${base}/${f.teams.eng.id.toUpperCase()}/${route}`,
+            f.members.owner.id,
+          ],
+        ];
+        for (const [what, path, memberId] of attempts) {
+          const res = await get(app, `${path}?offset=-1`, as(memberId));
+
+          expect(res.status, `${route} ${what}`).toBe(404);
+          expect(await res.text(), `${route} ${what}`).toBe(body);
+        }
+        const anonymous = await get(app, teamDataPath(f, 'eng', route));
+        expect(anonymous.status, route).toBe(401);
+      }
+      expect(upstream.calls).toHaveLength(0);
+    });
+  });
+
+  it('workspace labels: every role reads them with params[1] = the workspace id', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const other = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      for (const who of ['owner', 'admin', 'member', 'guest', 'outsider'] as const) {
+        upstream.calls.length = 0;
+        const res = await get(
+          app,
+          `/api/sync/w/${f.workspaceId}/workspace-labels?offset=-1`,
+          as(f.members[who].id),
+        );
+
+        expect(res.status, who).toBe(200);
+        const q = upstream.calls[0]?.url.searchParams;
+        expect(q?.get('table')).toBe('label');
+        expect(q?.get('where')).toBe('workspace_id = $1 AND team_id IS NULL');
+        expect(sentParams(upstream.calls[0])).toEqual([f.workspaceId]);
+      }
+      // No actor, and a member of another workspace: nothing is served.
+      upstream.calls.length = 0;
+      const anonymous = await get(app, `/api/sync/w/${f.workspaceId}/workspace-labels`);
+      const foreign = await get(
+        app,
+        `/api/sync/w/${f.workspaceId}/workspace-labels`,
+        as(other.members.owner.id),
+      );
+      expect(anonymous.status).toBe(401);
+      expect(foreign.status).toBe(401);
+      expect(upstream.calls).toHaveLength(0);
+    });
+  });
+
+  it('per-issue shapes: a visible issue is served with params[1] = its stored id', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const eng = f.issues.eng[0]?.id as string;
+      const ops = f.issues.ops[0]?.id as string;
+
+      const attempts = [
+        ['guest', eng],
+        ['member', ops],
+        ['owner', ops],
+      ] as const;
+      for (const [who, issueId] of attempts) {
+        for (const [route, table, where, columns] of [
+          ['detail', 'issue', 'id = $1', 'id,workspace_id,team_id,description'],
+          [
+            'activity',
+            'issue_activity',
+            'issue_id = $1',
+            'id,workspace_id,team_id,issue_id,actor_id,client,type,field,from_value,to_value,created_at',
+          ],
+        ] as const) {
+          upstream.calls.length = 0;
+          const res = await get(
+            app,
+            `${issuePath(f, issueId, route)}?offset=-1`,
+            as(f.members[who].id),
+          );
+
+          expect(res.status, `${route} ${who}`).toBe(200);
+          const q = upstream.calls[0]?.url.searchParams;
+          expect(q?.get('table')).toBe(table);
+          expect(q?.get('where')).toBe(where);
+          expect(sentParams(upstream.calls[0])).toEqual([issueId]);
+          expect(q?.get('columns')).toBe(columns);
+        }
+      }
+    });
+  });
+
+  it('per-issue shapes: an invisible, foreign, unknown or malformed issue answers one 404 and Electric is not called', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const other = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const ops = f.issues.ops[0]?.id as string;
+      const eng = f.issues.eng[0]?.id as string;
+      const body = JSON.stringify({ error: 'not_found' });
+
+      for (const route of ['detail', 'activity'] as const) {
+        const attempts: [string, string, string][] = [
+          ['guest on a private-team issue', issuePath(f, ops, route), f.members.guest.id],
+          ['admin on a private-team issue', issuePath(f, ops, route), f.members.admin.id],
+          ['outsider on a private-team issue', issuePath(f, ops, route), f.members.outsider.id],
+          ['unknown issue', issuePath(f, UNKNOWN_UUID, route), f.members.owner.id],
+          [
+            'issue of another workspace',
+            issuePath(f, other.issues.eng[0]?.id as string, route),
+            f.members.owner.id,
+          ],
+          ['malformed issue', issuePath(f, 'not-a-uuid', route), f.members.owner.id],
+          ['upper-case issue', issuePath(f, eng.toUpperCase(), route), f.members.owner.id],
+        ];
+        for (const [what, path, memberId] of attempts) {
+          const res = await get(app, `${path}?offset=-1`, as(memberId));
+
+          expect(res.status, `${route} ${what}`).toBe(404);
+          expect(await res.text(), `${route} ${what}`).toBe(body);
+        }
+        const anonymous = await get(app, issuePath(f, eng, route));
+        expect(anonymous.status, route).toBe(401);
+      }
+      expect(upstream.calls).toHaveLength(0);
+    });
+  });
+
+  it('a guest who joins the private team can read its issue, and loses it again on removal', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const path = `${issuePath(f, f.issues.ops[0]?.id as string, 'detail')}?offset=-1`;
+
+      expect((await get(app, path, as(f.members.guest.id))).status).toBe(404);
+      await db.orm.insert(teamMember).values({
+        workspaceId: f.workspaceId,
+        teamId: f.teams.ops.id,
+        memberId: f.members.guest.id,
+      });
+      expect((await get(app, path, as(f.members.guest.id))).status).toBe(200);
+      await db.orm
+        .delete(teamMember)
+        .where(
+          and(eq(teamMember.teamId, f.teams.ops.id), eq(teamMember.memberId, f.members.guest.id)),
+        );
+      expect((await get(app, path, as(f.members.guest.id))).status).toBe(404);
+    });
+  });
+
+  it('only GET is served on the new routes', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const paths = [
+        ...TEAM_DATA_ROUTES.map(([route]) => teamDataPath(f, 'eng', route)),
+        `/api/sync/w/${f.workspaceId}/workspace-labels`,
+        issuePath(f, f.issues.eng[0]?.id as string, 'detail'),
+        issuePath(f, f.issues.eng[0]?.id as string, 'activity'),
+      ];
+
+      for (const path of paths) {
+        for (const method of ['POST', 'PUT', 'DELETE']) {
+          const res = await get(app, path, {
+            ...as(f.members.owner.id),
+            method,
+            headers: { [TEST_MEMBER_HEADER]: f.members.owner.id, origin: TEST_ORIGIN },
+          });
+          expect(res.status, `${method} ${path}`).toBeGreaterThanOrEqual(404);
+          expect(res.status, `${method} ${path}`).toBeLessThan(500);
+        }
+      }
+      expect(upstream.calls).toHaveLength(0);
+    });
+  });
+});
+
+describe.skipIf(!databaseUrl || !electricUrl)(
+  'GET /api/sync data of the issue model (real Electric)',
+  () => {
+    type Message = { value?: Record<string, unknown>; headers: Record<string, unknown> };
+
+    async function withDevWorkspace(fn: (db: Db, f: WorkspaceFixture) => Promise<void>) {
+      const db = createDb(databaseUrl as string);
+      const f = await createWorkspaceFixture(db.orm);
+      try {
+        await fn(db, f);
+      } finally {
+        // Labels and issues of this workspace only; join rows and activity go with their issues.
+        await db.pool.query('delete from label where workspace_id = $1', [f.workspaceId]);
+        for (const table of ['issue', 'workflow_state', 'team_member', 'team', 'member']) {
+          await db.pool.query(`delete from ${table} where workspace_id = $1`, [f.workspaceId]);
+        }
+        await db.pool.query('delete from workspace where id = $1', [f.workspaceId]);
+        await db.close();
+      }
+    }
+
+    async function rows(res: Response): Promise<Record<string, unknown>[]> {
+      expect(res.status).toBe(200);
+      const messages = (await res.json()) as Message[];
+      return messages.filter((m) => m.value).map((m) => m.value as Record<string, unknown>);
+    }
+
+    const realApp = (db: Db) =>
+      createApp({
+        brand,
+        db,
+        electric: { url: electricUrl as string, secret: electricSecret },
+        auth: headerActorResolver(db.orm),
+        config: TEST_APP_CONFIG,
+      });
+
+    it('relations: the row that ends in a hidden issue is present, with ids only and no title anywhere', async () => {
+      await withDevWorkspace(async (db, f) => {
+        const app = realApp(db);
+        const visible = f.issues.eng[0];
+        const hidden = f.issues.ops[0];
+        if (!visible || !hidden) throw new Error('fixture issues missing');
+        await db.orm.insert(issueRelation).values({
+          workspaceId: f.workspaceId,
+          teamId: f.teams.eng.id,
+          issueId: visible.id,
+          relatedTeamId: f.teams.ops.id,
+          relatedIssueId: hidden.id,
+          type: 'blocks',
+          createdBy: f.members.owner.id,
+        });
+
+        const asGuest = await rows(
+          await get(
+            app,
+            `${teamDataPath(f, 'eng', 'issue-relations')}?offset=-1`,
+            as(f.members.guest.id),
+          ),
+        );
+
+        expect(asGuest).toHaveLength(1);
+        expect(asGuest[0]?.related_issue_id).toBe(hidden.id);
+        const text = JSON.stringify(asGuest);
+        expect(text).not.toContain(hidden.title);
+        expect(text).not.toContain(visible.title);
+        expect(Object.keys(asGuest[0] ?? {}).sort()).toEqual(
+          [
+            'created_at',
+            'created_by',
+            'id',
+            'issue_id',
+            'related_issue_id',
+            'type',
+            'workspace_id',
+          ].sort(),
+        );
+        // The private team's shape holds the same row (it ends there), and the guest cannot open it.
+        const ops = await rows(
+          await get(
+            app,
+            `${teamDataPath(f, 'ops', 'issue-relations')}?offset=-1`,
+            as(f.members.member.id),
+          ),
+        );
+        expect(ops.map((r) => r.id)).toEqual(asGuest.map((r) => r.id));
+        expect(
+          (
+            await get(
+              app,
+              `${teamDataPath(f, 'ops', 'issue-relations')}?offset=-1`,
+              as(f.members.guest.id),
+            )
+          ).status,
+        ).toBe(404);
+      });
+    }, 30_000);
+
+    it('labels: the team shape holds the team labels, the workspace shape the labels of no team', async () => {
+      await withDevWorkspace(async (db, f) => {
+        const app = realApp(db);
+        const [workspaceLabel] = await db.orm
+          .insert(label)
+          .values({
+            workspaceId: f.workspaceId,
+            teamId: null,
+            name: 'Everywhere',
+            color: '#112233',
+          })
+          .returning();
+        const [teamLabel] = await db.orm
+          .insert(label)
+          .values({
+            workspaceId: f.workspaceId,
+            teamId: f.teams.eng.id,
+            name: 'Eng only',
+            color: '#445566',
+          })
+          .returning();
+        const [opsLabel] = await db.orm
+          .insert(label)
+          .values({
+            workspaceId: f.workspaceId,
+            teamId: f.teams.ops.id,
+            name: 'Ops only',
+            color: '#778899',
+          })
+          .returning();
+        if (!workspaceLabel || !teamLabel || !opsLabel) throw new Error('label insert failed');
+
+        const workspace = await rows(
+          await get(
+            app,
+            `/api/sync/w/${f.workspaceId}/workspace-labels?offset=-1`,
+            as(f.members.guest.id),
+          ),
+        );
+        const eng = await rows(
+          await get(app, `${teamDataPath(f, 'eng', 'labels')}?offset=-1`, as(f.members.guest.id)),
+        );
+
+        expect(workspace.map((r) => r.id)).toEqual([workspaceLabel.id]);
+        expect(eng.map((r) => r.id)).toEqual([teamLabel.id]);
+        expect(JSON.stringify([workspace, eng])).not.toContain('Ops only');
+      });
+    }, 30_000);
+
+    it('detail carries the description of the one issue, and states carry archived_at', async () => {
+      await withDevWorkspace(async (db, f) => {
+        const app = realApp(db);
+        const issueId = f.issues.eng[0]?.id as string;
+
+        const detail = await rows(
+          await get(app, `${issuePath(f, issueId, 'detail')}?offset=-1`, as(f.members.guest.id)),
+        );
+        const states = await rows(
+          await get(
+            app,
+            `/api/sync/w/${f.workspaceId}/teams/${f.teams.eng.id}/workflow-states?offset=-1`,
+            as(f.members.guest.id),
+          ),
+        );
+
+        expect(detail).toHaveLength(1);
+        expect(Object.keys(detail[0] ?? {}).sort()).toEqual(
+          ['description', 'id', 'team_id', 'workspace_id'].sort(),
+        );
+        expect(states.length).toBeGreaterThan(0);
+        expect(states.every((s) => 'archived_at' in s)).toBe(true);
+      });
+    }, 30_000);
+  },
+);

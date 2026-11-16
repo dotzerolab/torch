@@ -15,6 +15,41 @@
       "when": 1794671417015,
       "tag": "0001_members_invites_audit",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794751057743,
+      "tag": "0002_issue_fields_labels_relations",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794751286230,
+      "tag": "0003_activity_events_refs_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794762005411,
+      "tag": "0004_workflow_state_archive",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794817517261,
+      "tag": "0005_relation_pair_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794817770304,
+      "tag": "0006_relation_related_issue_idx",
+      "breakpoints": true
     }
   ]
 }

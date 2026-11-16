@@ -9,8 +9,11 @@ only talks to the Torch server; the sync service and the database are never expo
 
 ## 1. Requirements
 
-- **PostgreSQL 14 or newer**, with `wal_level=logical`. The sync service reads the write-ahead log, so this is not
-  optional and there is no degraded mode without it.
+- **PostgreSQL 17 or newer**, with `wal_level=logical`. The sync service reads the write-ahead log, so this is not
+  optional and there is no degraded mode without it. Version 17 is the first with `transaction_timeout`, which the
+  server sets on every connection to keep transactions shorter than the settle window of the issue list
+  ([API](api/issues.md#list-and-poll)); an older server refuses the connection and `/health/db` reports
+  `PostgreSQL 17 or newer is required`.
 - **A role with the `REPLICATION` privilege** (or a superuser) for the sync service. Create it with
   `ALTER ROLE <name> WITH REPLICATION`. On Amazon RDS and Aurora the privilege comes from the `rds_replication` role
   (`GRANT rds_replication TO <name>`), and `wal_level` is set with the parameter `rds.logical_replication=1`, which

@@ -117,10 +117,14 @@ const WITHOUT_OTHER_IDS = [
   'teams: create',
   'teams: private team directory',
   'invites: list',
+  'issues: list',
+  'labels: list',
+  'labels: create (workspace)',
   'invites: create (member role)',
   'invites: create (admin role)',
   'sync: teams',
   'sync: members',
+  'sync: workspace labels',
 ];
 
 describe.skipIf(!databaseUrl)('workspace isolation over HTTP', () => {

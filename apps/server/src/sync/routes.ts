@@ -8,12 +8,18 @@ import type { ActorResolver } from '../permissions/load-actor.ts';
 import { loadTeamAccess, loadVisibleMemberIds } from '../permissions/load-actor.ts';
 import { isUuid } from '../util/uuid.ts';
 import type { ElectricConfig } from './config.ts';
+import { loadIssueTeamAccess } from './issue-access.ts';
 import {
+  issueActivityShape,
+  issueDetailShape,
   membersShape,
   type ShapeDefinition,
+  type TeamDataKind,
+  teamDataShape,
   teamMembersShape,
   teamScopedShape,
   teamsShape,
+  workspaceLabelsShape,
 } from './shapes.ts';
 
 export type SyncRouteDeps = {
@@ -171,6 +177,52 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
   teamRoute('issues', 'issues');
   teamRoute('workflow-states', 'workflow_states');
   teamRoute('members', 'team_members');
+
+  // ---- the issue model: labels and join rows per team, workspace labels, detail and activity per opened issue ----
+
+  const teamDataRoute = (path: string, kind: TeamDataKind) =>
+    routes.get(`/w/:workspaceId/teams/:teamId/${path}`, async (c) => {
+      const workspaceId = c.req.param('workspaceId');
+      if (!isUuid(workspaceId)) return notFound();
+      const actor = await authenticate(c.req.raw, workspaceId);
+      if (!actor) return unauthenticated();
+
+      const teamId = c.req.param('teamId');
+      if (!isUuid(teamId)) return notFound();
+      const access = await loadTeamAccess(orm, workspaceId, teamId);
+      if (!access || !canSeeTeam(actor, access)) return notFound();
+      return proxy(c.req.raw, teamDataShape(kind, access.id));
+    });
+  teamDataRoute('labels', 'labels');
+  teamDataRoute('issue-labels', 'issue_labels');
+  teamDataRoute('issue-subscribers', 'issue_subscribers');
+  teamDataRoute('issue-links', 'issue_links');
+  teamDataRoute('issue-relations', 'issue_relations');
+
+  // Labels of no team: every member of the workspace reads them, a guest included.
+  routes.get('/w/:workspaceId/workspace-labels', async (c) => {
+    const workspaceId = c.req.param('workspaceId');
+    if (!isUuid(workspaceId)) return notFound();
+    const actor = await authenticate(c.req.raw, workspaceId);
+    if (!actor) return unauthenticated();
+    return proxy(c.req.raw, workspaceLabelsShape(actor.workspaceId));
+  });
+
+  // Per opened issue. The issue is looked up first and its team decides visibility: an issue of a team the actor cannot
+  // see answers the same 404 as an unknown id. The shape is built from the stored issue id.
+  const issueRoute = (path: string, build: (issueId: string) => ShapeDefinition) =>
+    routes.get(`/w/:workspaceId/issues/:issueId/${path}`, async (c) => {
+      const workspaceId = c.req.param('workspaceId');
+      if (!isUuid(workspaceId)) return notFound();
+      const actor = await authenticate(c.req.raw, workspaceId);
+      if (!actor) return unauthenticated();
+
+      const found = await loadIssueTeamAccess(orm, workspaceId, c.req.param('issueId'));
+      if (!found || !canSeeTeam(actor, found.access)) return notFound();
+      return proxy(c.req.raw, build(found.issueId));
+    });
+  issueRoute('detail', issueDetailShape);
+  issueRoute('activity', issueActivityShape);
 
   return routes;
 }

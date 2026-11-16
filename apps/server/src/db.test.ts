@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from './app.ts';
-import { createDb, type Db, type DbHealth, interpretHealth } from './db.ts';
+import { createDb, type Db, type DbHealth, healthFailureReason, interpretHealth } from './db.ts';
 
 const databaseUrl = process.env.DATABASE_URL;
 
@@ -198,5 +198,31 @@ describe.skipIf(!databaseUrl)('Postgres integration (dev compose)', () => {
     await db.close();
 
     expect(ended).toHaveLength(2);
+  });
+});
+
+describe('healthFailureReason', () => {
+  it('names the minimum version when Postgres does not know transaction_timeout', () => {
+    const error = Object.assign(
+      new Error('unrecognized configuration parameter "transaction_timeout"'),
+      {
+        code: '42704',
+      },
+    );
+    expect(healthFailureReason(error)).toBe('PostgreSQL 17 or newer is required');
+  });
+
+  it('keeps the generic category for any other failure', () => {
+    expect(
+      healthFailureReason(
+        Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+      ),
+    ).toBe('cannot reach the database');
+    expect(
+      healthFailureReason(
+        Object.assign(new Error('unrecognized configuration parameter "x"'), { code: '42704' }),
+      ),
+    ).toBe('cannot reach the database');
+    expect(healthFailureReason(undefined)).toBe('cannot reach the database');
   });
 });

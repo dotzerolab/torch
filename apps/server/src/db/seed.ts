@@ -4,6 +4,9 @@
 import {
   type IssueRow,
   issue,
+  issueLabel,
+  issueRelation,
+  label,
   type MemberRow,
   member,
   type TeamRow,
@@ -174,6 +177,56 @@ export async function insertWorkspaceLayout(
   };
 }
 
+/**
+ * What the dev workspace shows of the issue model: a workspace label, a team label and a label group with two
+ * children, labels on the first issues of ENG, a "blocks" relation between two of them and a sub-issue. Needs three
+ * issues in ENG; a smaller seed (used by tests) has none of it.
+ */
+async function insertIssueModelDemo(tx: Tx, layout: WorkspaceLayout): Promise<void> {
+  const [first, second, third] = layout.issues.eng;
+  if (!first || !second || !third) return;
+  const { workspaceId } = layout;
+  const engId = layout.teams.eng.id;
+
+  const [bug, frontend, area] = await tx
+    .insert(label)
+    .values([
+      { workspaceId, teamId: null, name: 'Bug', color: '#ef4444' },
+      { workspaceId, teamId: engId, name: 'Frontend', color: '#3b82f6' },
+      { workspaceId, teamId: engId, name: 'Area', color: '#a855f7', isGroup: true },
+    ])
+    .returning();
+  if (!bug || !frontend || !area) throw new Error('label insert returned no rows');
+  const [api, docs] = await tx
+    .insert(label)
+    .values([
+      { workspaceId, teamId: engId, name: 'API', color: '#10b981', parentId: area.id },
+      { workspaceId, teamId: engId, name: 'Docs', color: '#f59e0b', parentId: area.id },
+    ])
+    .returning();
+  if (!api || !docs) throw new Error('label insert returned no rows');
+
+  const onIssue = (issueRow: IssueRow, labelId: string) => ({
+    workspaceId,
+    teamId: engId,
+    issueId: issueRow.id,
+    labelId,
+  });
+  await tx
+    .insert(issueLabel)
+    .values([onIssue(first, bug.id), onIssue(first, api.id), onIssue(second, frontend.id)]);
+  await tx.insert(issueRelation).values({
+    workspaceId,
+    teamId: engId,
+    issueId: first.id,
+    relatedTeamId: engId,
+    relatedIssueId: second.id,
+    type: 'blocks',
+    createdBy: layout.members.owner.id,
+  });
+  await tx.update(issue).set({ parentId: second.id }).where(eq(issue.id, third.id));
+}
+
 const DEMO_EMAILS: Record<LayoutRole, string> = {
   owner: 'owner@example.test',
   admin: 'admin@example.test',
@@ -250,12 +303,13 @@ export async function seedDev(
       .limit(1);
     if (existing) return { created: false, workspaceSlug: 'demo' as const };
 
-    await insertWorkspaceLayout(tx, {
+    const layout = await insertWorkspaceLayout(tx, {
       name: 'Demo',
       slug: 'demo',
       email: DEMO_EMAILS,
       issuesPerTeam,
     });
+    await insertIssueModelDemo(tx, layout);
     return { created: true, workspaceSlug: 'demo' as const };
   });
 }

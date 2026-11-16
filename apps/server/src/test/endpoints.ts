@@ -3,7 +3,17 @@
 // attempts that change state (deactivate, delete, revoke, add oneself to a team) never disturb each other.
 // The cross-workspace tests and the HTTP rows of the permission matrix both read this file. A new route needs a case
 // here, or the coverage test in `cross-workspace.test.ts` fails.
-import { invite, issue, member, team, teamMember, workflowState } from '@torch/shared/db/schema';
+import {
+  invite,
+  issue,
+  issueLink,
+  issueRelation,
+  label,
+  member,
+  team,
+  teamMember,
+  workflowState,
+} from '@torch/shared/db/schema';
 import { defaultWorkflowStates } from '@torch/shared/db/workflow-defaults';
 import type { Role } from '@torch/shared/permissions';
 import { eq } from 'drizzle-orm';
@@ -11,7 +21,9 @@ import { type App, createApp } from '../app.ts';
 import { createSessionActorResolver } from '../auth/resolver.ts';
 import { generateToken, hashToken } from '../auth/tokens.ts';
 import type { Db, Orm } from '../db.ts';
+import { createIssue } from '../issues/create-issue.ts';
 import { createMemoryMailer } from '../mail/mailer.ts';
+import { loadClientActor } from '../permissions/load-actor.ts';
 import { openSession } from './admin-helpers.ts';
 import { testBrand } from './auth-app.ts';
 import { addMember, createWorkspaceFixture } from './fixtures.ts';
@@ -39,6 +51,27 @@ export type Ids = {
   issueId: string;
   privateIssueId: string;
   ownerOnlyIssueId: string;
+  /**
+   * A second issue of each of those teams, new for the attempt (a relation between two issues exists once), and a
+   * relation and a link on the first issue of each, also new for the attempt.
+   */
+  peerIssueId: string;
+  privatePeerIssueId: string;
+  ownerOnlyPeerIssueId: string;
+  relationId: string;
+  privateRelationId: string;
+  ownerOnlyRelationId: string;
+  linkId: string;
+  privateLinkId: string;
+  ownerOnlyLinkId: string;
+  /** A label of each of the three teams and one of the workspace, and a started workflow state of each team: all new for the attempt. */
+  labelId: string;
+  privateLabelId: string;
+  ownerOnlyLabelId: string;
+  workspaceLabelId: string;
+  stateId: string;
+  privateStateId: string;
+  ownerOnlyStateId: string;
   /** A member (role `member`) who belongs to all three teams. */
   memberId: string;
   /** A member (role `member`) who belongs to no team. */
@@ -100,6 +133,22 @@ export const PLACEHOLDER_IDS: Ids = {
   issueId: ':issueId',
   privateIssueId: ':issueId',
   ownerOnlyIssueId: ':issueId',
+  peerIssueId: 'PEER',
+  privatePeerIssueId: 'PEER',
+  ownerOnlyPeerIssueId: 'PEER',
+  relationId: ':relationId',
+  privateRelationId: ':relationId',
+  ownerOnlyRelationId: ':relationId',
+  linkId: ':linkId',
+  privateLinkId: ':linkId',
+  ownerOnlyLinkId: ':linkId',
+  labelId: ':labelId',
+  privateLabelId: ':labelId',
+  ownerOnlyLabelId: ':labelId',
+  workspaceLabelId: ':labelId',
+  stateId: ':stateId',
+  privateStateId: ':stateId',
+  ownerOnlyStateId: ':stateId',
   memberId: ':memberId',
   newcomerId: ':memberId',
   adminId: ':memberId',
@@ -131,6 +180,11 @@ const sync = (ids: Ids) => `/api/sync/w/${ids.workspaceId}`;
 
 type TeamKey = 'teamId' | 'privateTeamId' | 'ownerOnlyTeamId';
 type IssueKey = 'issueId' | 'privateIssueId' | 'ownerOnlyIssueId';
+type PeerKey = 'peerIssueId' | 'privatePeerIssueId' | 'ownerOnlyPeerIssueId';
+type RelationKey = 'relationId' | 'privateRelationId' | 'ownerOnlyRelationId';
+type LinkKey = 'linkId' | 'privateLinkId' | 'ownerOnlyLinkId';
+type LabelKey = 'labelId' | 'privateLabelId' | 'ownerOnlyLabelId';
+type StateKey = 'stateId' | 'privateStateId' | 'ownerOnlyStateId';
 
 /**
  * The three teams of a world with who may see (and edit the issues of) each and who may manage it, as the rules say:
@@ -140,30 +194,55 @@ type IssueKey = 'issueId' | 'privateIssueId' | 'ownerOnlyIssueId';
 const TEAMS: readonly {
   team: TeamKey;
   issue: IssueKey;
+  peer: PeerKey;
+  relation: RelationKey;
+  link: LinkKey;
+  teamLabel: LabelKey;
+  state: StateKey;
   label: string;
   see: Rule;
   manage: Rule;
+  /** Who may define a label of the team: anybody but a guest who sees the team. */
+  defineLabel: Rule;
 }[] = [
   {
     team: 'teamId',
     issue: 'issueId',
+    peer: 'peerIssueId',
+    relation: 'relationId',
+    link: 'linkId',
+    teamLabel: 'labelId',
+    state: 'stateId',
     label: 'public team',
     see: { minRole: 'guest' },
     manage: { minRole: 'admin' },
+    defineLabel: { minRole: 'member' },
   },
   {
     team: 'privateTeamId',
     issue: 'privateIssueId',
+    peer: 'privatePeerIssueId',
+    relation: 'privateRelationId',
+    link: 'privateLinkId',
+    teamLabel: 'privateLabelId',
+    state: 'privateStateId',
     label: 'private team',
     see: { minRole: 'owner', alsoAllowed: ['member'] },
     manage: { minRole: 'owner' },
+    defineLabel: { minRole: 'owner', alsoAllowed: ['member'] },
   },
   {
     team: 'ownerOnlyTeamId',
     issue: 'ownerOnlyIssueId',
+    peer: 'ownerOnlyPeerIssueId',
+    relation: 'ownerOnlyRelationId',
+    link: 'ownerOnlyLinkId',
+    teamLabel: 'ownerOnlyLabelId',
+    state: 'ownerOnlyStateId',
     label: 'public team with the owner only',
     see: { minRole: 'member' },
     manage: { minRole: 'admin' },
+    defineLabel: { minRole: 'member' },
   },
 ];
 
@@ -354,6 +433,7 @@ export const ENDPOINTS: EndpointCase[] = [
   },
 
   // ---- the issue mutation ----
+  { name: 'issues: list', method: 'GET', path: (ids) => `${api(ids)}/issues`, minRole: 'guest' },
   ...TEAMS.map(
     ({ issue: key, label, see }): EndpointCase => ({
       name: `issues: update (${label})`,
@@ -362,6 +442,147 @@ export const ENDPOINTS: EndpointCase[] = [
       body: { title: 'Edited title' },
       ...see,
     }),
+  ),
+
+  ...TEAMS.flatMap(({ issue: key, label, see }): EndpointCase[] =>
+    (['archive', 'unarchive'] as const).map((action) => ({
+      name: `issues: ${action} (${label})`,
+      method: 'POST',
+      path: (ids) => `${api(ids)}/issues/${ids[key]}/${action}`,
+      ...see,
+    })),
+  ),
+
+  ...TEAMS.map(
+    ({ team: key, label, see }): EndpointCase => ({
+      name: `issues: create (${label})`,
+      method: 'POST',
+      path: (ids) => `${api(ids)}/issues`,
+      body: (ids: Ids) => ({ teamId: ids[key], title: `Created ${ids.uid}` }),
+      ...see,
+    }),
+  ),
+
+  // ---- relations, subscribers and links: they follow the issue's team ----
+  ...TEAMS.flatMap(({ issue: key, peer, relation, link, label, see }): EndpointCase[] => [
+    {
+      name: `issues: list relations (${label})`,
+      method: 'GET',
+      path: (ids) => `${api(ids)}/issues/${ids[key]}/relations`,
+      ...see,
+    },
+    {
+      name: `issues: add relation (${label})`,
+      method: 'POST',
+      path: (ids) => `${api(ids)}/issues/${ids[key]}/relations`,
+      body: (ids: Ids) => ({ relatedIssueId: ids[peer], type: 'blocks' }),
+      ...see,
+    },
+    {
+      name: `issues: remove relation (${label})`,
+      method: 'DELETE',
+      path: (ids) => `${api(ids)}/issues/${ids[key]}/relations/${ids[relation]}`,
+      ...see,
+    },
+    {
+      name: `issues: subscribe (${label})`,
+      method: 'PUT',
+      path: (ids) => `${api(ids)}/issues/${ids[key]}/subscribers/${ids.selfId}`,
+      ...see,
+    },
+    {
+      name: `issues: unsubscribe (${label})`,
+      method: 'DELETE',
+      path: (ids) => `${api(ids)}/issues/${ids[key]}/subscribers/${ids.selfId}`,
+      ...see,
+    },
+    {
+      name: `issues: add link (${label})`,
+      method: 'POST',
+      path: (ids) => `${api(ids)}/issues/${ids[key]}/links`,
+      body: (ids: Ids) => ({ url: `https://example.test/${ids.uid}` }),
+      ...see,
+    },
+    {
+      name: `issues: remove link (${label})`,
+      method: 'DELETE',
+      path: (ids) => `${api(ids)}/issues/${ids[key]}/links/${ids[link]}`,
+      ...see,
+    },
+  ]),
+
+  // ---- labels and workflow states ----
+  { name: 'labels: list', method: 'GET', path: (ids) => `${api(ids)}/labels`, minRole: 'guest' },
+  {
+    name: 'labels: create (workspace)',
+    method: 'POST',
+    path: (ids) => `${api(ids)}/labels`,
+    body: (ids: Ids) => ({ name: `W${ids.uid}`, color: '#336699' }),
+    minRole: 'admin',
+  },
+  {
+    name: 'labels: update (workspace)',
+    method: 'PATCH',
+    path: (ids) => `${api(ids)}/labels/${ids.workspaceLabelId}`,
+    body: { color: '#112233' },
+    minRole: 'admin',
+  },
+  {
+    name: 'labels: archive (workspace)',
+    method: 'POST',
+    path: (ids) => `${api(ids)}/labels/${ids.workspaceLabelId}/archive`,
+    minRole: 'admin',
+  },
+  ...TEAMS.flatMap(
+    ({ team: key, teamLabel, state, label, see, manage, defineLabel }): EndpointCase[] => [
+      {
+        name: `labels: create (${label})`,
+        method: 'POST',
+        path: (ids) => `${api(ids)}/labels`,
+        body: (ids: Ids) => ({ name: `T${ids.uid}`, color: '#336699', teamId: ids[key] }),
+        ...defineLabel,
+      },
+      {
+        name: `labels: update (${label})`,
+        method: 'PATCH',
+        path: (ids) => `${api(ids)}/labels/${ids[teamLabel]}`,
+        body: { color: '#112233' },
+        ...defineLabel,
+      },
+      {
+        name: `labels: archive (${label})`,
+        method: 'POST',
+        path: (ids) => `${api(ids)}/labels/${ids[teamLabel]}/archive`,
+        ...defineLabel,
+      },
+      {
+        name: `workflow states: list (${label})`,
+        method: 'GET',
+        path: (ids) => `${api(ids)}/teams/${ids[key]}/workflow-states`,
+        ...see,
+      },
+      {
+        name: `workflow states: create (${label})`,
+        method: 'POST',
+        path: (ids) => `${api(ids)}/teams/${ids[key]}/workflow-states`,
+        body: (ids: Ids) => ({ name: `State ${ids.uid}`, type: 'started' }),
+        ...manage,
+      },
+      {
+        name: `workflow states: update (${label})`,
+        method: 'PATCH',
+        path: (ids) => `${api(ids)}/teams/${ids[key]}/workflow-states/${ids[state]}`,
+        body: { color: '#112233' },
+        ...manage,
+      },
+      {
+        name: `workflow states: archive (${label})`,
+        method: 'POST',
+        path: (ids) => `${api(ids)}/teams/${ids[key]}/workflow-states/${ids[state]}/archive`,
+        body: {},
+        ...manage,
+      },
+    ],
   ),
 
   // ---- sync shapes ----
@@ -386,6 +607,40 @@ export const ENDPOINTS: EndpointCase[] = [
       path: (ids) => `${sync(ids)}/teams/${ids[key]}/members`,
       ...see,
     },
+  ]),
+  // The issue model's own shapes: per team (the same visibility as the team), the workspace's labels (everybody), and
+  // per opened issue (the visibility of the issue's team).
+  {
+    name: 'sync: workspace labels',
+    method: 'GET',
+    path: (ids) => `${sync(ids)}/workspace-labels`,
+    minRole: 'guest',
+  },
+  ...TEAMS.flatMap(({ team: key, issue, label, see }): EndpointCase[] => [
+    ...(
+      [
+        ['labels', 'labels'],
+        ['issue labels', 'issue-labels'],
+        ['issue subscribers', 'issue-subscribers'],
+        ['issue links', 'issue-links'],
+        ['issue relations', 'issue-relations'],
+      ] as const
+    ).map(
+      ([title, route]): EndpointCase => ({
+        name: `sync: ${title} (${label})`,
+        method: 'GET',
+        path: (ids) => `${sync(ids)}/teams/${ids[key]}/${route}`,
+        ...see,
+      }),
+    ),
+    ...(['detail', 'activity'] as const).map(
+      (route): EndpointCase => ({
+        name: `sync: issue ${route} (${label})`,
+        method: 'GET',
+        path: (ids) => `${sync(ids)}/issues/${ids[issue]}/${route}`,
+        ...see,
+      }),
+    ),
   ]),
 ];
 
@@ -497,6 +752,22 @@ export async function newAttempt(
     issueId: ws.issues.eng,
     privateIssueId: ws.issues.ops,
     ownerOnlyIssueId: ws.issues.pub,
+    peerIssueId: UNUSED,
+    privatePeerIssueId: UNUSED,
+    ownerOnlyPeerIssueId: UNUSED,
+    relationId: UNUSED,
+    privateRelationId: UNUSED,
+    ownerOnlyRelationId: UNUSED,
+    linkId: UNUSED,
+    privateLinkId: UNUSED,
+    ownerOnlyLinkId: UNUSED,
+    labelId: UNUSED,
+    privateLabelId: UNUSED,
+    ownerOnlyLabelId: UNUSED,
+    workspaceLabelId: UNUSED,
+    stateId: UNUSED,
+    privateStateId: UNUSED,
+    ownerOnlyStateId: UNUSED,
     memberId: UNUSED,
     newcomerId: UNUSED,
     adminId: UNUSED,
@@ -526,6 +797,86 @@ export async function newAttempt(
     if (!row) throw new Error('invite insert returned no row');
     return row.id;
   };
+
+  // A new issue next to the first one of a team, made by the owner (who belongs to all three teams).
+  const owner = await loadClientActor(orm, workspaceId, ws.ownerId, 'web');
+  if (!owner) throw new Error('the workspace owner has no actor');
+  const peerOf = async (name: TeamName) => {
+    const created = await createIssue(orm, owner, { teamId: ws.teams[name], title: `Peer ${uid}` });
+    if (!created.ok) throw new Error(`peer issue refused: ${created.error.code}`);
+    return created.body.issue.id;
+  };
+  const JOIN_TARGETS = [
+    ['eng', 'peerIssueId', 'relationId', 'linkId'],
+    ['ops', 'privatePeerIssueId', 'privateRelationId', 'privateLinkId'],
+    ['pub', 'ownerOnlyPeerIssueId', 'ownerOnlyRelationId', 'ownerOnlyLinkId'],
+  ] as const;
+  for (const [name, peerKey, relationKey, linkKey] of JOIN_TARGETS) {
+    const teamId = ws.teams[name];
+    if (needs.has(peerKey)) ids[peerKey] = await peerOf(name);
+    if (needs.has(relationKey)) {
+      const [row] = await orm
+        .insert(issueRelation)
+        .values({
+          workspaceId,
+          teamId,
+          issueId: ws.issues[name],
+          relatedTeamId: teamId,
+          relatedIssueId: await peerOf(name),
+          type: 'related',
+          createdBy: ws.ownerId,
+        })
+        .returning({ id: issueRelation.id });
+      if (!row) throw new Error('relation insert returned no row');
+      ids[relationKey] = row.id;
+    }
+    if (needs.has(linkKey)) {
+      const [row] = await orm
+        .insert(issueLink)
+        .values({
+          workspaceId,
+          teamId,
+          issueId: ws.issues[name],
+          url: 'https://example.test/linked',
+          createdBy: ws.ownerId,
+        })
+        .returning({ id: issueLink.id });
+      if (!row) throw new Error('link insert returned no row');
+      ids[linkKey] = row.id;
+    }
+  }
+
+  const LABEL_TARGETS = [
+    ['eng', 'labelId', 'stateId'],
+    ['ops', 'privateLabelId', 'privateStateId'],
+    ['pub', 'ownerOnlyLabelId', 'ownerOnlyStateId'],
+  ] as const;
+  const newLabelRow = async (teamId: string | null, name: string) => {
+    const [row] = await orm
+      .insert(label)
+      .values({ workspaceId, teamId, name, color: '#336699' })
+      .returning({ id: label.id });
+    if (!row) throw new Error('label insert returned no row');
+    return row.id;
+  };
+  for (const [name, labelKey, stateKey] of LABEL_TARGETS) {
+    if (needs.has(labelKey)) ids[labelKey] = await newLabelRow(ws.teams[name], `L${uid}`);
+    if (needs.has(stateKey)) {
+      const [row] = await orm
+        .insert(workflowState)
+        .values({
+          workspaceId,
+          teamId: ws.teams[name],
+          name: `Review ${uid}`,
+          type: 'started',
+          position: 50,
+        })
+        .returning({ id: workflowState.id });
+      if (!row) throw new Error('workflow state insert returned no row');
+      ids[stateKey] = row.id;
+    }
+  }
+  if (needs.has('workspaceLabelId')) ids.workspaceLabelId = await newLabelRow(null, `WL${uid}`);
 
   if (needs.has('memberId')) {
     const added = await addMember(orm, workspaceId, 'member', {

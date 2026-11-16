@@ -1,19 +1,24 @@
 // Housekeeping: rows that nothing reads any more. Sign-in tokens and sessions only ever grow otherwise, and an
 // invitation that was never accepted is no use after its link is long dead. Accepted invitations stay: they are the
 // record of who joined how.
-import { invite, loginToken, session } from '@torch/shared/db/schema';
+import { idempotencyKey, invite, loginToken, session } from '@torch/shared/db/schema';
 import { and, isNull, lt, or } from 'drizzle-orm';
 import type { Orm } from '../db.ts';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RUN_EVERY_MS = 6 * 60 * 60 * 1000;
 
-export type CleanupCounts = { loginTokens: number; sessions: number; invites: number };
+export type CleanupCounts = {
+  loginTokens: number;
+  sessions: number;
+  invites: number;
+  idempotencyKeys: number;
+};
 
 /**
  * Deletes login tokens that expired over a day ago, sessions that expired or were revoked over 7 days ago, and
- * invitations that were never accepted and expired or were revoked over 30 days ago (their team rows go with them).
- * `now` is a parameter so tests move the clock. Running it again at the same `now` deletes nothing.
+ * invitations that were never accepted and expired or were revoked over 30 days ago (their team rows go with them),
+ * and idempotency keys older than 24 hours (a replay window, not a record). `now` is a parameter so tests move the clock. Running it again at the same `now` deletes nothing.
  */
 export async function cleanupExpiredRows(orm: Orm, now: Date): Promise<CleanupCounts> {
   const before = (days: number) => new Date(now.getTime() - days * DAY_MS);
@@ -30,10 +35,14 @@ export async function cleanupExpiredRows(orm: Orm, now: Date): Promise<CleanupCo
         or(lt(invite.expiresAt, before(30)), lt(invite.revokedAt, before(30))),
       ),
     );
+  const idempotencyKeys = await orm
+    .delete(idempotencyKey)
+    .where(lt(idempotencyKey.createdAt, new Date(now.getTime() - DAY_MS)));
   return {
     loginTokens: loginTokens.rowCount ?? 0,
     sessions: sessions.rowCount ?? 0,
     invites: invites.rowCount ?? 0,
+    idempotencyKeys: idempotencyKeys.rowCount ?? 0,
   };
 }
 
@@ -65,7 +74,7 @@ export function startCleanupSchedule(
     try {
       const counts = await cleanupExpiredRows(orm, now());
       log(
-        `cleanup removed login tokens: ${counts.loginTokens}, sessions: ${counts.sessions}, invites: ${counts.invites}`,
+        `cleanup removed login tokens: ${counts.loginTokens}, sessions: ${counts.sessions}, invites: ${counts.invites}, idempotency keys: ${counts.idempotencyKeys}`,
       );
     } catch (error) {
       console.error(
