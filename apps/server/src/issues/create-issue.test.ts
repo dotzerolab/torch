@@ -2,6 +2,7 @@ import {
   type ActivityClient,
   event,
   externalRef,
+  idempotencyKey,
   issue,
   issueActivity,
   issueLabel,
@@ -267,6 +268,42 @@ describe.skipIf(!databaseUrl)('createIssue', () => {
     // The next create without a key takes number 2: the replay consumed none.
     const next = await ok(createIssue(db.orm, actor, { teamId: t.team.id, title: 'Next' }));
     expect(next.body.issue.number).toBe(2);
+  });
+
+  it('a replay passes the current visibility check and keeps no copy of the description', async () => {
+    const db = getDb();
+    const f = await createWorkspaceFixture(db.orm);
+    const t = await freshTeam(db, f, 'REV');
+    const actor = await actorOf(db, f, 'member');
+    const input = { teamId: t.team.id, title: 'Secret plan', description: 'password hunter2' };
+
+    const first = await ok(createIssue(db.orm, actor, input, { idempotencyKey: 'key-priv' }));
+    expect(first.body.issue.description).toBe('password hunter2');
+    // The stored answer is the issue id, never the text.
+    const [stored] = await db.orm
+      .select()
+      .from(idempotencyKey)
+      .where(eq(idempotencyKey.workspaceId, f.workspaceId));
+    expect(JSON.stringify(stored?.response)).not.toContain('hunter2');
+    expect(stored?.response).toMatchObject({ issueId: first.body.issue.id });
+
+    // A replay while the actor still sees the team rebuilds the answer, with the issue as it is now.
+    await db.orm
+      .update(issue)
+      .set({ description: 'edited later' })
+      .where(eq(issue.id, first.body.issue.id));
+    const again = await ok(createIssue(db.orm, actor, input, { idempotencyKey: 'key-priv' }));
+    expect(again.replayed).toBe(true);
+    expect(again.body.issue.id).toBe(first.body.issue.id);
+    expect(again.body.txid).toBe(first.body.txid);
+
+    // The team turns private and the actor is no longer in it: the same replay is 404.
+    await db.orm.update(team).set({ private: true }).where(eq(team.id, t.team.id));
+    await db.orm
+      .delete(teamMember)
+      .where(and(eq(teamMember.teamId, t.team.id), eq(teamMember.memberId, f.members.member.id)));
+    const denied = await createIssue(db.orm, actor, input, { idempotencyKey: 'key-priv' });
+    expect(denied).toMatchObject({ ok: false, error: { status: 404, code: 'not_found' } });
   });
 
   it('two requests with one key at the same time create one issue', async () => {

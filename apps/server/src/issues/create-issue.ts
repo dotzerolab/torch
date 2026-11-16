@@ -124,7 +124,11 @@ async function createInTransaction(
         );
       if (!stored) throw refusal('not_found', 404);
       if (stored.requestHash !== requestHash) throw refusal('idempotency_key_reused', 422);
-      return { ok: true, replayed: true, body: stored.response as CreatedIssue };
+      return {
+        ok: true,
+        replayed: true,
+        body: await rebuildReplay(tx, requested, stored.response),
+      };
     }
   }
 
@@ -283,7 +287,9 @@ async function createInTransaction(
   if (idempotencyKeyValue !== undefined) {
     await tx
       .update(idempotencyKey)
-      .set({ status: 201, response: body })
+      // Only the id and the transaction id: a replay rebuilds the answer through the current visibility check, and the
+      // table never holds a copy of the description.
+      .set({ status: 201, response: { issueId: body.issue.id, txid: body.txid } })
       .where(
         and(
           eq(idempotencyKey.workspaceId, actor.workspaceId),
@@ -293,6 +299,64 @@ async function createInTransaction(
       );
   }
   return { ok: true, replayed: false, body };
+}
+
+/**
+ * The answer to a replayed create: the issue as it is now, read as the actor as the database says now. An actor who
+ * can no longer see the team gets 404, like any other read. The transaction id is the one of the original create.
+ */
+async function rebuildReplay(
+  tx: Tx,
+  requested: ClientActor,
+  stored: unknown,
+): Promise<CreatedIssue> {
+  const { issueId, txid } = (stored ?? {}) as { issueId?: unknown; txid?: unknown };
+  if (typeof issueId !== 'string' || typeof txid !== 'number') throw refusal('not_found', 404);
+  const fresh = await currentActor(tx, requested);
+  if (!fresh) throw refusal('unauthenticated', 401);
+  const actor: ClientActor = { ...fresh, client: requested.client };
+  const [found] = await tx
+    .select({ row: issue, key: team.key, teamPrivate: team.private })
+    .from(issue)
+    .innerJoin(team, and(eq(team.workspaceId, issue.workspaceId), eq(team.id, issue.teamId)))
+    .where(and(eq(issue.workspaceId, actor.workspaceId), eq(issue.id, issueId)));
+  if (
+    !found ||
+    !canSeeTeam(actor, {
+      id: found.row.teamId,
+      workspaceId: actor.workspaceId,
+      private: found.teamPrivate,
+    })
+  ) {
+    throw refusal('not_found', 404);
+  }
+  const labels = await tx
+    .select({ labelId: issueLabel.labelId })
+    .from(issueLabel)
+    .where(eq(issueLabel.issueId, issueId));
+  const refs = await tx
+    .select()
+    .from(externalRef)
+    .where(
+      and(
+        eq(externalRef.workspaceId, actor.workspaceId),
+        eq(externalRef.subjectType, 'issue'),
+        eq(externalRef.subjectId, issueId),
+      ),
+    );
+  return {
+    issue: toIssueDto(found.row, {
+      teamKey: found.key,
+      labelIds: labels.map((entry) => entry.labelId),
+      externalRefs: refs.map((entry) => ({
+        source: entry.source,
+        id: entry.externalId,
+        url: entry.url ?? null,
+      })),
+      includeDescription: true,
+    }),
+    txid,
+  };
 }
 
 /** A new issue goes above the others of its state: one below the lowest sort order there (0 for the first). */
