@@ -3,6 +3,7 @@
 import { createCollection, useLiveQuery } from '@tanstack/react-db';
 import { act, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { startMembershipWatcher, type WatcherRegistry } from './membership.ts';
 import {
   type Cleanable,
   createRegistry,
@@ -111,13 +112,15 @@ describe('syncRegistry', () => {
     expect(registry.get(team('issues')).inert).toBe(false);
   });
 
-  it('restarting teams forgives the dropped teams of that workspace', () => {
+  it('restarting teams keeps a dropped team dropped: only the new answer can bring it back', () => {
     const { factories } = fakeFactories();
     const registry = createRegistry(factories);
     registry.get({ kind: 'teams', workspaceId: ws });
+    registry.get(team('issues'));
     registry.dropTeam(ws, 't1');
     registry.restart({ kind: 'teams', workspaceId: ws });
-    expect(registry.isGone(ws, 't1')).toBe(false);
+    expect(registry.isGone(ws, 't1')).toBe(true);
+    expect(registry.get(team('issues')).inert).toBe(true);
   });
 });
 
@@ -245,5 +248,106 @@ describe('live shape budget', () => {
     registry.hold(team('issues'));
     await Promise.resolve();
     expect(fresh.cleaned).toBe(0);
+  });
+});
+
+// The membership watcher and the registry together: a team the person left and later rejoins must sync again
+// whichever of the two signals (the own-membership change, the teams rows) arrives first.
+describe('a team that is left and then rejoined', () => {
+  type Change = {
+    type: 'insert' | 'update' | 'delete';
+    key: string;
+    value: Record<string, unknown>;
+  };
+
+  function watchable(id: string, keys: string[]) {
+    let listener: ((changes: Change[]) => void) | undefined;
+    return {
+      id,
+      inert: false,
+      cleanup() {},
+      async preload() {},
+      // A new instance is never ready on the spot: its first sync arrives a moment later.
+      onFirstReady(callback: () => void) {
+        queueMicrotask(callback);
+      },
+      subscribeChanges(callback: (changes: Change[]) => void) {
+        listener = callback;
+        return {
+          unsubscribe() {
+            listener = undefined;
+          },
+        };
+      },
+      keys: () => keys,
+      emit: (...changes: Change[]) => listener?.(changes),
+    };
+  }
+
+  function setup(teamAnswers: string[][]) {
+    const teams: Array<ReturnType<typeof watchable>> = [];
+    const answers = [...teamAnswers];
+    const build = (_key: ShapeKey, id: string, context: { inert: boolean }) => ({
+      id,
+      inert: context.inert,
+      cleanup() {},
+    });
+    const registry = createRegistry({
+      teams: (_key: ShapeKey, id: string) => {
+        const instance = watchable(id, answers.shift() ?? []);
+        teams.push(instance);
+        return instance;
+      },
+      members: (_key: ShapeKey, id: string) => watchable(id, ['me']),
+      ownMemberships: (_key: ShapeKey, id: string) => watchable(id, []),
+      issues: build,
+      workflowStates: build,
+      teamMembers: build,
+    } as unknown as Factories);
+    const stop = startMembershipWatcher(ws, 'me', registry as unknown as WatcherRegistry);
+    return { registry, teams, stop };
+  }
+
+  const issues = (registry: { get(key: ShapeKey): unknown }) =>
+    registry.get(team('issues')) as { id: string; inert: boolean };
+  const teamsKey = { kind: 'teams', workspaceId: ws } as const;
+  const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  it('syncs again when the restarted teams shape already lists the team', async () => {
+    const { registry, stop } = setup([['t1'], [], ['t1']]);
+    await settle();
+    const before = issues(registry);
+    expect(before.inert).toBe(false);
+
+    registry.restart(teamsKey); // removed: the new answer has no t1
+    await settle();
+    expect(registry.isGone(ws, 't1')).toBe(true);
+    expect(issues(registry).inert).toBe(true);
+
+    registry.restart(teamsKey); // re-added: the new answer lists t1 from its first sync
+    await settle();
+    expect(registry.isGone(ws, 't1')).toBe(false);
+    const after = issues(registry);
+    expect(after.inert).toBe(false);
+    expect(after.id).not.toBe(before.id);
+    stop();
+  });
+
+  it('syncs again when the team row arrives after the restart', async () => {
+    const { registry, teams, stop } = setup([['t1'], [], []]);
+    await settle();
+    issues(registry);
+    registry.restart(teamsKey);
+    await settle();
+    expect(registry.isGone(ws, 't1')).toBe(true);
+
+    registry.restart(teamsKey); // re-added: first sync without the team, its row comes next
+    await settle();
+    expect(issues(registry).inert).toBe(true);
+    teams[2]?.emit({ type: 'insert', key: 't1', value: {} });
+
+    expect(registry.isGone(ws, 't1')).toBe(false);
+    expect(issues(registry).inert).toBe(false);
+    stop();
   });
 });

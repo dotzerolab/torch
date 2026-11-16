@@ -26,6 +26,7 @@ export type WatcherRegistry = {
   restart(key: ShapeKey): void;
   dropTeam(workspaceId: string, teamId: string): void;
   reinstateTeam(workspaceId: string, teamId: string): void;
+  isGone(workspaceId: string, teamId: string): boolean;
   subscribe(listener: () => void): () => void;
 };
 
@@ -73,9 +74,11 @@ export function startMembershipWatcher(
 
   function onTeamsReady(instance: Watchable) {
     const now = new Set(Array.from(instance.keys(), String));
-    // A restart answered with fewer teams: the ones that are gone lose their shapes (the restart itself already
-    // forgave every dropped team).
+    // A restart answered with fewer teams: the ones that are gone lose their shapes. A team that was dropped and is
+    // listed again (the person rejoined it) syncs again.
     for (const id of knownTeams) if (!now.has(id)) registry.dropTeam(workspaceId, id);
+    for (const id of now)
+      if (registry.isGone(workspaceId, id)) registry.reinstateTeam(workspaceId, id);
     knownTeams = now;
   }
 

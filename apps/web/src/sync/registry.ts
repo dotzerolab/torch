@@ -59,7 +59,7 @@ export function createRegistry<F extends Factories>(factories: F) {
   // Highest generation ever used per key: ids are never reused, even after a drop.
   const generations = new Map<string, number>();
   // Teams the server said are gone for this person (404). A page still showing one would otherwise ask for it
-  // again and loop; it is served an empty local collection until `teams` restarts or the team id comes back.
+  // again and loop; it is served an empty local collection until the team id comes back in the `teams` shape.
   const gone = new Set<string>();
   const listeners = new Set<() => void>();
   // Readers per team-scoped shape (React components holding it), and the timer that closes one nobody reads.
@@ -123,10 +123,6 @@ export function createRegistry<F extends Factories>(factories: F) {
   /** Ends the shape and starts a fresh one the next time it is read; open readers are told to re-bind. */
   function restart(key: ShapeKey) {
     const existed = replace(key);
-    if (key.kind === 'teams') {
-      for (const entry of [...gone])
-        if (entry.startsWith(`${key.workspaceId}:`)) gone.delete(entry);
-    }
     // A shape nobody read yet has nothing to restart. Create it lazily on the next `get`.
     if (existed) notify();
   }

@@ -49,6 +49,7 @@ function setup(teamKeys = ['t1', 't2']) {
   let teams = fakeCollection(teamKeys);
   const listeners = new Set<() => void>();
   const calls: string[] = [];
+  const gone = new Set<string>();
   const registry: WatcherRegistry = {
     get(key: ShapeKey) {
       if (key.kind === 'ownMemberships') return own.collection;
@@ -59,11 +60,14 @@ function setup(teamKeys = ['t1', 't2']) {
       calls.push(`restart:${key.kind}`);
     },
     dropTeam(_workspaceId, teamId) {
+      gone.add(teamId);
       calls.push(`drop:${teamId}`);
     },
     reinstateTeam(_workspaceId, teamId) {
+      gone.delete(teamId);
       calls.push(`reinstate:${teamId}`);
     },
+    isGone: (_workspaceId, teamId) => gone.has(teamId),
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -162,6 +166,17 @@ describe('startMembershipWatcher', () => {
     s.replaceTeams(fakeCollection(['t1']));
     expect(s.calls).toContain('drop:t2');
     expect(s.calls).not.toContain('drop:t1');
+  });
+
+  it('reinstates a dropped team that a restarted teams shape lists again, and only that one', () => {
+    const s = setup(['t1', 't2']);
+    startMembershipWatcher('w1', 'me', s.registry);
+    s.replaceTeams(fakeCollection(['t1']));
+    expect(s.calls).toContain('drop:t2');
+    s.calls.length = 0;
+    // The person rejoined t2: the next answer lists both, and t1 (never dropped) is left alone.
+    s.replaceTeams(fakeCollection(['t1', 't2']));
+    expect(s.calls).toEqual(['reinstate:t2']);
   });
 
   it('starts the sync of the three shapes it watches', () => {
