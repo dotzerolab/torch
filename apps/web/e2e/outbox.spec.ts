@@ -73,12 +73,15 @@ test('a queued write the server refuses after a reload is dropped with a message
   await field.press('Enter');
   await expect(page.getByTestId('offline-banner')).toContainText('1');
 
+  // The page that queued it is gone, so nobody waits on the write when it is finally answered.
+  await page.reload();
+  await expect(page.getByTestId('offline-banner')).toContainText('1');
+
   // Back online the server answers 403 (the person lost the team meanwhile): nothing is retried, the person is told.
   await context.unroute(ISSUE_WRITE);
   await context.route(ISSUE_WRITE, (route) =>
     route.fulfill({ status: 403, json: { error: 'forbidden', message: 'dev text' } }),
   );
-  await page.reload();
   await expect(page.getByText(/A change was not saved/)).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTestId('offline-banner')).toHaveCount(0);
   await expect(page.getByTestId('issue-title-8')).toHaveValue('ENG issue 8');
