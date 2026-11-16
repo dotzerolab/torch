@@ -752,6 +752,29 @@ describe.skipIf(!databaseUrl)('GET /api/sync (shape proxy, fake Electric)', () =
       });
     });
 
+    it('the issue-model shape routes end a request whose access changed during the permission reads too', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const bus = createAccessBus();
+        const upstream = hangingUpstream();
+        const app = buildApp(db, upstream.fetchUpstream, bus);
+        hooks.inLoadTeamAccess = () => bus.accessChanged(f.workspaceId, [f.members.member.id]);
+        const query = '?offset=5_1&handle=h-1&cursor=77&live=true';
+
+        for (const path of ['labels', 'issue-labels', 'issue-subscribers', 'issue-links']) {
+          const res = await get(
+            app,
+            `/api/sync/w/${f.workspaceId}/teams/${f.teams.eng.id}/${path}${query}`,
+            as(f.members.member.id),
+          );
+          expect(res.status, path).toBe(200);
+          expect(await res.json(), path).toEqual([{ headers: { control: 'up-to-date' } }]);
+        }
+        expect(upstream.calls).toHaveLength(0);
+        expect(bus.tracked()).toBe(0);
+      });
+    });
+
     it('a change for another member, or one that came before the request began, does not end it', async () => {
       await withTempDatabase(async (db) => {
         const f = await createWorkspaceFixture(db.orm);

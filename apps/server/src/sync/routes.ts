@@ -308,6 +308,7 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
     routes.get(`/w/:workspaceId/teams/:teamId/${path}`, async (c) => {
       const workspaceId = c.req.param('workspaceId');
       if (!isUuid(workspaceId)) return notFound();
+      const since = accessBus.seq();
       const actor = await authenticate(c.req.raw, workspaceId);
       if (!actor) return unauthenticated();
 
@@ -315,7 +316,7 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
       if (!isUuid(teamId)) return notFound();
       const access = await loadTeamAccess(orm, workspaceId, teamId);
       if (!access || !canSeeTeam(actor, access)) return notFound();
-      return proxy(c.req.raw, teamDataShape(kind, access.id));
+      return proxy(c.req.raw, teamDataShape(kind, access.id), actor, since);
     });
   teamDataRoute('labels', 'labels');
   teamDataRoute('issue-labels', 'issue_labels');
@@ -327,9 +328,10 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
   routes.get('/w/:workspaceId/workspace-labels', async (c) => {
     const workspaceId = c.req.param('workspaceId');
     if (!isUuid(workspaceId)) return notFound();
+    const since = accessBus.seq();
     const actor = await authenticate(c.req.raw, workspaceId);
     if (!actor) return unauthenticated();
-    return proxy(c.req.raw, workspaceLabelsShape(actor.workspaceId));
+    return proxy(c.req.raw, workspaceLabelsShape(actor.workspaceId), actor, since);
   });
 
   // Per opened issue. The issue is looked up first and its team decides visibility: an issue of a team the actor cannot
@@ -338,12 +340,13 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
     routes.get(`/w/:workspaceId/issues/:issueId/${path}`, async (c) => {
       const workspaceId = c.req.param('workspaceId');
       if (!isUuid(workspaceId)) return notFound();
+      const since = accessBus.seq();
       const actor = await authenticate(c.req.raw, workspaceId);
       if (!actor) return unauthenticated();
 
       const found = await loadIssueTeamAccess(orm, workspaceId, c.req.param('issueId'));
       if (!found || !canSeeTeam(actor, found.access)) return notFound();
-      return proxy(c.req.raw, build(found.issueId));
+      return proxy(c.req.raw, build(found.issueId), actor, since);
     });
   issueRoute('detail', issueDetailShape);
   issueRoute('activity', issueActivityShape);
