@@ -46,6 +46,29 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 afterEach(() => vi.unstubAllGlobals());
 
 describe('outbox', () => {
+  it('announces a queued write only once it is saved on the device', async () => {
+    const net = network();
+    const storage = memoryStorage();
+    let finishSave: () => void = () => {};
+    const slow = {
+      ...storage,
+      save: (workspaceId: string, writes: OutboxWrite[]) =>
+        new Promise<void>((resolve) => {
+          finishSave = () => resolve(storage.save(workspaceId, writes));
+        }),
+    };
+    const box = createOutbox({ storage: slow, send: net.send, sleep: net.sleep });
+    await box.resume(WS);
+    const heard = vi.fn();
+    box.subscribe(heard);
+    void box.enqueueWrite(write(1)).catch(() => {});
+    await flush();
+    expect(heard).not.toHaveBeenCalled();
+    finishSave();
+    await flush();
+    expect(heard).toHaveBeenCalled();
+  });
+
   it('three offline edits replay in order on reconnect', async () => {
     const net = network();
     const box = createOutbox({ storage: memoryStorage(), send: net.send, sleep: net.sleep });

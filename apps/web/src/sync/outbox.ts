@@ -232,8 +232,10 @@ export function createOutbox(options: OutboxOptions) {
     const result = new Promise<{ txid: number }>((resolve, reject) => {
       queue.push({ write, settle: { resolve, reject } });
     });
-    notify();
+    // The count (the offline banner) says "waiting" only once the write is on the device: a page that ends right after
+    // would otherwise show a write that its next visit never finds.
     await persist(write.workspaceId);
+    notify();
     void drain(write.workspaceId);
     return result;
   }
