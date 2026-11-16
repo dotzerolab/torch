@@ -209,11 +209,11 @@ function persisted<T extends PersistableOptions>(
           keys: () => liveKeys(),
           copy: () => copyToDevice(workspaceId, id, build, persistence, running, 'copy'),
           refresh: () => copyToDevice(workspaceId, id, build, persistence, running, 'refresh'),
-          // Only a refresh is ended with the instance. The first copy finishes: a shape that is merely paused (it left
-          // view over the page's budget) starts again under the same id, and an interrupted first copy would leave
-          // the device without it.
+          // A restart or a drop ends the copy too: its rows must not be written after the old ones were deleted, and a
+          // backlog of dead copies would hold the queue. A pause does not end a FIRST copy: the shape starts again under
+          // the same id and an interrupted copy would leave the device without it.
           onCancel: () => {
-            if (running.mode === 'refresh') running.stop?.();
+            if (running.mode === 'refresh' || !running.keepCopy) running.stop?.();
           },
         })
       : null;
@@ -226,6 +226,7 @@ function persisted<T extends PersistableOptions>(
     truncated: () => follower?.truncated(),
     cleanup: () => {
       running.cancelled = true;
+      running.keepCopy = context.paused();
       follower?.cancel();
     },
   });
@@ -242,6 +243,8 @@ type RunningCopy = {
   stop: (() => void) | null;
   mode?: 'copy' | 'refresh';
   cancelled?: boolean;
+  /** The instance was only paused: a first copy that is queued or running goes on. */
+  keepCopy?: boolean;
 };
 
 /** How long a refresh waits for the store to catch up: a changing shape must not hold the queue for a minute. */
@@ -263,7 +266,7 @@ function copyToDevice(
   mode: 'copy' | 'refresh',
 ): Promise<void> {
   return queueDeviceCopy(workspaceId, async (registerStop) => {
-    if (running.cancelled && mode === 'refresh') return;
+    if (running.cancelled && (mode === 'refresh' || !running.keepCopy)) return;
     const copy = createCollection(
       persistedCollectionOptions({
         ...(build() as object),
@@ -330,7 +333,12 @@ function shapeOptions(
 /** A team the server no longer shows: an empty collection that never syncs, so nothing asks for it again. */
 const inertSync = { sync: ({ markReady }: { markReady: () => void }) => markReady() };
 
-const NO_CONTEXT: ShapeContext = { dropTeam: () => {}, inert: false, settled: () => {} };
+const NO_CONTEXT: ShapeContext = {
+  dropTeam: () => {},
+  inert: false,
+  settled: () => {},
+  paused: () => false,
+};
 
 export function createTeamsCollection(
   workspaceId: string,

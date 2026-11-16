@@ -24,6 +24,8 @@ export type ShapeContext = {
    * are current. Only the instance the registry holds is heard; a replaced one may still answer once while it stops.
    */
   settled: () => void;
+  /** True while the instance ends because it was paused (it starts again under the same id), false for a restart or a drop. */
+  paused: () => boolean;
 };
 
 export type Factories = {
@@ -47,7 +49,7 @@ function goneKey(workspaceId: string, teamId: string): string {
   return `${workspaceId}:${teamId}`;
 }
 
-type Entry = { collection: Cleanable; generation: number };
+type Entry = { collection: Cleanable; generation: number; state: { paused: boolean } };
 
 /**
  * How many shapes a page keeps open at once. The browser allows about six connections per origin on HTTP/1.1 and a
@@ -124,7 +126,12 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
       if (entries.get(k)?.generation !== generation) return;
       for (const listener of [...(settledListeners.get(key.kind) ?? [])]) listener(key.workspaceId);
     };
-    return { collection: make(key, id, { dropTeam, inert, settled }), generation };
+    const state = { paused: false };
+    return {
+      collection: make(key, id, { dropTeam, inert, settled, paused: () => state.paused }),
+      generation,
+      state,
+    };
   }
 
   function get<K extends ShapeKey>(key: K): CollectionFor<F, K> {
@@ -182,6 +189,8 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
    * now, and the device copy it left (rows and resume position) is what the new instance starts from.
    */
   function pause(key: ShapeKey) {
+    const entry = entries.get(keyOf(key));
+    if (entry) entry.state.paused = true;
     if (!replace(key)) return;
     const k = keyOf(key);
     generations.set(k, Math.max(0, (generations.get(k) ?? 1) - 1));

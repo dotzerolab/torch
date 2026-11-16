@@ -108,6 +108,38 @@ describe('syncRegistry', () => {
     expect(onTeams).toHaveBeenCalledTimes(3);
   });
 
+  it('tells an instance that ends whether it was paused or replaced', () => {
+    const contexts: Array<{ paused: () => boolean }> = [];
+    const build = (_key: ShapeKey, _id: string, context: { paused: () => boolean }) => {
+      contexts.push(context);
+      return { cleanup() {} };
+    };
+    const registry = createRegistry({
+      teams: build,
+      members: build,
+      ownMemberships: build,
+      issues: build,
+      workflowStates: build,
+      teamMembers: build,
+    } as unknown as Factories);
+    registry.get(team('issues'));
+    registry.get({ kind: 'members', workspaceId: ws });
+    expect(contexts.map((c) => c.paused())).toEqual([false, false]);
+    registry.hold(team('issues'))();
+    registry.restart({ kind: 'members', workspaceId: ws });
+    registry.dropTeam(ws, 't1');
+    expect(contexts[1]?.paused()).toBe(false);
+    // The team shape was ended by `dropTeam` here; a pause is what `hold` does over budget:
+    const paused = createRegistry({ issues: build } as unknown as Factories);
+    const before = contexts.length;
+    paused.get(team('issues'));
+    for (const t of ['t2', 't3', 't4', 't5']) paused.get(team('issues', t));
+    const release = paused.hold(team('issues'));
+    release();
+    expect(contexts[before]?.paused()).toBe(true);
+    expect(contexts[before + 1]?.paused()).toBe(false);
+  });
+
   it('stops telling a listener that unsubscribed', () => {
     let settle = () => {};
     const build = (_key: ShapeKey, _id: string, context: { settled: () => void }) => {
