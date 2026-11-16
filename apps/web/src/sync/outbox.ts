@@ -21,18 +21,17 @@ export type OutboxWrite = {
   idempotencyKey: string;
 };
 
-/** Why a write ended without being applied: `lost-access` (403/404) or `rejected` (any other 4xx). */
-export class WriteDropped extends Error {
+/**
+ * Why a write ended without being applied: `lost-access` (403/404) or `rejected` (any other 4xx). It is an `ApiError`
+ * with the server's status and code, so the screens that turn a refusal into a translated message keep working.
+ */
+export class WriteDropped extends ApiError {
   readonly kind: 'lost-access' | 'rejected';
-  readonly status: number;
-  readonly code: string;
 
   constructor(kind: 'lost-access' | 'rejected', status: number, code: string, message: string) {
-    super(message);
+    super(status, code, message);
     this.name = 'WriteDropped';
     this.kind = kind;
-    this.status = status;
-    this.code = code;
   }
 }
 

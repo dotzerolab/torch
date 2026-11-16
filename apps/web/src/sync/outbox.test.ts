@@ -115,8 +115,11 @@ describe('outbox', () => {
     const first = box.enqueueWrite(write(1));
     const second = box.enqueueWrite(write(2));
 
+    // An ApiError with the server's code, so the page can show its translated text.
+    await expect(first).rejects.toBeInstanceOf(ApiError);
     await expect(first).rejects.toMatchObject({
       name: 'WriteDropped',
+      code: 'invalid',
       kind: 'rejected',
       message: 'The title is too long.',
     });
