@@ -133,3 +133,66 @@ describe('notifySessionsRevoked', () => {
     expect(accessChanged).not.toHaveBeenCalled();
   });
 });
+
+describe('AccessBus change counter', () => {
+  it('a change after the counter was read aborts the request at registration', () => {
+    const bus = createAccessBus();
+    const since = bus.seq();
+    bus.accessChanged(WS_A, [ALICE]);
+    const abort = vi.fn();
+
+    bus.track(WS_A, ALICE, abort, since);
+
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(bus.tracked()).toBe(0);
+  });
+
+  it("'all' counts for every member of that workspace and for nobody else", () => {
+    const bus = createAccessBus();
+    const since = bus.seq();
+    bus.accessChanged(WS_A, 'all');
+    const alice = vi.fn();
+    const bob = vi.fn();
+    const elsewhere = vi.fn();
+
+    bus.track(WS_A, ALICE, alice, since);
+    bus.track(WS_A, BOB, bob, since);
+    bus.track(WS_B, ALICE, elsewhere, since);
+
+    expect(alice).toHaveBeenCalledTimes(1);
+    expect(bob).toHaveBeenCalledTimes(1);
+    expect(elsewhere).not.toHaveBeenCalled();
+    expect(bus.tracked()).toBe(1);
+  });
+
+  it('other members, an older change and a request without a counter are left alone', () => {
+    const bus = createAccessBus();
+    bus.accessChanged(WS_A, [ALICE]);
+    const since = bus.seq();
+    bus.accessChanged(WS_A, [BOB]);
+    const alice = vi.fn();
+    const noCounter = vi.fn();
+
+    bus.track(WS_A, ALICE, alice, since);
+    bus.track(WS_A, BOB, noCounter);
+
+    expect(alice).not.toHaveBeenCalled();
+    expect(noCounter).not.toHaveBeenCalled();
+    expect(bus.tracked()).toBe(2);
+  });
+
+  it('a change with nobody listening is still remembered', () => {
+    const bus = createAccessBus();
+    const since = bus.seq();
+    expect(bus.tracked()).toBe(0);
+    bus.accessChanged(WS_A, [ALICE]);
+    expect(bus.seq()).toBeGreaterThan(since);
+  });
+
+  it('an empty list is not a change', () => {
+    const bus = createAccessBus();
+    const since = bus.seq();
+    bus.accessChanged(WS_A, []);
+    expect(bus.seq()).toBe(since);
+  });
+});

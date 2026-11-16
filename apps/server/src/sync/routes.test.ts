@@ -22,6 +22,19 @@ import { type AccessBus, createAccessBus } from './access-bus.ts';
 import { SHAPE_CACHE_CONTROL, SYNC_FORWARDED_PARAMS } from './routes.ts';
 import { MEMBER_COLUMNS } from './shapes.ts';
 
+// A hook that runs inside the team access read, between the authorization reads and the registration of the request.
+const hooks = vi.hoisted(() => ({ inLoadTeamAccess: undefined as undefined | (() => void) }));
+vi.mock('../permissions/load-actor.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../permissions/load-actor.ts')>();
+  return {
+    ...actual,
+    loadTeamAccess: (...args: Parameters<typeof actual.loadTeamAccess>) => {
+      hooks.inLoadTeamAccess?.();
+      return actual.loadTeamAccess(...args);
+    },
+  };
+});
+
 const databaseUrl = process.env.DATABASE_URL;
 const electricUrl = process.env.ELECTRIC_URL;
 const electricSecret = process.env.ELECTRIC_SECRET ?? 'dev-electric-secret';
@@ -109,6 +122,7 @@ const get = (app: ReturnType<typeof createApp>, path: string, init?: RequestInit
 
 afterEach(() => {
   vi.restoreAllMocks();
+  hooks.inLoadTeamAccess = undefined;
 });
 
 describe.skipIf(!databaseUrl)('GET /api/sync (shape proxy, fake Electric)', () => {
@@ -667,6 +681,47 @@ describe.skipIf(!databaseUrl)('GET /api/sync (shape proxy, fake Electric)', () =
           expect(res.headers.get('cache-control')).toBe(SHAPE_CACHE_CONTROL);
           expect(res.headers.get('electric-handle')).toBeNull();
         }
+      });
+    });
+
+    it('an access change that lands between the permission reads and the registration still ends the request', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const bus = createAccessBus();
+        const upstream = hangingUpstream();
+        const app = buildApp(db, upstream.fetchUpstream, bus);
+        // The owner removes the member right after the team access was read: the actor is already authorised.
+        hooks.inLoadTeamAccess = () => bus.accessChanged(f.workspaceId, [f.members.member.id]);
+
+        const res = await get(
+          app,
+          `${issuesPath(f, 'eng')}?offset=5_1&handle=h-1&cursor=77&live=true`,
+          as(f.members.member.id),
+        );
+
+        // Answered like any ended long-poll, so the client asks again and is authorised against the new state.
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual([{ headers: { control: 'up-to-date' } }]);
+        expect(upstream.calls).toHaveLength(0);
+        expect(bus.tracked()).toBe(0);
+      });
+    });
+
+    it('a change for another member, or one that came before the request began, does not end it', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const bus = createAccessBus();
+        const upstream = hangingUpstream();
+        const app = buildApp(db, upstream.fetchUpstream, bus);
+        bus.accessChanged(f.workspaceId, [f.members.member.id]);
+        hooks.inLoadTeamAccess = () => bus.accessChanged(f.workspaceId, [f.members.owner.id]);
+
+        const pending = get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.member.id));
+        await vi.waitFor(() => expect(bus.tracked()).toBe(1));
+
+        expect(upstream.calls).toHaveLength(1);
+        bus.accessChanged(f.workspaceId, 'all');
+        expect((await pending).status).toBe(503);
       });
     });
 

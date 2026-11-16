@@ -158,7 +158,12 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
   const notFound = () => Response.json({ error: 'not_found' }, { status: 404 });
   const unauthenticated = () => Response.json({ error: 'unauthenticated' }, { status: 401 });
 
-  async function proxy(req: Request, shape: ShapeDefinition, actor: Actor): Promise<Response> {
+  async function proxy(
+    req: Request,
+    shape: ShapeDefinition,
+    actor: Actor,
+    since: number,
+  ): Promise<Response> {
     const url = new URL(`${electric.url}/v1/shape`);
     const incoming = new URL(req.url).searchParams;
     for (const name of SYNC_FORWARDED_PARAMS) {
@@ -174,9 +179,11 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
     url.searchParams.set('secret', electric.secret);
 
     // The request ends when the client goes away or when this person's access changes (see access-bus.ts); the bus
-    // keeps it registered until the last byte of the answer has been sent, so a streamed answer ends too.
+    // keeps it registered until the last byte of the answer has been sent, so a streamed answer ends too. `since` was
+    // read before the caller was authorised: a change that landed meanwhile ends the request here, before Electric.
     const ended = new AbortController();
-    const release = accessBus.track(actor.workspaceId, actor.memberId, () => ended.abort());
+    const release = accessBus.track(actor.workspaceId, actor.memberId, () => ended.abort(), since);
+    if (ended.signal.aborted) return accessChangedResponse(incoming);
 
     let upstream: Response;
     try {
@@ -225,18 +232,21 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
   routes.get('/w/:workspaceId/teams', async (c) => {
     const workspaceId = c.req.param('workspaceId');
     if (!isUuid(workspaceId)) return notFound();
+    const since = accessBus.seq();
     const actor = await authenticate(c.req.raw, workspaceId);
     if (!actor) return unauthenticated();
-    return proxy(c.req.raw, teamsShape(actor), actor);
+    return proxy(c.req.raw, teamsShape(actor), actor, since);
   });
 
   // Member profiles: the shape follows the actor's role and stored team memberships, never the URL or the query.
   routes.get('/w/:workspaceId/members', async (c) => {
     const workspaceId = c.req.param('workspaceId');
     if (!isUuid(workspaceId)) return notFound();
+    const since = accessBus.seq();
     const actor = await authenticate(c.req.raw, workspaceId);
     if (!actor) return unauthenticated();
-    return proxy(c.req.raw, membersShape(actor, await loadVisibleMemberIds(orm, actor)), actor);
+    const shape = membersShape(actor, await loadVisibleMemberIds(orm, actor));
+    return proxy(c.req.raw, shape, actor, since);
   });
 
   // The actor's own team memberships: the signal that tells an open page its access changed (a private-team join
@@ -244,15 +254,17 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
   routes.get('/w/:workspaceId/me/team-memberships', async (c) => {
     const workspaceId = c.req.param('workspaceId');
     if (!isUuid(workspaceId)) return notFound();
+    const since = accessBus.seq();
     const actor = await authenticate(c.req.raw, workspaceId);
     if (!actor) return unauthenticated();
-    return proxy(c.req.raw, ownMembershipShape(actor), actor);
+    return proxy(c.req.raw, ownMembershipShape(actor), actor, since);
   });
 
   const teamRoute = (path: string, kind: 'issues' | 'workflow_states' | 'team_members') =>
     routes.get(`/w/:workspaceId/teams/:teamId/${path}`, async (c) => {
       const workspaceId = c.req.param('workspaceId');
       if (!isUuid(workspaceId)) return notFound();
+      const since = accessBus.seq();
       const actor = await authenticate(c.req.raw, workspaceId);
       if (!actor) return unauthenticated();
 
@@ -266,6 +278,7 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
         c.req.raw,
         kind === 'team_members' ? teamMembersShape(access.id) : teamScopedShape(kind, access.id),
         actor,
+        since,
       );
     });
   teamRoute('issues', 'issues');
