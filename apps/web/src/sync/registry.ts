@@ -54,7 +54,12 @@ export const MAX_LIVE_SHAPES = 4;
 /** How long a team's shapes stay open after it left view, when the budget has room. */
 export const PAUSE_AFTER_MS = 30_000;
 
-export function createRegistry<F extends Factories>(factories: F) {
+/** Side effects of the registry the page wires in: what else must go when a team is gone for this person. */
+export type RegistryHooks = {
+  onTeamDropped?: (workspaceId: string, teamId: string) => void;
+};
+
+export function createRegistry<F extends Factories>(factories: F, hooks: RegistryHooks = {}) {
   const entries = new Map<string, Entry>();
   // Highest generation ever used per key: ids are never reused, even after a drop.
   const generations = new Map<string, number>();
@@ -133,6 +138,8 @@ export function createRegistry<F extends Factories>(factories: F) {
     for (const kind of TEAM_KINDS) {
       replace({ kind, workspaceId, teamId } as ShapeKey);
     }
+    // The shapes are ended above; now the device copy and the queued writes of the team go too.
+    hooks.onTeamDropped?.(workspaceId, teamId);
     notify();
   }
 

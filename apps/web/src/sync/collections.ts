@@ -4,8 +4,8 @@
 import { FetchError } from '@electric-sql/client';
 import { electricCollectionOptions } from '@tanstack/electric-db-collection';
 import { createCollection } from '@tanstack/react-db';
-import { apiFetch } from '../api.ts';
 import { toIssueUpdate } from './issue-update.ts';
+import { enqueueWrite, type OutboxWrite } from './outbox.ts';
 import type { Factories, ShapeContext } from './registry.ts';
 
 /** A `team` row as the shape delivers it (column names as in the database). */
@@ -205,21 +205,29 @@ export function createWorkflowStatesCollection(
 }
 
 /**
- * M9: every mutation of a transaction is sent, one PATCH each in order, and every txid is awaited. Sending only the
+ * M9: every mutation of a transaction is queued, one PATCH each in order, and every txid is awaited. Sending only the
  * first would confirm the transaction while the others were never written. Resolving before the writes come back
- * through Electric would drop the optimistic state too early.
+ * through Electric would drop the optimistic state too early. The outbox keeps a write across a lost connection or a
+ * reload and sends it again with the same `Idempotency-Key`; a refused write rejects here, so the optimistic change
+ * is rolled back.
  */
 export async function sendIssueMutations(
   workspaceId: string,
+  teamId: string,
   mutations: ReadonlyArray<{ key: string | number; changes: Record<string, unknown> }>,
   awaitTxId: (txid: number) => Promise<unknown>,
+  enqueue: (write: OutboxWrite) => Promise<{ txid: number }> = enqueueWrite,
 ): Promise<void> {
   const txids: number[] = [];
   for (const mutation of mutations) {
-    const { txid } = await apiFetch<{ txid: number }>(
-      `/api/w/${workspaceId}/issues/${mutation.key}`,
-      { method: 'PATCH', body: JSON.stringify(toIssueUpdate(mutation.changes)) },
-    );
+    const { txid } = await enqueue({
+      workspaceId,
+      teamId,
+      method: 'PATCH',
+      path: `/api/w/${workspaceId}/issues/${mutation.key}`,
+      body: toIssueUpdate(mutation.changes),
+      idempotencyKey: crypto.randomUUID(),
+    });
     txids.push(txid);
   }
   for (const txid of txids) await awaitTxId(txid);
@@ -242,7 +250,7 @@ export function createIssuesCollection(
     // M9: every mutation of the transaction is sent, one PATCH each in order, and every txid is awaited. Sending
     // only the first would confirm the transaction while the others were never written.
     onUpdate: async ({ transaction, collection }) => {
-      await sendIssueMutations(workspaceId, transaction.mutations, (txid) =>
+      await sendIssueMutations(workspaceId, teamId, transaction.mutations, (txid) =>
         collection.utils.awaitTxId(txid, TXID_TIMEOUT_MS),
       );
     },

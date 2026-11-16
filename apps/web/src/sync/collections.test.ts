@@ -7,8 +7,8 @@ vi.mock('../api.ts', async (importOriginal) => ({
   apiFetch: vi.fn(),
 }));
 
-import { apiFetch } from '../api.ts';
 import { BACKOFF_OPTIONS, handleShapeError, sendIssueMutations } from './collections.ts';
+import type { OutboxWrite } from './outbox.ts';
 
 const actions = () => ({ signIn: vi.fn(), dropTeam: vi.fn() });
 const fetchError = (status: number) =>
@@ -79,43 +79,55 @@ describe('429 and 5xx', () => {
 });
 
 describe('sendIssueMutations (M9)', () => {
-  it('sends one PATCH per mutation in order and awaits every txid', async () => {
-    const api = vi.mocked(apiFetch);
-    api.mockReset();
-    api.mockResolvedValueOnce({ txid: 11 }).mockResolvedValueOnce({ txid: 12 });
+  const queued = () =>
+    vi.fn<(write: OutboxWrite) => Promise<{ txid: number }>>().mockResolvedValue({ txid: 0 });
+
+  it('queues one PATCH per mutation in order and awaits every txid', async () => {
+    const enqueue = queued();
+    enqueue.mockResolvedValueOnce({ txid: 11 }).mockResolvedValueOnce({ txid: 12 });
     const awaitTxId = vi.fn().mockResolvedValue(true);
     await sendIssueMutations(
       'w1',
+      't1',
       [
         { key: 'i1', changes: { title: 'One' } },
         { key: 'i2', changes: { priority: 2 } },
       ],
       awaitTxId,
+      enqueue,
     );
-    expect(api.mock.calls.map(([path]) => path)).toEqual([
+    expect(enqueue.mock.calls.map(([w]) => w.path)).toEqual([
       '/api/w/w1/issues/i1',
       '/api/w/w1/issues/i2',
     ]);
-    expect(JSON.parse(String(api.mock.calls[1]?.[1]?.body))).toEqual({ priority: 2 });
+    expect(enqueue.mock.calls.map(([w]) => [w.method, w.workspaceId, w.teamId])).toEqual([
+      ['PATCH', 'w1', 't1'],
+      ['PATCH', 'w1', 't1'],
+    ]);
+    expect(enqueue.mock.calls[1]?.[0].body).toEqual({ priority: 2 });
+    // Each write has its own key, made once here (the outbox keeps it on every replay).
+    const keys = enqueue.mock.calls.map(([w]) => w.idempotencyKey);
+    expect(new Set(keys).size).toBe(2);
     expect(awaitTxId.mock.calls.map(([txid]) => txid)).toEqual([11, 12]);
   });
 
   it('stops at the first refused write and awaits nothing', async () => {
-    const api = vi.mocked(apiFetch);
-    api.mockReset();
-    api.mockRejectedValueOnce(new Error('refused'));
+    const enqueue = queued();
+    enqueue.mockRejectedValueOnce(new Error('refused'));
     const awaitTxId = vi.fn();
     await expect(
       sendIssueMutations(
         'w1',
+        't1',
         [
           { key: 'i1', changes: { title: 'A' } },
           { key: 'i2', changes: { title: 'B' } },
         ],
         awaitTxId,
+        enqueue,
       ),
     ).rejects.toThrow('refused');
-    expect(api).toHaveBeenCalledTimes(1);
+    expect(enqueue).toHaveBeenCalledTimes(1);
     expect(awaitTxId).not.toHaveBeenCalled();
   });
 });

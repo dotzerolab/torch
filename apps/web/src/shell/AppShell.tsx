@@ -11,6 +11,7 @@ import { ShortcutHelp } from '../keys/ShortcutHelp.tsx';
 import { useShortcut } from '../keys/useShortcut.ts';
 import { usePathname } from '../navigation.ts';
 import { Header } from './Header.tsx';
+import { OfflineBanner } from './OfflineBanner.tsx';
 import { ShellContext, type ShellState, teamKeyFromPath } from './ShellContext.ts';
 import { Sidebar } from './Sidebar.tsx';
 import { StatusBar } from './StatusBar.tsx';
@@ -75,6 +76,7 @@ function ShellFrame({
         </a>
         {!phone && !collapsed ? <aside className="shell__sidebar">{sidebar()}</aside> : null}
         <div className="shell__column">
+          <OfflineBanner workspaceId={workspace.id} />
           <Header
             workspace={workspace}
             team={team}
