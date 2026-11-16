@@ -347,6 +347,8 @@ export const issueRelation = pgTable(
       .where(sql`${t.type} in ('related', 'duplicate')`),
     index('issue_relation_team_idx').on(t.teamId),
     index('issue_relation_related_idx').on(t.relatedTeamId, t.relatedIssueId),
+    // The relations that point at an issue (the issue's own are served by the unique key, which starts with the id).
+    index('issue_relation_related_issue_idx').on(t.relatedIssueId),
     check('issue_relation_not_self', sql`${t.issueId} <> ${t.relatedIssueId}`),
     foreignKey({
       name: 'issue_relation_issue_fk',

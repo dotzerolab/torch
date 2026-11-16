@@ -1,3 +1,4 @@
 ALTER TABLE "workflow_state" DROP CONSTRAINT "workflow_state_team_name_unique";--> statement-breakpoint
 ALTER TABLE "workflow_state" ADD COLUMN "archived_at" timestamp with time zone;--> statement-breakpoint
+UPDATE "workflow_state" AS s SET "name" = s."name" || ' (' || left(s."id"::text, 8) || ')' FROM (SELECT "id", row_number() OVER (PARTITION BY "team_id", lower("name") ORDER BY "created_at", "id") AS rn FROM "workflow_state") AS d WHERE s."id" = d."id" AND d.rn > 1;--> statement-breakpoint
 CREATE UNIQUE INDEX "workflow_state_team_name_unique" ON "workflow_state" USING btree ("team_id",lower("name")) WHERE "workflow_state"."archived_at" is null;

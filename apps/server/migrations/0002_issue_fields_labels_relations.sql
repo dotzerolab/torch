@@ -63,6 +63,9 @@ ALTER TABLE "issue" ADD COLUMN "sort_order" double precision DEFAULT 0 NOT NULL;
 ALTER TABLE "issue" ADD COLUMN "started_at" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "issue" ADD COLUMN "completed_at" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "issue" ADD COLUMN "canceled_at" timestamp with time zone;--> statement-breakpoint
+UPDATE "issue" SET "started_at" = "updated_at" FROM "workflow_state" WHERE "workflow_state"."id" = "issue"."state_id" AND "workflow_state"."type" = 'started';--> statement-breakpoint
+UPDATE "issue" SET "completed_at" = "updated_at" FROM "workflow_state" WHERE "workflow_state"."id" = "issue"."state_id" AND "workflow_state"."type" = 'completed';--> statement-breakpoint
+UPDATE "issue" SET "canceled_at" = "updated_at" FROM "workflow_state" WHERE "workflow_state"."id" = "issue"."state_id" AND "workflow_state"."type" = 'canceled';--> statement-breakpoint
 ALTER TABLE "issue" ADD CONSTRAINT "issue_workspace_id_unique" UNIQUE("workspace_id","id");--> statement-breakpoint
 ALTER TABLE "issue" ADD CONSTRAINT "issue_workspace_team_id_unique" UNIQUE("workspace_id","team_id","id");--> statement-breakpoint
 ALTER TABLE "issue_label" ADD CONSTRAINT "issue_label_issue_fk" FOREIGN KEY ("workspace_id","team_id","issue_id") REFERENCES "public"."issue"("workspace_id","team_id","id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint

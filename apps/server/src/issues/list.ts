@@ -137,7 +137,13 @@ async function run(
     for (const entry of await orm
       .select()
       .from(externalRef)
-      .where(and(eq(externalRef.subjectType, 'issue'), inArray(externalRef.subjectId, ids)))) {
+      .where(
+        and(
+          eq(externalRef.workspaceId, actor.workspaceId),
+          eq(externalRef.subjectType, 'issue'),
+          inArray(externalRef.subjectId, ids),
+        ),
+      )) {
       refs.set(entry.subjectId, [
         ...(refs.get(entry.subjectId) ?? []),
         { source: entry.source, id: entry.externalId, url: entry.url },
