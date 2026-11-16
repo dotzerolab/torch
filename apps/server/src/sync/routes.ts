@@ -58,6 +58,9 @@ export const SYNC_FORWARDED_PARAMS: readonly string[] = [
 // session ending, so it becomes a plain 502.
 const PROTOCOL_STATUSES: ReadonlySet<number> = new Set([200, 204, 304, 400, 409]);
 
+// The upstream statuses whose Retry-After is relayed: Electric's way of saying "too busy, ask again later".
+const RETRY_AFTER_STATUSES: ReadonlySet<number> = new Set([429, 503]);
+
 // Hop-by-hop headers and the ones that stop describing the body once the runtime has decoded it (ADR section 9).
 // Electric's wildcard CORS headers go too: the browser reads this proxy same-origin only.
 const DROPPED_RESPONSE_HEADERS = [
@@ -217,7 +220,14 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
       await upstream.body?.cancel();
       // The status only: the body can describe the configuration (and the URL carries the secret).
       console.error('sync upstream failed with status', upstream.status);
-      return Response.json({ error: 'sync_unavailable' }, { status: 502 });
+      // Electric's own overload answer carries how long to wait; the client's backoff takes it as a floor.
+      const retryAfter = RETRY_AFTER_STATUSES.has(upstream.status)
+        ? upstream.headers.get('retry-after')
+        : null;
+      return Response.json(
+        { error: 'sync_unavailable' },
+        { status: 502, ...(retryAfter ? { headers: { 'retry-after': retryAfter } } : {}) },
+      );
     }
     let body: ReadableStream<Uint8Array> | null = null;
     if (upstream.body) body = releasing(upstream.body, release);

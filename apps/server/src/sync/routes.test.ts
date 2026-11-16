@@ -560,6 +560,51 @@ describe.skipIf(!databaseUrl)('GET /api/sync (shape proxy, fake Electric)', () =
     });
   });
 
+  it("Electric's 429 and 503 keep their Retry-After on the 502, so the client's backoff honours it", async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      for (const [status, retryAfter] of [
+        [429, '7'],
+        [503, 'Wed, 21 Oct 2026 07:28:00 GMT'],
+      ] as const) {
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const upstream = fakeUpstream(
+          () =>
+            new Response('slow down', {
+              status,
+              headers: { 'retry-after': retryAfter, 'x-electric-internal': 'secret-detail' },
+            }),
+        );
+        const app = buildApp(db, upstream.fetchUpstream);
+
+        const res = await get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.member.id));
+
+        expect(res.status).toBe(502);
+        expect(res.headers.get('retry-after')).toBe(retryAfter);
+        expect(res.headers.get('x-electric-internal')).toBeNull();
+        expect(await res.json()).toEqual({ error: 'sync_unavailable' });
+        errors.mockRestore();
+      }
+    });
+  });
+
+  it('a 502 for any other upstream failure carries no Retry-After', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const upstream = fakeUpstream(
+        () => new Response('no', { status: 500, headers: { 'retry-after': '9' } }),
+      );
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const res = await get(app, `${issuesPath(f, 'eng')}?offset=-1`, as(f.members.member.id));
+
+      expect(res.status).toBe(502);
+      expect(res.headers.get('retry-after')).toBeNull();
+      errors.mockRestore();
+    });
+  });
+
   it('an upstream auth failure (wrong ELECTRIC_SECRET) is a 502, never a 401 that signs the user out', async () => {
     await withTempDatabase(async (db) => {
       const f = await createWorkspaceFixture(db.orm);
