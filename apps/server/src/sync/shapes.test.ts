@@ -295,12 +295,11 @@ describe('teamDataShape', () => {
     expect(shape.where).toBe('team_id = $1 OR related_team_id = $1');
     expect(shape.params).toEqual([TEAM_A]);
     expectParameterised(shape);
+    // The team columns are in the where clause only: a client already knows which of its issues are in which team.
     expect(shape.columns).toEqual([
       'id',
       'workspace_id',
-      'team_id',
       'issue_id',
-      'related_team_id',
       'related_issue_id',
       'type',
       'created_by',

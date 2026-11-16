@@ -58,7 +58,8 @@ Issue rules in short, all inside the teams a person can see (a team they cannot 
   links and subscribers. Everybody manages their own subscription; adding or removing someone else needs the right to
   edit the issue, and the person added must be able to open it. An archived issue is read-only until unarchived.
 - A relation or a sub-issue parent may point at an issue of another team only if the person can see that team. The
-  relations a team syncs hold ids, never the title or number of an issue in a team the person cannot see.
+  relations a team syncs hold ids, never the title or number of an issue in a team the person cannot see, and not the
+  team ids of either end. The related id of an issue in a hidden team is still visible, as an id alone.
 - Labels of a team: anybody but a guest who can see the team defines, edits and archives them. Labels of the workspace
   and the workflow states of a team: owners and admins. Guests read all of them.
 - Nothing is deleted. Issues, labels and workflow states are archived; see the [issue API](api/issues.md).

@@ -194,12 +194,12 @@ const TEAM_DATA_SHAPES = {
   issue_relations: {
     table: 'issue_relation',
     where: 'team_id = $1 OR related_team_id = $1',
+    // `team_id` and `related_team_id` filter the rows (where) but are not sent: a client that sees one end knows its
+    // team, and the other end's team id (a private team's id) is not needed to draw the relation.
     columns: [
       'id',
       'workspace_id',
-      'team_id',
       'issue_id',
-      'related_team_id',
       'related_issue_id',
       'type',
       'created_by',

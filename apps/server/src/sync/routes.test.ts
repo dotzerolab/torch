@@ -1150,7 +1150,7 @@ const TEAM_DATA_ROUTES = [
   [
     'issue-relations',
     'issue_relation',
-    'id,workspace_id,team_id,issue_id,related_team_id,related_issue_id,type,created_by,created_at',
+    'id,workspace_id,issue_id,related_issue_id,type,created_by,created_at',
   ],
 ] as const;
 
@@ -1464,8 +1464,6 @@ describe.skipIf(!databaseUrl || !electricUrl)(
             'id',
             'issue_id',
             'related_issue_id',
-            'related_team_id',
-            'team_id',
             'type',
             'workspace_id',
           ].sort(),
