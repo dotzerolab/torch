@@ -123,7 +123,8 @@ flowchart LR
   the server rejects them.
 - **Server:** Node and Hono. One endpoint per mutation, shared by the web app, the REST API, the MCP server and the
   assistant, with permission checks in one shared module. Who may do what, and how the server answers a refusal:
-  [docs/permissions.md](docs/permissions.md).
+  [docs/permissions.md](docs/permissions.md). The issue, label and workflow state endpoints for scripts and
+  integrations: [docs/api/issues.md](docs/api/issues.md).
 - **Sync:** ElectricSQL streams data from Postgres, and TanStack DB keeps it in the browser. The browser only talks to
   Torch's own server, which adds the permission filter. Why this pair and not Zero:
   [ADR 0001](docs/adr/0001-sync-engine.md).
