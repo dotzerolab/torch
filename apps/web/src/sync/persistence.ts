@@ -76,17 +76,24 @@ async function readStored(workspaceId: string, database: BrowserWASQLiteDatabase
 }
 
 /**
- * Waits until the store holds at least `rows` rows of the collection: the persisted instance publishes before its rows
- * are on the device, and ending it earlier would cut the write short. Gives up after `timeoutMs`.
+ * Waits until the store holds exactly `rows` rows of the collection. The persisted instance publishes before its rows
+ * are on the device, and ending it earlier would cut the write short; a row that was deleted is only stored once the
+ * count is down, so more rows than asked for are not enough. `rows` may be a function, read again at every poll: a live
+ * shape keeps changing while the store catches up, and a frozen number would never be met. The wait is bounded (the copy
+ * queue runs one job at a time and must not stall behind it) and tells whether the store got there.
  */
 export async function waitUntilStored(
   workspaceId: string,
   collectionId: string,
-  rows: number,
-  timeoutMs = 60_000,
+  rows: number | (() => number),
+  {
+    timeoutMs = 60_000,
+    pollMs = 200,
+    isCancelled = () => false,
+  }: { timeoutMs?: number; pollMs?: number; isCancelled?: () => boolean } = {},
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !isCancelled()) {
     const store = openStores.get(workspaceId);
     if (!store) return false;
     try {
@@ -98,7 +105,7 @@ export async function waitUntilStored(
         const [count] = await store.database.execute<{ n: number }>(
           `SELECT COUNT(*) AS n FROM ${quote(registered.table_name)}`,
         );
-        if (Number(count?.n ?? 0) >= rows) {
+        if (Number(count?.n ?? 0) === (typeof rows === 'function' ? rows() : rows)) {
           await readStored(workspaceId, store.database);
           return true;
         }
@@ -106,7 +113,7 @@ export async function waitUntilStored(
     } catch {
       return false;
     }
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
   return false;
 }
@@ -115,11 +122,14 @@ export async function waitUntilStored(
 const copyQueues = new Map<string, Promise<void>>();
 const copyStops = new Map<string, Set<() => void>>();
 
-/** Runs `job` after the earlier copies of the workspace. `stop` ends it early (the store is closing). */
+/**
+ * Runs `job` after the earlier copies of the workspace. `stop` ends it early (the store is closing). Resolves when the job
+ * ended, failed or was skipped; never rejects.
+ */
 export function queueDeviceCopy(
   workspaceId: string,
   job: (registerStop: (stop: () => void) => void) => Promise<void>,
-): void {
+): Promise<void> {
   const stops = copyStops.get(workspaceId) ?? new Set<() => void>();
   copyStops.set(workspaceId, stops);
   const previous = copyQueues.get(workspaceId) ?? Promise.resolve();
@@ -138,6 +148,7 @@ export function queueDeviceCopy(
     }
   });
   copyQueues.set(workspaceId, next);
+  return next;
 }
 
 /** The device copy of a workspace if it is open now, else null (the page then keeps the shape in memory only). */

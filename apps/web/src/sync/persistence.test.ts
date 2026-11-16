@@ -4,9 +4,11 @@ import {
   deleteTeamRows,
   LOCAL_SCHEMA_VERSION,
   openWorkspaceStore,
+  queueDeviceCopy,
   resetStoresForTests,
   type StoragePlatform,
   storeName,
+  waitUntilStored,
   wipeWorkspaceStore,
 } from './persistence.ts';
 
@@ -164,5 +166,76 @@ describe('persistence', () => {
 
   it('does nothing for a workspace whose store is not open', async () => {
     await expect(deleteTeamRows(WS_A, TEAM_1)).resolves.toBeUndefined();
+  });
+});
+
+describe('waitUntilStored', () => {
+  /** A store holding `rows` rows of the collection `c1`, laid out as the persistence library does. */
+  async function storeWith(rows: number) {
+    const { platform } = fakePlatform();
+    const { database } = await openWorkspaceStore(WS_A, platform);
+    await database.execute(
+      'CREATE TABLE collection_registry (collection_id TEXT PRIMARY KEY, table_name TEXT, tombstone_table_name TEXT)',
+    );
+    await database.execute('CREATE TABLE c_one (id TEXT)');
+    await database.execute("INSERT INTO collection_registry VALUES ('c1', 'c_one', 't_one')");
+    const add = async (n: number) => {
+      for (let i = 0; i < n; i++) await database.execute('INSERT INTO c_one VALUES (?)', [`r${i}`]);
+    };
+    const remove = (id: string) => database.execute('DELETE FROM c_one WHERE id = ?', [id]);
+    await add(rows);
+    return { database, add, remove };
+  }
+  const fast = { pollMs: 10, timeoutMs: 400 };
+
+  it('is done when the store holds exactly the rows asked for', async () => {
+    await storeWith(3);
+    expect(await waitUntilStored(WS_A, 'c1', 3, fast)).toBe(true);
+  });
+
+  it('does not take MORE rows than asked for as stored: a delete is only stored once the count is down', async () => {
+    const { remove } = await storeWith(3);
+    const waiting = waitUntilStored(WS_A, 'c1', 2, fast);
+    setTimeout(() => void remove('r0'), 100);
+    expect(await waiting).toBe(true);
+    // A store that never gets there ends the wait at the timeout instead of passing.
+    expect(await waitUntilStored(WS_A, 'c1', 1, { pollMs: 10, timeoutMs: 120 })).toBe(false);
+  });
+
+  it('re-reads the target while it waits, so a set that keeps changing does not stall it', async () => {
+    const { add } = await storeWith(2);
+    // The live set had 2 rows when the wait began; a row arrived since and the store follows it.
+    let target = 2;
+    setTimeout(() => {
+      target = 3;
+      void add(1).then(() => {});
+    }, 50);
+    // Before the fix of the target the count (3 after the add) would never equal the frozen 2.
+    expect(await waitUntilStored(WS_A, 'c1', () => target, { pollMs: 10, timeoutMs: 1000 })).toBe(
+      true,
+    );
+  });
+
+  it('gives up at the timeout, and the copy queue goes on with the next job', async () => {
+    await storeWith(2);
+    const order: string[] = [];
+    const first = queueDeviceCopy(WS_A, async () => {
+      // 5 rows are never stored: this wait is the stall the queue must survive.
+      const stored = await waitUntilStored(WS_A, 'c1', 5, { pollMs: 10, timeoutMs: 150 });
+      order.push(`first:${stored}`);
+    });
+    const second = queueDeviceCopy(WS_A, async () => {
+      order.push('second');
+    });
+    await Promise.all([first, second]);
+    expect(order).toEqual(['first:false', 'second']);
+  });
+
+  it('settles the promise of a job that throws', async () => {
+    await storeWith(0);
+    const done = queueDeviceCopy(WS_A, async () => {
+      throw new Error('copy failed');
+    });
+    await expect(done).resolves.toBeUndefined();
   });
 });
