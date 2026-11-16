@@ -23,17 +23,18 @@ export default async function globalSetup(): Promise<void> {
   try {
     await seedDev(db.orm);
     // Titles edited by an earlier run, and the sign-in links and sessions it left (they count against the
-    // 5-links-per-15-minutes limit of each demo address).
+    // 5-links-per-15-minutes limit of each demo address). The performance workspace (`pnpm e2e:perf`) has the same
+    // addresses: a link covers every workspace of an address, so its tokens count too.
     await db.pool.query(
       `update issue set title = t.key || ' issue ' || issue.number
          from team t, workspace w
         where issue.team_id = t.id and issue.workspace_id = w.id and w.slug = 'demo'`,
     );
     await db.pool.query(
-      `delete from login_token where workspace_id in (select id from workspace where slug = 'demo')`,
+      `delete from login_token where workspace_id in (select id from workspace where slug in ('demo', 'perf'))`,
     );
     await db.pool.query(
-      `delete from session where workspace_id in (select id from workspace where slug = 'demo')`,
+      `delete from session where workspace_id in (select id from workspace where slug in ('demo', 'perf'))`,
     );
 
     // What the members, teams and invites specs change: the people invited, the teams created, the roles, names,
