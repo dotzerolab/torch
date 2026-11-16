@@ -14,6 +14,7 @@ import type { Mailer } from './mail/mailer.ts';
 import { createMemberRoutes } from './members/routes.ts';
 import type { ActorResolver } from './permissions/load-actor.ts';
 import type { ElectricConfig } from './sync/config.ts';
+import { checkSyncHealth } from './sync/health.ts';
 import { createSyncRoutes } from './sync/routes.ts';
 import { createTeamRoutes } from './teams/routes.ts';
 import { createWorkflowRoutes } from './workflow/routes.ts';
@@ -129,6 +130,10 @@ export function createApp(deps: AppDeps): App {
     if (!deps.db) return c.json({ status: 'error', reason: 'DATABASE_URL is not set' }, 503);
     const health = await deps.db.health();
     return c.json(health, health.status === 'ok' ? 200 : 503);
+  });
+  app.get('/health/sync', async (c) => {
+    const health = await checkSyncHealth(deps.electric);
+    return c.json(health, health.status === 'error' ? 503 : 200);
   });
 
   if (deps.db?.orm && deps.mailer && deps.config) {

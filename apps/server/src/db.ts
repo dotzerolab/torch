@@ -2,7 +2,9 @@ import * as schema from '@torch/shared/db/schema';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 
-export type DbHealth = { status: 'ok'; walLevel: 'logical' } | { status: 'error'; reason: string };
+export type DbHealth =
+  | { status: 'ok'; walLevel: 'logical'; replication: true }
+  | { status: 'error'; reason: string };
 
 /** Drizzle handle with the full schema; what every query function in the server takes. */
 export type Orm = NodePgDatabase<typeof schema>;
@@ -17,14 +19,52 @@ export type Db = {
   pool: pg.Pool;
 };
 
-/** Both sync-engine candidates replicate from the WAL, so anything but "logical" is a setup error. */
-export function interpretWalLevel(walLevel: string): DbHealth {
-  if (walLevel === 'logical') return { status: 'ok', walLevel: 'logical' };
-  return {
-    status: 'error',
-    reason: `wal_level is "${walLevel}", expected "logical" (start Postgres with -c wal_level=logical)`,
-  };
+/** What the health query returns: the WAL level and whether the connecting role may start replication. */
+export type HealthRow = { wal_level: string; role: string; can_replicate: boolean };
+
+/**
+ * The sync service replicates from the WAL, so the server needs `wal_level=logical`, and the role that connects needs
+ * the REPLICATION attribute (a superuser, or on Amazon RDS a member of `rds_replication`, may replicate without it;
+ * the query folds both into `can_replicate`). The
+ * WAL level is reported first: with `replica` nothing else matters until Postgres is restarted.
+ */
+export function interpretHealth(row: HealthRow): DbHealth {
+  if (row.wal_level !== 'logical') {
+    return {
+      status: 'error',
+      reason: `wal_level is "${row.wal_level}", expected "logical" (start Postgres with -c wal_level=logical)`,
+    };
+  }
+  if (!row.can_replicate) {
+    return {
+      status: 'error',
+      reason:
+        `role "${row.role}" lacks the REPLICATION privilege the sync service needs ` +
+        `(ALTER ROLE ${row.role} WITH REPLICATION), or point the sync service at a role that has it`,
+    };
+  }
+  return { status: 'ok', walLevel: 'logical', replication: true };
 }
+
+/**
+ * One round trip for both settings; the scalar subquery keeps the row even if the role cannot be read. A role may
+ * replicate through the REPLICATION attribute, through superuser, or, on Amazon RDS and Aurora, through membership of
+ * `rds_replication` (the provider's documented way to give the privilege to a role other than its default user).
+ */
+const HEALTH_QUERY = `
+  select
+    current_setting('wal_level') as wal_level,
+    current_user as role,
+    coalesce((
+      select r.rolreplication
+        or r.rolsuper
+        or exists (
+          select 1 from pg_roles m
+          where m.rolname = 'rds_replication' and pg_has_role(current_user, m.oid, 'member')
+        )
+      from pg_roles r where r.rolname = current_user
+    ), false) as can_replicate
+`;
 
 /**
  * The `updated_at` of a row is stamped before its transaction commits, so a poll can see a quicker row first and move
@@ -95,10 +135,9 @@ export function createDb(databaseUrl: string): Db {
     pool,
     async health() {
       try {
-        const result = await pool.query<{ wal_level: string }>(
-          "select current_setting('wal_level') as wal_level",
-        );
-        return interpretWalLevel(result.rows[0]?.wal_level ?? '');
+        const result = await pool.query<HealthRow>(HEALTH_QUERY);
+        const row = result.rows[0];
+        return interpretHealth(row ?? { wal_level: '', role: '', can_replicate: false });
       } catch (error) {
         // The caller is unauthenticated: the log gets the detail, the response only the category.
         console.error('database health check failed:', (error as Error).message);

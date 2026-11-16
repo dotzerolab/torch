@@ -130,10 +130,12 @@ flowchart LR
   [ADR 0001](docs/adr/0001-sync-engine.md).
 - **Data:** PostgreSQL is the source of truth, and also runs background jobs, so there is no extra broker. Attachments
   go to S3-compatible storage.
+  What an installation needs (PostgreSQL 14 or newer with logical replication, machine sizes, health checks):
+  [docs/deploy.md](docs/deploy.md).
 
 Layout: `apps/web` (React + Vite), `apps/server` (Node + Hono), `packages/shared` (brand, i18n, db schema, permissions;
 the web app imports the subpaths `@torch/shared/brand` and `@torch/shared/i18n`), `config/` (default brand, licence
-exceptions), `scripts/` (CI gates), `docs/` (design, permissions, decision records).
+exceptions), `scripts/` (CI gates), `docs/` (design, permissions, deploy requirements, decision records).
 
 ## Development
 
