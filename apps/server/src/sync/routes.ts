@@ -155,6 +155,13 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
   const accessBus = deps.accessBus ?? createAccessBus();
   const routes = new Hono();
 
+  // Hono routes a HEAD request to the GET handler and drops the body of its answer: the request would stay
+  // registered and the upstream response unread. A shape is read with GET only.
+  routes.use('*', async (c, next) => {
+    if (c.req.method !== 'HEAD') return next();
+    return c.json({ error: 'method_not_allowed' }, 405, { allow: 'GET' });
+  });
+
   const notFound = () => Response.json({ error: 'not_found' }, { status: 404 });
   const unauthenticated = () => Response.json({ error: 'unauthenticated' }, { status: 401 });
 

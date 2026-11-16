@@ -881,6 +881,31 @@ describe.skipIf(!databaseUrl)('GET /api/sync (shape proxy, fake Electric)', () =
     }
   });
 
+  it('HEAD is refused with 405 before anything is registered or asked of Electric', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const bus = createAccessBus();
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream, bus);
+      const paths = [
+        issuesPath(f, 'eng'),
+        `${issuesPath(f, 'eng')}?offset=-1&handle=h-1&live=true`,
+        `/api/sync/w/${f.workspaceId}/teams`,
+        `/api/sync/w/${f.workspaceId}/members`,
+        `/api/sync/w/${f.workspaceId}/me/team-memberships`,
+      ];
+
+      for (const path of paths) {
+        const res = await get(app, path, as(f.members.owner.id, { method: 'HEAD' }));
+        expect(res.status, path).toBe(405);
+        expect(res.headers.get('allow'), path).toBe('GET');
+      }
+
+      expect(upstream.calls).toHaveLength(0);
+      expect(bus.tracked()).toBe(0);
+    });
+  });
+
   it('only GET is served', async () => {
     await withTempDatabase(async (db) => {
       const f = await createWorkspaceFixture(db.orm);
