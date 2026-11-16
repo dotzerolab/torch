@@ -47,6 +47,19 @@ export function interpretHealth(row: HealthRow): DbHealth {
 }
 
 /**
+ * The category of a failed health query. Every connection starts with `transaction_timeout` (see
+ * `TRANSACTION_BOUNDS_MS`), a setting that Postgres knows from version 17: an older server refuses the connection
+ * with `42704` (undefined object) naming it, which says more than "cannot reach".
+ */
+export function healthFailureReason(error: unknown): string {
+  const { code, message } = (error ?? {}) as { code?: unknown; message?: unknown };
+  if (code === '42704' && typeof message === 'string' && message.includes('transaction_timeout')) {
+    return 'PostgreSQL 17 or newer is required';
+  }
+  return 'cannot reach the database';
+}
+
+/**
  * One round trip for both settings; the scalar subquery keeps the row even if the role cannot be read. A role may
  * replicate through the REPLICATION attribute, through superuser, or, on Amazon RDS and Aurora, through membership of
  * `rds_replication` (the provider's documented way to give the privilege to a role other than its default user).
@@ -141,7 +154,7 @@ export function createDb(databaseUrl: string): Db {
       } catch (error) {
         // The caller is unauthenticated: the log gets the detail, the response only the category.
         console.error('database health check failed:', (error as Error).message);
-        return { status: 'error', reason: 'cannot reach the database' };
+        return { status: 'error', reason: healthFailureReason(error) };
       }
     },
     close,
