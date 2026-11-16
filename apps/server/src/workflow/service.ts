@@ -182,7 +182,9 @@ export async function updateWorkflowState(
  * Archives a state. The issues that are not archived and sit in it move to `moveIssuesTo` (a state of the same team that
  * is not archived), each with its own history row and event, as an edit by the caller. Locks, in this order, like every
  * other writer: the workspace parent lock, the team row (archives of one team queue), the state, the issues by id and
- * the target state (shared). Archiving twice changes nothing.
+ * the target state (shared). Archiving twice changes nothing. The team and issue locks are `no key update`: `for update`
+ * would conflict with the `for key share` of the foreign-key checks of other writers (an event of the team, a relation
+ * to an issue) and deadlock with them.
  */
 export async function archiveWorkflowState(
   orm: Orm,
@@ -206,7 +208,7 @@ export async function archiveWorkflowState(
       .select({ id: team.id })
       .from(team)
       .where(and(eq(team.id, teamId), eq(team.workspaceId, requested.workspaceId)))
-      .for('update');
+      .for('no key update');
     // Re-read under the locks: a role or a team that changed while this call waited counts.
     const actor = await freshActor(tx, requested);
     if ('ok' in actor) return actor;
@@ -256,7 +258,7 @@ export async function archiveWorkflowState(
         ),
       )
       .orderBy(asc(issue.id))
-      .for('update');
+      .for('no key update');
     if (inState.length > 0 && !target) return refuse('move_target_required', 422);
     if (target) {
       const [destination] = await tx

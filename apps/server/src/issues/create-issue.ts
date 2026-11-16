@@ -146,7 +146,19 @@ async function createInTransaction(
   if (!canSeeTeam(actor, access)) throw refusal('not_found', 404);
   if (!canCreateIssue(actor, access)) throw refusal('forbidden', 403);
 
-  // ---- references: all of them are checked before a number is taken ----
+  // ---- the number ----
+  // The team row lock comes FIRST, before the state lock below: the archive of a state locks the team, then the state,
+  // so a create that took the state first and the team second would close a deadlock cycle with it. The update takes
+  // the lock: creates in one team queue here, so numbers are 1, 2, 3 with no gap and no duplicate. Every refusal
+  // below rolls the transaction back, and with it the number.
+  const [counter] = await tx
+    .update(team)
+    .set({ issueCounter: sql`${team.issueCounter} + 1` })
+    .where(and(eq(team.workspaceId, actor.workspaceId), eq(team.id, teamRow.id)))
+    .returning({ number: team.issueCounter });
+  if (!counter) throw refusal('not_found', 404);
+
+  // ---- references: all of them are checked before the row is written ----
   const states = await tx
     .select({ id: workflowState.id, type: workflowState.type, position: workflowState.position })
     .from(workflowState)
@@ -193,16 +205,7 @@ async function createInTransaction(
     if (taken) throw new IssueRefusal(await conflictFor(tx, actor, taken, data.externalRef));
   }
 
-  // ---- the number and the row ----
-  // The update takes the team row lock: creates in one team queue here, so numbers are 1, 2, 3 with no gap and no
-  // duplicate, and a rollback gives the number back with everything else.
-  const [counter] = await tx
-    .update(team)
-    .set({ issueCounter: sql`${team.issueCounter} + 1` })
-    .where(and(eq(team.workspaceId, actor.workspaceId), eq(team.id, teamRow.id)))
-    .returning({ number: team.issueCounter });
-  if (!counter) throw refusal('not_found', 404);
-
+  // ---- the row ----
   const sortOrder = data.sortOrder ?? (await topOfState(tx, teamRow.id, state.id));
   const stamps = applyStateTimestamps(
     state.type,

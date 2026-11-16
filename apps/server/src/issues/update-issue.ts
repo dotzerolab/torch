@@ -77,12 +77,15 @@ export async function lockEditableIssue(
   | { ok: true; row: IssueRow; access: TeamAccess; actor: ClientActor }
   | { ok: false; refusal: Failure }
 > {
-  // Locks the row: concurrent writers of this issue queue here, so each field's last writer wins in order.
+  // Locks the row: concurrent writers of this issue queue here, so each field's last writer wins in order. The mode
+  // is `no key update`, like every row lock in the server (see teams/service.ts): `for update` would conflict with the
+  // `for key share` that the foreign-key checks of other writers take on this row (a relation to it, a child's parent
+  // id, an event of its team) and close a deadlock cycle with them. The id and the team of an issue never change.
   const [row] = await tx
     .select()
     .from(issue)
     .where(and(eq(issue.id, issueId), eq(issue.workspaceId, requested.workspaceId)))
-    .for('update');
+    .for('no key update');
   if (!row) return { ok: false, refusal: refuse('not_found', 404) };
 
   // The actor as the database says now: a member removed from the team since the request was resolved gets nothing.
