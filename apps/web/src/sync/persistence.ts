@@ -2,22 +2,28 @@
 // back on the next visit so the page renders before the network answers (ADR 0001 section 5). Everything of a
 // workspace lives under one name, so signing out or losing a workspace removes it with one prefix match.
 //
-// The store name carries the schema version: a store written by another version is deleted when the page opens the
-// workspace, never migrated (the server is the source of truth, a reload refills it).
+// The store name carries the person (`identity.ts`) and the schema version: a store written by another version is
+// deleted when the page opens the workspace, never migrated (the server is the source of truth, a reload refills it).
+// The outbox database of the workspace has the same prefix but its own version, so that reset never reaches it.
 import {
   type BrowserWASQLiteDatabase,
   createBrowserWASQLitePersistence,
   openBrowserWASQLiteOPFSDatabase,
   type PersistedCollectionPersistence,
 } from '@tanstack/browser-db-sqlite-persistence';
+import { bindSession, deviceScope, type SessionIdentity, sessionScopes } from './identity.ts';
+import { TEAM_KINDS } from './registry.ts';
 
 /** Bump when the layout of what is stored changes: stores of other versions are deleted on open. */
 export const LOCAL_SCHEMA_VERSION = 1;
 
 /** Names carry no product name: the same origin may host other apps. */
 export const storeName = (workspaceId: string, version = LOCAL_SCHEMA_VERSION) =>
-  `ws-${workspaceId}-v${version}`;
-const workspacePrefix = (workspaceId: string) => `ws-${workspaceId}-v`;
+  `${deviceScope(workspaceId)}-v${version}`;
+/** Every store of this person in the workspace, whatever its schema version (not the outbox: that has its own). */
+const storePrefix = (workspaceId: string) => `${deviceScope(workspaceId)}-v`;
+/** Everything the device keeps of the workspace, for every person and every version: stores and outbox. */
+const workspacePrefix = (workspaceId: string) => `ws-${workspaceId}-`;
 
 /** The part of the OPFS root directory the store needs. */
 export type DirectoryLike = {
@@ -31,7 +37,11 @@ export type StoragePlatform = {
   indexedDbNames(): Promise<string[]>;
   deleteIndexedDb(name: string): Promise<void>;
   openDatabase(name: string): Promise<BrowserWASQLiteDatabase>;
+  /** Prefixes whose removal failed: the next page load removes them before it opens any store. */
+  pendingWipes?: { read(): string[]; write(prefixes: string[]): void };
 };
+
+const PENDING_WIPES_KEY = 'wipe-pending';
 
 export const browserPlatform: StoragePlatform = {
   root: () => navigator.storage.getDirectory() as unknown as Promise<DirectoryLike>,
@@ -48,6 +58,24 @@ export const browserPlatform: StoragePlatform = {
       request.onblocked = () => resolve();
     }),
   openDatabase: (name) => openBrowserWASQLiteOPFSDatabase({ databaseName: name }),
+  pendingWipes: {
+    read() {
+      try {
+        const value = JSON.parse(localStorage.getItem(PENDING_WIPES_KEY) ?? '[]') as unknown;
+        return Array.isArray(value) ? value.filter((name) => typeof name === 'string') : [];
+      } catch {
+        return [];
+      }
+    },
+    write(prefixes) {
+      try {
+        if (prefixes.length === 0) localStorage.removeItem(PENDING_WIPES_KEY);
+        else localStorage.setItem(PENDING_WIPES_KEY, JSON.stringify(prefixes));
+      } catch {
+        // No storage for the marker: the wipe is best effort.
+      }
+    },
+  },
 };
 
 export type Store = {
@@ -176,23 +204,65 @@ export function persistenceFor(workspaceId: string): PersistedCollectionPersiste
 const belongsTo = (entry: string, base: string) =>
   entry === base || entry.startsWith(`${base}-`) || entry.startsWith(`${base}.`);
 
+/** Every OPFS entry and IndexedDB database whose name `matches`. */
+async function listMatching(
+  platform: StoragePlatform,
+  matches: (name: string) => boolean,
+): Promise<{ files: string[]; databases: string[] }> {
+  const root = await platform.root();
+  const files: string[] = [];
+  for await (const name of root.keys()) if (matches(name)) files.push(name);
+  const databases = (await platform.indexedDbNames()).filter(matches);
+  return { files, databases };
+}
+
 async function removeMatching(
   platform: StoragePlatform,
-  prefix: string,
-  keep?: string,
+  matches: (name: string) => boolean,
 ): Promise<void> {
+  const { files, databases } = await listMatching(platform, matches);
   const root = await platform.root();
-  const names: string[] = [];
-  for await (const name of root.keys()) names.push(name);
-  for (const name of names) {
-    if (name.startsWith(prefix) && !(keep && belongsTo(name, keep))) {
-      await root.removeEntry(name, { recursive: true }).catch(() => {});
-    }
+  for (const name of files) await root.removeEntry(name, { recursive: true }).catch(() => {});
+  for (const name of databases) await platform.deleteIndexedDb(name).catch(() => {});
+}
+
+/** True when something of the prefix is still on the device (a wipe that did not go through). */
+async function anyLeft(platform: StoragePlatform, prefix: string): Promise<boolean> {
+  try {
+    const { files, databases } = await listMatching(platform, (name) => name.startsWith(prefix));
+    return files.length + databases.length > 0;
+  } catch {
+    return true;
   }
-  for (const name of await platform.indexedDbNames()) {
-    if (name.startsWith(prefix) && !(keep && belongsTo(name, keep))) {
-      await platform.deleteIndexedDb(name).catch(() => {});
+}
+
+/**
+ * The session starts: binds the person's workspaces (nothing of the device is named, read or resumed before this), then
+ * removes what a wipe left behind and everything of the device that does not belong to this session: the files of
+ * another person who signed in here before (a session that ended by expiry leaves them), of a workspace this person no
+ * longer belongs to, and of the first version of the names. Never rejects: what cannot be removed stays unreadable,
+ * since every name this session uses carries its own member.
+ */
+export async function startDeviceSession(
+  workspaces: readonly SessionIdentity[],
+  platform: StoragePlatform = browserPlatform,
+): Promise<void> {
+  bindSession(workspaces);
+  try {
+    const pending = platform.pendingWipes?.read() ?? [];
+    const stillPending: string[] = [];
+    for (const prefix of pending) {
+      await removeMatching(platform, (name) => name.startsWith(prefix));
+      if (await anyLeft(platform, prefix)) stillPending.push(prefix);
     }
+    if (pending.length > 0) platform.pendingWipes?.write(stillPending);
+    const scopes = sessionScopes().map((scope) => `${scope}-`);
+    await removeMatching(
+      platform,
+      (name) => name.startsWith('ws-') && !scopes.some((scope) => name.startsWith(scope)),
+    );
+  } catch {
+    // The device may not be readable at all (private mode): the page works from memory.
   }
 }
 
@@ -209,7 +279,10 @@ export function openWorkspaceStore(
   if (cached) return cached;
   const name = storeName(workspaceId, version);
   const opened = (async (): Promise<Store> => {
-    await removeMatching(platform, workspacePrefix(workspaceId), name);
+    await removeMatching(
+      platform,
+      (entry) => entry.startsWith(storePrefix(workspaceId)) && !belongsTo(entry, name),
+    );
     const database = await platform.openDatabase(name);
     const persistence = createBrowserWASQLitePersistence({ database });
     const store: Store = {
@@ -248,15 +321,21 @@ export async function closeAllStores(): Promise<void> {
 }
 
 /**
- * Removes everything the device keeps of ONE workspace: its OPFS files and IndexedDB databases, of every schema
- * version. Other workspaces on the same origin are untouched (a shared computer, another person's session).
+ * Removes everything the device keeps of ONE workspace: its OPFS files and IndexedDB databases (store and outbox), of
+ * every schema version and every person. Other workspaces on the same origin are untouched. What could not be removed
+ * (a tab still holds the files) is remembered, and the next page load removes it before it opens any store.
  */
 export async function wipeWorkspaceStore(
   workspaceId: string,
   platform: StoragePlatform = browserPlatform,
 ): Promise<void> {
   await closeWorkspaceStore(workspaceId);
-  await removeMatching(platform, workspacePrefix(workspaceId));
+  const prefix = workspacePrefix(workspaceId);
+  await removeMatching(platform, (name) => name.startsWith(prefix)).catch(() => {});
+  if (await anyLeft(platform, prefix)) {
+    const pending = platform.pendingWipes?.read() ?? [];
+    if (!pending.includes(prefix)) platform.pendingWipes?.write([...pending, prefix]);
+  }
 }
 
 // What the persistence library keeps per collection besides its two tables (copied from its own cleanup of a retired
@@ -270,8 +349,6 @@ const PER_COLLECTION_TABLES = [
   'collection_version',
   'collection_reset_epoch',
 ] as const;
-
-const TEAM_COLLECTION_KINDS = ['issues', 'workflow-states', 'team-members'] as const;
 
 const quote = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`;
 
@@ -316,7 +393,7 @@ async function removeCollections(
 }
 
 /**
- * The team is gone for this person: delete the persisted rows of its shapes (issues, workflow states, members) while
+ * The team is gone for this person: delete the persisted rows of its shapes (issues, workflow states, team members) while
  * the other teams of the workspace stay. Collection ids are `<kind>-<workspaceId>-<teamId>` plus a restart suffix;
  * workspace and team ids are fixed-length UUIDs, so a prefix match cannot reach another team.
  */
@@ -324,7 +401,7 @@ export async function deleteTeamRows(workspaceId: string, teamId: string): Promi
   const open = stores.get(workspaceId);
   if (!open) return;
   const { database } = await open;
-  for (const kind of TEAM_COLLECTION_KINDS) {
+  for (const kind of TEAM_KINDS) {
     await removeCollections(database, `${kind}-${workspaceId}-${teamId}%`);
   }
   await readStored(workspaceId, database);
@@ -342,7 +419,7 @@ export async function deleteTeamsExcept(workspaceId: string, keep: Set<string>):
     return;
   }
   const gone = new Set<string>();
-  for (const kind of TEAM_COLLECTION_KINDS) {
+  for (const kind of TEAM_KINDS) {
     const prefix = `${kind}-${workspaceId}-`;
     for (const { collection_id } of registered) {
       if (!collection_id.startsWith(prefix)) continue;

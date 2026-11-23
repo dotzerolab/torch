@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { bindTestSession, deviceScope, resetIdentityForTests } from './identity.ts';
 import {
   deleteTeamRows,
   LOCAL_SCHEMA_VERSION,
@@ -7,27 +8,59 @@ import {
   queueDeviceCopy,
   resetStoresForTests,
   type StoragePlatform,
+  startDeviceSession,
+  storedGeneration,
   storeName,
   waitUntilStored,
   wipeWorkspaceStore,
 } from './persistence.ts';
+import { createRegistry, TEAM_KINDS } from './registry.ts';
 
 const WS_A = '11111111-1111-4111-8111-111111111111';
 const WS_B = '22222222-2222-4222-8222-222222222222';
 const TEAM_1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const TEAM_2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
+/** The id the registry gives the device copy of a team shape. */
+function idOf(kind: (typeof TEAM_KINDS)[number], workspaceId: string, teamId: string): string {
+  let id = '';
+  const remember = (made: string) => {
+    id = made;
+    return { cleanup() {} };
+  };
+  const registry = createRegistry({
+    teams: () => ({ cleanup() {} }),
+    members: () => ({ cleanup() {} }),
+    ownMemberships: () => ({ cleanup() {} }),
+    issues: (_key, made) => remember(made),
+    workflowStates: (_key, made) => remember(made),
+    teamMembers: (_key, made) => remember(made),
+  });
+  registry.get({ kind, workspaceId, teamId });
+  return id;
+}
+
 /** An in-memory OPFS root, IndexedDB name list and SQLite engine (one real database per file name). */
 function fakePlatform() {
   const files = new Set<string>();
   const indexedDbs = new Set<string>();
   const databases = new Map<string, DatabaseSync>();
+  let pending: string[] = [];
+  const stuck = new Set<string>();
   const platform: StoragePlatform = {
+    pendingWipes: {
+      read: () => pending,
+      write: (prefixes) => {
+        pending = prefixes;
+      },
+    },
     root: async () => ({
       async *keys() {
         yield* [...files];
       },
       removeEntry: async (name) => {
+        // A file another tab still holds cannot be removed.
+        if (stuck.has(name)) throw new Error('in use');
         files.delete(name);
         databases.get(name)?.close();
         databases.delete(name);
@@ -49,36 +82,48 @@ function fakePlatform() {
       };
     },
   };
-  return { platform, files, indexedDbs, databases };
+  return { platform, files, indexedDbs, databases, stuck, pending: () => pending };
 }
 
-beforeEach(() => resetStoresForTests());
+beforeEach(() => {
+  resetStoresForTests();
+  bindTestSession(WS_A, WS_B);
+});
+afterEach(() => resetIdentityForTests());
 
 describe('persistence', () => {
-  it('names the store after the workspace and the schema version, without a product name', () => {
-    expect(storeName(WS_A)).toBe(`ws-${WS_A}-v${LOCAL_SCHEMA_VERSION}`);
+  it('names the store after the workspace, the signed-in member and the schema version, without a product name', () => {
+    expect(storeName(WS_A)).toBe(`ws-${WS_A}-mmember-of-${WS_A}-v${LOCAL_SCHEMA_VERSION}`);
+  });
+
+  it('cannot name anything before the session is known', () => {
+    resetIdentityForTests();
+    expect(() => storeName(WS_A)).toThrow();
   });
 
   it('version bump resets the store', async () => {
     const { platform, files, indexedDbs } = fakePlatform();
     // A store another version wrote (and a database of the outbox), and another workspace's old store.
-    for (const name of [`ws-${WS_A}-v0`, `ws-${WS_A}-v0-journal`, `ws-${WS_B}-v0`]) files.add(name);
-    indexedDbs.add(`ws-${WS_A}-v0-outbox`);
+    const scope = deviceScope(WS_A);
+    for (const name of [`${scope}-v0`, `${scope}-v0-journal`, `${deviceScope(WS_B)}-v0`])
+      files.add(name);
+    // The outbox has its own version: a new schema of the store never deletes the writes that wait to be sent.
+    indexedDbs.add(`${scope}-outbox-v1`);
 
     const store = await openWorkspaceStore(WS_A, platform);
 
     expect(store.name).toBe(storeName(WS_A));
-    expect([...files].filter((name) => name.startsWith(`ws-${WS_A}-v0`))).toEqual([]);
-    expect([...indexedDbs]).toEqual([]);
-    expect(files.has(`ws-${WS_B}-v0`)).toBe(true);
+    expect([...files].filter((name) => name.startsWith(`${scope}-v0`))).toEqual([]);
+    expect([...indexedDbs]).toEqual([`${scope}-outbox-v1`]);
+    expect(files.has(`${deviceScope(WS_B)}-v0`)).toBe(true);
     expect(files.has(storeName(WS_A))).toBe(true);
   });
 
   it('does not take a version that merely starts with the current one for the current store', async () => {
     const { platform, files } = fakePlatform();
-    files.add(`ws-${WS_A}-v10`);
+    files.add(`${deviceScope(WS_A)}-v10`);
     await openWorkspaceStore(WS_A, platform);
-    expect(files.has(`ws-${WS_A}-v10`)).toBe(false);
+    expect(files.has(`${deviceScope(WS_A)}-v10`)).toBe(false);
   });
 
   it('wipe is per workspace', async () => {
@@ -89,13 +134,13 @@ describe('persistence', () => {
     await a.database.execute("INSERT INTO rows VALUES ('a-row')");
     await b.database.execute('CREATE TABLE rows (id TEXT)');
     await b.database.execute("INSERT INTO rows VALUES ('b-row')");
-    indexedDbs.add(`ws-${WS_A}-v1-outbox`);
-    indexedDbs.add(`ws-${WS_B}-v1-outbox`);
+    indexedDbs.add(`${deviceScope(WS_A)}-outbox-v1`);
+    indexedDbs.add(`${deviceScope(WS_B)}-outbox-v1`);
 
     await wipeWorkspaceStore(WS_A, platform);
 
     expect([...files].filter((name) => name.includes(WS_A))).toEqual([]);
-    expect([...indexedDbs]).toEqual([`ws-${WS_B}-v1-outbox`]);
+    expect([...indexedDbs]).toEqual([`${deviceScope(WS_B)}-outbox-v1`]);
     expect(databases.has(storeName(WS_A))).toBe(false);
     expect(await b.database.execute('SELECT id FROM rows')).toEqual([{ id: 'b-row' }]);
     // A later open of A starts from nothing.
@@ -123,15 +168,16 @@ describe('persistence', () => {
     }
     await database.execute('CREATE TABLE cache_generation (physical_id TEXT)');
     for (const [n, team] of [TEAM_1, TEAM_2].entries()) {
-      for (const kind of ['issues', 'workflow-states', 'team-members']) {
-        const id = `${kind}-${WS_A}-${team}`;
-        await database.execute(`CREATE TABLE c_${kind.replace('-', '')}${n} (id TEXT)`);
-        await database.execute(`CREATE TABLE t_${kind.replace('-', '')}${n} (id TEXT)`);
-        await database.execute(`INSERT INTO c_${kind.replace('-', '')}${n} VALUES ('row')`);
+      // The ids the app really gives its collections: made by the registry, not typed here.
+      for (const kind of TEAM_KINDS) {
+        const id = idOf(kind, WS_A, team);
+        await database.execute(`CREATE TABLE c_${kind}${n} (id TEXT)`);
+        await database.execute(`CREATE TABLE t_${kind}${n} (id TEXT)`);
+        await database.execute(`INSERT INTO c_${kind}${n} VALUES ('row')`);
         await database.execute('INSERT INTO collection_registry VALUES (?, ?, ?)', [
           id,
-          `c_${kind.replace('-', '')}${n}`,
-          `t_${kind.replace('-', '')}${n}`,
+          `c_${kind}${n}`,
+          `t_${kind}${n}`,
         ]);
         await database.execute('INSERT INTO collection_version VALUES (?)', [id]);
         await database.execute('INSERT INTO cache_generation VALUES (?)', [id]);
@@ -162,10 +208,92 @@ describe('persistence', () => {
     expect(tables).not.toContain('c_issues0');
     expect(tables).not.toContain('c_restarted');
     expect(tables).toContain('c_issues1');
+    // Every one of the three shapes of the lost team is gone, not only its issues.
+    expect(tables).not.toContain('c_workflowStates0');
+    expect(tables).not.toContain('c_teamMembers0');
+    expect(tables).toContain('c_teamMembers1');
   });
 
   it('does nothing for a workspace whose store is not open', async () => {
     await expect(deleteTeamRows(WS_A, TEAM_1)).resolves.toBeUndefined();
+  });
+});
+
+describe('session start', () => {
+  const MEMBER_A = `member-of-${WS_A}`;
+  const OLD = '33333333-3333-4333-8333-333333333333';
+
+  it('removes what another person left, a workspace the person left, and the first names; keeps its own', async () => {
+    const { platform, files, indexedDbs } = fakePlatform();
+    const mine = deviceScope(WS_A);
+    for (const name of [
+      `${mine}-v1`,
+      `${mine}-v1-journal`,
+      // Another person's copy of the same workspace (the previous session ended by expiry).
+      `ws-${WS_A}-mother-member-v1`,
+      // A workspace this session no longer lists.
+      `ws-${OLD}-m${MEMBER_A}-v1`,
+      // The names before the member was part of them.
+      `ws-${WS_A}-v1`,
+    ])
+      files.add(name);
+    indexedDbs.add(`${mine}-outbox-v1`);
+    indexedDbs.add(`ws-${WS_A}-mother-member-outbox-v1`);
+    indexedDbs.add(`ws-${WS_A}-v1-outbox`);
+    files.add('unrelated-app-file');
+
+    await startDeviceSession([{ id: WS_A, memberId: MEMBER_A }], platform);
+
+    expect([...files].sort()).toEqual(['unrelated-app-file', `${mine}-v1`, `${mine}-v1-journal`]);
+    expect([...indexedDbs]).toEqual([`${mine}-outbox-v1`]);
+  });
+
+  it('names nothing before it has bound the session', async () => {
+    resetIdentityForTests();
+    const { platform } = fakePlatform();
+    await startDeviceSession([{ id: WS_A, memberId: MEMBER_A }], platform);
+    expect(storeName(WS_A)).toContain(MEMBER_A);
+  });
+
+  it('a wipe that left files behind is finished by the next session start, before any store opens', async () => {
+    const { platform, files, stuck, pending } = fakePlatform();
+    const a = await openWorkspaceStore(WS_A, platform);
+    stuck.add(a.name);
+
+    await wipeWorkspaceStore(WS_A, platform);
+    expect(files.has(a.name)).toBe(true);
+    expect(pending()).toEqual([`ws-${WS_A}-`]);
+
+    // The other tab let go; the person signs in again as the same member.
+    stuck.clear();
+    await startDeviceSession([{ id: WS_A, memberId: MEMBER_A }], platform);
+    expect(files.has(a.name)).toBe(false);
+    expect(pending()).toEqual([]);
+  });
+});
+
+describe('storedGeneration', () => {
+  it('is the newest restart generation the device holds for a shape, 0 when it holds none', async () => {
+    const { platform } = fakePlatform();
+    // The device already holds these copies when the store opens (a leader that takes over continues from them).
+    const earlier = await platform.openDatabase(storeName(WS_A));
+    await earlier.execute(
+      'CREATE TABLE collection_registry (collection_id TEXT PRIMARY KEY, table_name TEXT, tombstone_table_name TEXT)',
+    );
+    const base = `issues-${WS_A}-${TEAM_1}`;
+    for (const id of [
+      base,
+      `${base}~2`,
+      `${base}~11`,
+      `${base}~junk`,
+      `issues-${WS_A}-${TEAM_2}~7`,
+    ])
+      await earlier.execute('INSERT INTO collection_registry VALUES (?, ?, ?)', [id, 't', 'u']);
+    await openWorkspaceStore(WS_A, platform);
+
+    expect(storedGeneration(WS_A, base)).toBe(11);
+    expect(storedGeneration(WS_A, `issues-${WS_A}-${TEAM_2}`)).toBe(7);
+    expect(storedGeneration(WS_A, `issues-${WS_A}-cccccccc-cccc-4ccc-8ccc-cccccccccccc`)).toBe(0);
   });
 });
 

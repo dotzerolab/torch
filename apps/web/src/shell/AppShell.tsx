@@ -15,6 +15,7 @@ import { OfflineBanner } from './OfflineBanner.tsx';
 import { ShellContext, type ShellState, teamKeyFromPath } from './ShellContext.ts';
 import { Sidebar } from './Sidebar.tsx';
 import { StatusBar } from './StatusBar.tsx';
+import { useDeviceSession } from './useDeviceSession.ts';
 import { useDeviceStore } from './useDeviceStore.ts';
 import { useMembershipWatcher } from './useMembershipWatcher.ts';
 import { useOutboxEvents } from './useOutboxEvents.ts';
@@ -44,7 +45,6 @@ function ShellFrame({
   const { teams, ready } = useTeams(workspace.id);
   useMembershipWatcher(workspace.id, workspace.memberId);
   useOutboxEvents(workspace.id);
-  useSignOutElsewhere();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
@@ -132,8 +132,11 @@ export function AppShell({
   children: ReactNode;
 }) {
   const [chosenId, setChosenId] = useState<string | null>(null);
+  // Above the device gate: a tab that is still opening its store must hear a sign-out in another tab too.
+  useSignOutElsewhere();
+  const deviceReady = useDeviceSession(workspaces);
   const workspace = workspaces.find((candidate) => candidate.id === chosenId) ?? workspaces[0];
-  if (!workspace) return null;
+  if (!workspace || !deviceReady) return null;
   return (
     <LocaleProvider locale={locale}>
       <ToastProvider>

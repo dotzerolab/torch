@@ -6,6 +6,8 @@
 // The tap sits on the OUTSIDE of the collection's sync (after the persistence layer), so it sees what the collection
 // really received: rows read back from the device, the server's changes, and truncates alike.
 import { syncWriteNamesWholeRow } from '@tanstack/react-db';
+import { deviceScope } from './identity.ts';
+import { isShapeId, parseShapeId } from './registry.ts';
 import { browserTabs, liveTabs, type TabPlatform, tabId } from './tabs.ts';
 
 type Row = Record<string, unknown>;
@@ -70,7 +72,7 @@ type PublisherState = {
 };
 
 export function createHub(workspaceId: string, platform: TabPlatform = browserTabs) {
-  const channel = platform.channel(`sync:${workspaceId}`);
+  const channel = platform.channel(`sync:${deviceScope(workspaceId)}`);
   // ---- leader
   let handlers: LeaderHandlers | null = null;
   const publishers = new Map<string, PublisherState>();
@@ -88,7 +90,11 @@ export function createHub(workspaceId: string, platform: TabPlatform = browserTa
   const follows = new Set<Follow>();
   const pending = new Map<
     string,
-    { resolve: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> }
+    {
+      resolve: (ok: boolean) => void;
+      timer: ReturnType<typeof setTimeout>;
+      message: Extract<Message, { t: 'await' }>;
+    }
   >();
 
   const post = (message: Message) => {
@@ -135,8 +141,13 @@ export function createHub(workspaceId: string, platform: TabPlatform = browserTa
     }
   }
 
+  /** A message names a shape of this workspace and of a kind that exists, or it is ignored. */
+  const ownsShape = (shape: string) =>
+    isShapeId(shape) && parseShapeId(shape).workspaceId === workspaceId;
+
   function onLeaderMessage(message: Message) {
     if (!handlers) return;
+    if ((message.t === 'hello' || message.t === 'await') && !ownsShape(message.shape)) return;
     if (message.t === 'hello') {
       let entry = demand.get(message.shape);
       if (!entry) {
@@ -178,8 +189,9 @@ export function createHub(workspaceId: string, platform: TabPlatform = browserTa
       return;
     }
     if (message.t === 'leader') {
-      // A new leader: whatever the old one told is over, ask again.
+      // A new leader: whatever the old one told is over, ask again (also for writes still waiting for their confirmation).
       for (const follow of follows) ask(follow);
+      for (const waiter of pending.values()) post(waiter.message);
       return;
     }
     for (const follow of [...follows]) {
@@ -310,8 +322,9 @@ export function createHub(workspaceId: string, platform: TabPlatform = browserTa
           pending.delete(id);
           resolve(false);
         }, timeoutMs + 1000);
-        pending.set(id, { resolve, timer });
-        post({ t: 'await', id, shape, txid, timeoutMs });
+        const message = { t: 'await', id, shape, txid, timeoutMs } as const;
+        pending.set(id, { resolve, timer, message });
+        post(message);
       });
     },
 

@@ -12,6 +12,9 @@ const tabs = vi.hoisted(() => ({
   promote: (() => {}) as () => void,
   led: [] as string[],
   promoted: [] as string[],
+  left: [] as string[],
+  stopped: [] as string[],
+  released: 0,
 }));
 vi.mock('../sync/persistence.ts', () => ({
   persistenceFor: () => null,
@@ -30,10 +33,19 @@ vi.mock('../sync/tabs.ts', () => ({
     tabs.promote = listener;
     return () => {};
   },
+  leaveWorkspace: (id: string) => {
+    tabs.left.push(id);
+    return () => {
+      tabs.released += 1;
+    };
+  },
 }));
 vi.mock('../sync/shapes.ts', () => ({
   leadWorkspace: (id: string) => tabs.led.push(id),
   syncRegistry: { promote: (id: string) => tabs.promoted.push(id) },
+  stopWorkspace: async (id: string) => {
+    tabs.stopped.push(id);
+  },
 }));
 
 import { useDeviceStore } from './useDeviceStore.ts';
@@ -45,6 +57,9 @@ describe('useDeviceStore', () => {
     tabs.role = 'leader';
     tabs.led = [];
     tabs.promoted = [];
+    tabs.left = [];
+    tabs.stopped = [];
+    tabs.released = 0;
   });
 
   it('holds the shapes back until the store is open', async () => {
@@ -84,5 +99,17 @@ describe('useDeviceStore', () => {
     await act(async () => open.resolve());
     expect(tabs.led).toEqual(['w4']);
     expect(tabs.promoted).toEqual(['w4']);
+  });
+
+  it('leaving the workspace (the person switched) gives up its lock only after the tab stopped syncing it', async () => {
+    tabs.role = 'follower';
+    const { unmount } = renderHook(() => useDeviceStore('w5'));
+    await act(async () => {});
+    unmount();
+    // The claim is let go at once, so no promotion can reach a workspace that is not on screen.
+    expect(tabs.left).toEqual(['w5']);
+    expect(tabs.stopped).toEqual(['w5']);
+    await act(async () => {});
+    expect(tabs.released).toBe(1);
   });
 });

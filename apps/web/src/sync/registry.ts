@@ -38,7 +38,8 @@ export type Factories = {
 };
 export type CollectionFor<F extends Factories, K extends ShapeKey> = ReturnType<F[K['kind']]>;
 
-const TEAM_KINDS: readonly TeamKind[] = ['issues', 'workflowStates', 'teamMembers'];
+/** The kinds of shape a team owns; collection ids on the device are `<kind>-<workspaceId>-<teamId>`. */
+export const TEAM_KINDS: readonly TeamKind[] = ['issues', 'workflowStates', 'teamMembers'];
 
 export function isTeamKey(key: ShapeKey): key is Extract<ShapeKey, { teamId: string }> {
   return (TEAM_KINDS as readonly string[]).includes(key.kind);
@@ -52,6 +53,23 @@ function keyOf(key: ShapeKey): string {
 
 /** The name of a shape between tabs; the same in every tab. Ids are UUIDs, so `:` never occurs inside one. */
 export const shapeId = keyOf;
+
+const KINDS: readonly ShapeKind[] = [
+  'teams',
+  'members',
+  'ownMemberships',
+  'issues',
+  'workflowStates',
+  'teamMembers',
+];
+
+/** Does the id name a shape of a known kind (a message from another tab is not trusted)? */
+export function isShapeId(id: string): boolean {
+  const [kind, workspaceId, teamId, extra] = id.split(':');
+  if (!kind || !workspaceId || extra !== undefined) return false;
+  if (!(KINDS as readonly string[]).includes(kind)) return false;
+  return (TEAM_KINDS as readonly string[]).includes(kind) ? Boolean(teamId) : teamId === undefined;
+}
 
 /** The key a shape id names. */
 export function parseShapeId(id: string): ShapeKey {
@@ -228,6 +246,16 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     notify();
   }
 
+  /** The page no longer shows the workspace: every instance of it ends, and a later visit starts them afresh. */
+  function leave(workspaceId: string) {
+    for (const entry of [...entries.values()]) {
+      if (entry.key.workspaceId !== workspaceId) continue;
+      replace(entry.key);
+      generations.delete(keyOf(entry.key));
+    }
+    notify();
+  }
+
   function isGone(workspaceId: string, teamId: string): boolean {
     return gone.has(goneKey(workspaceId, teamId));
   }
@@ -322,6 +350,7 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     dropTeam,
     reinstateTeam,
     promote,
+    leave,
     isGone,
     subscribe,
     onSettled,

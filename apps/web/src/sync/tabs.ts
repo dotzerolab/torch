@@ -19,8 +19,10 @@ export const browserTabs: TabPlatform = {
   channel: (name) => new BroadcastChannel(name),
 };
 
-/** Names carry no product name: the same origin may host other apps. */
-const leaderLock = (workspaceId: string) => `sync-leader:${workspaceId}`;
+import { deviceScope } from './identity.ts';
+
+/** Names carry no product name: the same origin may host other apps. The scope names the person too (`identity.ts`). */
+const leaderLock = (workspaceId: string) => `sync-leader:${deviceScope(workspaceId)}`;
 const TAB_LOCK_PREFIX = 'sync-tab:';
 
 /** This page, for the messages it sends to the other tabs. */
@@ -43,6 +45,7 @@ export const roleOf = (workspaceId: string): Role => roles.get(workspaceId) ?? '
 export function claimRole(workspaceId: string, platform: TabPlatform = browserTabs): Promise<Role> {
   const known = claims.get(workspaceId);
   if (known) return known;
+  const mine: { claim?: Promise<Role> } = {};
   const claim = (async (): Promise<Role> => {
     const { locks } = platform;
     if (!locks) {
@@ -59,10 +62,17 @@ export function claimRole(workspaceId: string, platform: TabPlatform = browserTa
         }
         roles.set(workspaceId, 'leader');
         resolve('leader');
-        // Held until this page ends (or `releaseLeadership`).
+        // Held until this page ends (or `leaveWorkspace`).
         return new Promise<void>((release) => releases.set(workspaceId, release));
       });
     });
+    if (claims.get(workspaceId) !== mine.claim) {
+      // The workspace left the screen while the lock was being asked for: give back what that took.
+      releases.get(workspaceId)?.();
+      releases.delete(workspaceId);
+      roles.delete(workspaceId);
+      return role;
+    }
     roles.set(workspaceId, role);
     if (role === 'follower') {
       const waitingFor = new AbortController();
@@ -77,6 +87,7 @@ export function claimRole(workspaceId: string, platform: TabPlatform = browserTa
     }
     return role;
   })();
+  mine.claim = claim;
   claims.set(workspaceId, claim);
   return claim;
 }
@@ -91,12 +102,20 @@ export function onPromoted(workspaceId: string, listener: () => void): () => voi
   };
 }
 
-/** Gives the lock up (or stops waiting for it): the next tab leads. Sign-out and tests. */
-export function releaseLeadership(workspaceId: string) {
+/**
+ * This tab no longer shows the workspace (the person switched to another one): it stops waiting for the lock, or gives
+ * it up when it holds it, so the next tab of the workspace leads. A lock held by a tab that does not show the workspace
+ * would leave every follower without a leader. Everything this tab claimed is forgotten at once (a later visit claims
+ * afresh); the returned function gives the lock up, and must run only after the tab stopped syncing the workspace.
+ */
+export function leaveWorkspace(workspaceId: string): () => void {
   waiting.get(workspaceId)?.abort();
   waiting.delete(workspaceId);
-  releases.get(workspaceId)?.();
+  const release = releases.get(workspaceId);
   releases.delete(workspaceId);
+  claims.delete(workspaceId);
+  roles.delete(workspaceId);
+  return () => release?.();
 }
 
 /** Every tab that takes part holds a lock of its own, so the leader can tell which followers are still there. */

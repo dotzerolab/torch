@@ -3,7 +3,12 @@
 import { collectionFactories } from './collections.ts';
 import { hubFor } from './mirror.ts';
 import { outbox } from './outbox.ts';
-import { deleteShapeRows, deleteTeamRows, storedGeneration } from './persistence.ts';
+import {
+  closeWorkspaceStore,
+  deleteShapeRows,
+  deleteTeamRows,
+  storedGeneration,
+} from './persistence.ts';
 import {
   type CollectionFor,
   createRegistry,
@@ -72,4 +77,14 @@ export function leadWorkspace(workspaceId: string) {
       return collection.utils.awaitTxId(txid, timeoutMs);
     },
   });
+}
+
+/**
+ * The page no longer shows the workspace: this tab stops answering followers, ends its shapes of it and closes its device
+ * store, so another tab can lead (and open the store) at once.
+ */
+export async function stopWorkspace(workspaceId: string): Promise<void> {
+  hubFor(workspaceId).stopLeading();
+  syncRegistry.leave(workspaceId);
+  await closeWorkspaceStore(workspaceId);
 }

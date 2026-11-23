@@ -8,6 +8,8 @@ import { THEME_STORAGE_KEY } from '../design/theme.ts';
 import { AppShell } from './AppShell.tsx';
 
 vi.mock('./useDeviceStore.ts', () => ({ useDeviceStore: () => true }));
+vi.mock('./useDeviceSession.ts', () => ({ useDeviceSession: () => true }));
+vi.mock('./useSignOutElsewhere.ts', () => ({ useSignOutElsewhere: () => {} }));
 vi.mock('./useMembershipWatcher.ts', () => ({ useMembershipWatcher: () => {} }));
 vi.mock('./useOutboxEvents.ts', () => ({ useOutboxEvents: () => {} }));
 vi.mock('./useTeams.ts', () => ({

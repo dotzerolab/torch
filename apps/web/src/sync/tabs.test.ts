@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { bindTestSession, deviceScope, resetIdentityForTests } from './identity.ts';
 import {
   claimRole,
+  leaveWorkspace,
   liveTabs,
   onPromoted,
-  releaseLeadership,
   resetTabsForTests,
   roleOf,
   type TabPlatform,
@@ -31,8 +32,14 @@ function fakeLocks() {
       if (options.ifAvailable) return callback(null);
       return new Promise((resolve, reject) => {
         const turn = () => take(name, callback).then(resolve, reject);
-        queues.set(name, [...(queues.get(name) ?? []), turn]);
-        options.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        // A request that was aborted while it waited never gets the lock; the next one in line does.
+        let aborted = false;
+        const guarded = () => (aborted ? void queues.get(name)?.shift()?.() : turn());
+        queues.set(name, [...(queues.get(name) ?? []), guarded]);
+        options.signal?.addEventListener('abort', () => {
+          aborted = true;
+          reject(new Error('aborted'));
+        });
       });
     }) as unknown as LockManager['request'],
     query: async () => ({ held: [...holders].map((name) => ({ name })), pending: [] }),
@@ -44,7 +51,12 @@ const platformOf = (locks: ReturnType<typeof fakeLocks>): TabPlatform => ({
   channel: () => new BroadcastChannel('unused'),
 });
 
-afterEach(() => resetTabsForTests());
+beforeEach(() => bindTestSession('w1', 'w2', 'w3'));
+afterEach(() => {
+  resetTabsForTests();
+  resetIdentityForTests();
+});
+const lockOf = (workspaceId: string) => `sync-leader:${deviceScope(workspaceId)}`;
 
 describe('tabs', () => {
   it('without Web Locks every tab leads on its own', async () => {
@@ -65,14 +77,14 @@ describe('tabs', () => {
     // A second tab: another module instance, played by a fresh claim on the same lock manager.
     const requested: string[] = [];
     const second = await new Promise<string>((resolve) => {
-      void locks.request('sync-leader:w1', { ifAvailable: true }, (lock) => {
+      void locks.request(lockOf('w1'), { ifAvailable: true }, (lock) => {
         requested.push(String(lock));
         resolve(lock ? 'leader' : 'follower');
         return undefined;
       });
     });
     expect(second).toBe('follower');
-    releaseLeadership('w1');
+    leaveWorkspace('w1')();
   });
 
   it('a follower is told when it becomes the leader', async () => {
@@ -80,7 +92,7 @@ describe('tabs', () => {
     // Another tab holds the lock for good.
     let letGo: () => void = () => {};
     void locks.request(
-      'sync-leader:w2',
+      lockOf('w2'),
       (async () => new Promise<void>((resolve) => (letGo = resolve))) as never,
     );
     const platform = platformOf(locks);
@@ -94,5 +106,45 @@ describe('tabs', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(promoted).toBe(1);
     expect(roleOf('w2')).toBe('leader');
+  });
+  it('a tab that leaves a workspace stops waiting for its lock: the next tab is promoted, not the one that left', async () => {
+    const locks = fakeLocks();
+    let letGo: () => void = () => {};
+    void locks.request(
+      lockOf('w3'),
+      (async () => new Promise<void>((resolve) => (letGo = resolve))) as never,
+    );
+    // This tab follows w3, then the person switches to another workspace.
+    expect(await claimRole('w3', platformOf(locks))).toBe('follower');
+    let promoted = 0;
+    onPromoted('w3', () => {
+      promoted += 1;
+    });
+    leaveWorkspace('w3')();
+    // Another tab of the workspace waits too and must be the one that gets the lock.
+    let otherLeads = false;
+    void locks.request(lockOf('w3'), (async () => {
+      otherLeads = true;
+    }) as never);
+    letGo();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(otherLeads).toBe(true);
+    expect(promoted).toBe(0);
+  });
+
+  it('a leader that leaves hands the lock to the next tab, and claims the workspace afresh when it comes back', async () => {
+    const locks = fakeLocks();
+    const platform = platformOf(locks);
+    expect(await claimRole('w1', platform)).toBe('leader');
+    let otherLeads = false;
+    void locks.request(lockOf('w1'), (async () => {
+      otherLeads = true;
+    }) as never);
+    leaveWorkspace('w1')();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(otherLeads).toBe(true);
+    // Back on the workspace: a new claim, not the cached answer of the first one.
+    expect(roleOf('w1')).toBe('leader');
+    expect(await claimRole('w1', platform)).toBe('leader');
   });
 });

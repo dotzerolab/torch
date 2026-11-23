@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { bindTestSession, resetIdentityForTests } from './identity.ts';
 import { createHub, type FollowerSink, type MirrorOp } from './mirror.ts';
 import type { TabPlatform } from './tabs.ts';
 
@@ -51,8 +52,10 @@ async function pair() {
   await new Promise((resolve) => setTimeout(resolve, 20));
   return { leader, follower, demand, awaitTxId };
 }
+beforeEach(() => bindTestSession('w1', 'w2'));
 afterEach(() => {
   for (const hub of hubs.splice(0)) hub.close();
+  resetIdentityForTests();
 });
 
 describe('mirror', () => {
@@ -147,6 +150,38 @@ describe('mirror', () => {
     expect(awaitTxId).toHaveBeenCalledWith('issues:w1:t1', 42, 500);
     awaitTxId.mockRejectedValueOnce(new Error('timeout'));
     await expect(follower.awaitTxId('issues:w1:t1', 43, 500)).resolves.toBe(false);
+  });
+
+  it('ignores a request for a shape of another workspace or of a kind that does not exist', async () => {
+    const { follower, demand } = await pair();
+    const { target } = sink();
+    const stopOther = follower.follow('issues:other-workspace:t1', target);
+    const stopUnknown = follower.follow('bogus:w1:t1', target);
+    const stopValid = follower.follow('issues:w1:t1', target);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Only the shape of this workspace and a known kind opens anything.
+    expect(demand).toHaveBeenCalledTimes(1);
+    expect(demand).toHaveBeenCalledWith('issues:w1:t1');
+    stopOther();
+    stopUnknown();
+    stopValid();
+  });
+
+  it('asks the new leader again for a write whose confirmation was still pending when the leader changed', async () => {
+    const { follower, leader, awaitTxId } = await pair();
+    let first = true;
+    awaitTxId.mockImplementation(async () => {
+      // The old leader never answers; the new one does.
+      if (first) {
+        first = false;
+        return new Promise(() => {});
+      }
+    });
+    const confirmed = follower.awaitTxId('issues:w1:t1', 5, 5000);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    leader.lead({ demand: () => () => {}, awaitTxId });
+    await expect(confirmed).resolves.toBe(true);
+    expect(awaitTxId).toHaveBeenCalledTimes(2);
   });
 
   it('a follower that asked before any leader answered gets its rows when one comes', async () => {
