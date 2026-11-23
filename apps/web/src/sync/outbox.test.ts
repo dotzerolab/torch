@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../api.ts';
+import { bindTestSession, resetIdentityForTests } from './identity.ts';
 import {
   createOutbox,
   memoryStorage,
   OUTBOX_BACKOFF,
+  type OutboxStorage,
   type OutboxWrite,
+  outboxDatabaseName,
   WriteDropped,
 } from './outbox.ts';
+import { LOCAL_SCHEMA_VERSION } from './persistence.ts';
 import { runSignOut } from './sign-out.ts';
 
 const WS = '11111111-1111-4111-8111-111111111111';
@@ -43,7 +47,10 @@ function network() {
 }
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  resetIdentityForTests();
+});
 
 describe('outbox', () => {
   it('announces a queued write only once it is saved on the device', async () => {
@@ -52,9 +59,9 @@ describe('outbox', () => {
     let finishSave: () => void = () => {};
     const slow = {
       ...storage,
-      save: (workspaceId: string, writes: OutboxWrite[]) =>
+      add: (workspaceId: string, item: OutboxWrite) =>
         new Promise<void>((resolve) => {
-          finishSave = () => resolve(storage.save(workspaceId, writes));
+          finishSave = () => resolve(storage.add(workspaceId, item));
         }),
     };
     const box = createOutbox({ storage: slow, send: net.send, sleep: net.sleep });
@@ -195,7 +202,7 @@ describe('outbox', () => {
 
   it('a write left by an earlier visit has no caller: the listener is told it is not handled', async () => {
     const storage = memoryStorage();
-    await storage.save(WS, [write(1)]);
+    await storage.add(WS, write(1));
     const box = createOutbox({
       storage,
       send: async () => {
@@ -231,6 +238,107 @@ describe('outbox', () => {
     await expect(head).resolves.toEqual({ txid: 1 });
   });
 
+  it('two tabs that queue while offline do not overwrite each other: every write is its own record', async () => {
+    const storage = memoryStorage();
+    const offline = network();
+    const tabA = createOutbox({ storage, send: offline.send, sleep: offline.sleep });
+    const tabB = createOutbox({ storage, send: offline.send, sleep: offline.sleep });
+    await tabA.resume(WS);
+    await tabB.resume(WS);
+    void tabA.enqueueWrite(write(7)).catch(() => {});
+    void tabB.enqueueWrite(write(8)).catch(() => {});
+    await flush();
+
+    // Both tabs closed; the person comes back: both writes are still there, and both are sent.
+    const net = network();
+    const reopened = createOutbox({ storage, send: net.send, sleep: net.sleep });
+    await reopened.resume(WS);
+    expect(reopened.pendingCount(WS)).toBe(2);
+    net.goOnline();
+    await flush();
+    await flush();
+    expect(net.sent.map((w) => w.idempotencyKey).sort()).toEqual(['key-7', 'key-8']);
+  });
+
+  it('a tab that sends or drops its own writes leaves the writes of the other tab on the device', async () => {
+    const storage = memoryStorage();
+    const offline = network();
+    const tabA = createOutbox({ storage, send: offline.send, sleep: offline.sleep });
+    await tabA.resume(WS);
+    void tabA.enqueueWrite(write(7, { teamId: 'other-team' })).catch(() => {});
+    await flush();
+
+    const net = network();
+    const tabB = createOutbox({ storage, send: net.send, sleep: net.sleep });
+    await tabB.resume(WS);
+    const mine = tabB.enqueueWrite(write(8)).catch(() => {});
+    await flush();
+    await tabB.dropTeamWrites(WS, TEAM);
+    await mine;
+    expect((await storage.load(WS)).map((w) => w.idempotencyKey)).toContain('key-7');
+  });
+
+  it('counts what the device holds, not only what this tab queued', async () => {
+    const storage = memoryStorage();
+    const offline = network();
+    const tabA = createOutbox({ storage, send: offline.send, sleep: offline.sleep });
+    const tabB = createOutbox({ storage, send: offline.send, sleep: offline.sleep });
+    void tabA.enqueueWrite(write(7)).catch(() => {});
+    await flush();
+    expect(tabB.pendingCount(WS)).toBe(0);
+    await expect(tabB.storedCount(WS)).resolves.toBe(1);
+  });
+
+  it('keeps working in memory when the device storage cannot be read or written', async () => {
+    const broken: OutboxStorage = {
+      load: async () => {
+        throw new Error('no indexedDB');
+      },
+      add: async () => {
+        throw new Error('quota');
+      },
+      remove: async () => {
+        throw new Error('quota');
+      },
+      count: async () => {
+        throw new Error('no indexedDB');
+      },
+      clear: async () => {},
+    };
+    const net = network();
+    const box = createOutbox({ storage: broken, send: net.send, sleep: net.sleep });
+    const done = box.enqueueWrite(write(1));
+    net.goOnline();
+    // The write is sent, the caller is told, and a failed delete of the record does not leave it hanging.
+    await expect(done).resolves.toEqual({ txid: 1 });
+    expect(box.pendingCount(WS)).toBe(0);
+  });
+
+  it('settles the caller even when the record of a sent write cannot be deleted', async () => {
+    const storage = memoryStorage();
+    const net = network();
+    net.goOnline();
+    const box = createOutbox({
+      storage: {
+        ...storage,
+        remove: async () => {
+          throw new Error('blocked');
+        },
+      },
+      send: net.send,
+      sleep: net.sleep,
+    });
+    await expect(box.enqueueWrite(write(1))).resolves.toEqual({ txid: 1 });
+  });
+
+  it('keeps the outbox database name apart from the store schema version', () => {
+    bindTestSession(WS);
+    const name = outboxDatabaseName(WS);
+    expect(name).toContain(WS);
+    expect(name).not.toContain(`-v${LOCAL_SCHEMA_VERSION}-`);
+    expect(name).toMatch(/-outbox-v1$/);
+  });
+
   it('reload while offline keeps the queue', async () => {
     const storage = memoryStorage();
     const offline = network();
@@ -261,7 +369,7 @@ describe('sign-out', () => {
       calls,
       deps: {
         workspaceIds: ['a', 'b'],
-        pendingCount: (id: string) => (id === 'a' ? pending : 0),
+        pendingCount: async (id: string) => (id === 'a' ? pending : 0),
         confirm: async (n: number) => {
           calls.push(`confirm:${n}`);
           return confirm(n);
@@ -296,12 +404,51 @@ describe('sign-out', () => {
     expect(quiet.calls).toEqual(['logout', 'wipe:a', 'wipe:b', 'navigate']);
   });
 
+  it('tells the other tabs first, wipes after the logout, and tells them it is over only after the wipe', async () => {
+    const quiet = deps(0, async () => true);
+    const calls = quiet.calls;
+    await runSignOut({
+      ...quiet.deps,
+      announce: async () => {
+        calls.push('announce');
+      },
+      announceDone: () => {
+        calls.push('announceDone');
+      },
+    });
+    expect(calls).toEqual(['announce', 'logout', 'wipe:a', 'wipe:b', 'announceDone', 'navigate']);
+  });
+
+  it('still wipes and tells the other tabs when the logout fails', async () => {
+    const calls: string[] = [];
+    await expect(
+      runSignOut({
+        workspaceIds: ['a'],
+        pendingCount: async () => 0,
+        confirm: async () => true,
+        logout: async () => {
+          throw new Error('offline');
+        },
+        wipeWorkspace: async (id) => {
+          calls.push(`wipe:${id}`);
+        },
+        navigate: () => {
+          calls.push('navigate');
+        },
+        announceDone: () => {
+          calls.push('announceDone');
+        },
+      }),
+    ).rejects.toThrow('offline');
+    expect(calls).toEqual(['wipe:a', 'announceDone', 'navigate']);
+  });
+
   it('wipes and leaves even when the server cannot be reached', async () => {
     const calls: string[] = [];
     await expect(
       runSignOut({
         workspaceIds: ['a'],
-        pendingCount: () => 0,
+        pendingCount: async () => 0,
         confirm: async () => true,
         logout: async () => {
           throw new Error('offline');

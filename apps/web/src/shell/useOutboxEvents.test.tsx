@@ -8,7 +8,11 @@ const box = vi.hoisted(() => ({
   resume: vi.fn(async () => {}),
   listener: undefined as
     | undefined
-    | ((write: unknown, error: { code: string; message: string }, handled: boolean) => void),
+    | ((
+        write: unknown,
+        error: { kind?: string; code: string; message: string },
+        handled: boolean,
+      ) => void),
   stop: vi.fn(),
 }));
 vi.mock('../sync/outbox.ts', () => ({
@@ -48,5 +52,14 @@ describe('useOutboxEvents', () => {
     expect(show.mock.calls[0]?.[0].message).not.toContain('dev text');
     unmount();
     expect(box.stop).toHaveBeenCalled();
+  });
+
+  it('always tells the person about a write dropped because the team was lost, even when a screen waited on it', () => {
+    renderHook(() => useOutboxEvents('w1'), { wrapper });
+    // The screen of the team unmounts as the team leaves the list, so its own message never shows: the toast must.
+    box.listener?.({}, { kind: 'lost-access', code: 'not_found', message: 'dev text' }, true);
+    expect(show).toHaveBeenCalledTimes(1);
+    box.listener?.({}, { kind: 'rejected', code: 'invalid', message: 'dev text' }, true);
+    expect(show).toHaveBeenCalledTimes(1);
   });
 });

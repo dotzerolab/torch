@@ -20,7 +20,9 @@ export function useOutboxEvents(workspaceId: string): void {
     () =>
       outbox.subscribeDropped((_write, error, handled) => {
         // A screen that is still waiting on the write shows the refusal itself; this is for the ones nobody waits on.
-        if (handled) return;
+        // A write dropped because the team was lost is always told: the screen of that team leaves with the team, and
+        // its own message with it.
+        if (handled && error.kind !== 'lost-access') return;
         show({
           message: t('shell.writeDropped', { message: mutationErrorMessage(locale, error) }),
           tone: 'error',

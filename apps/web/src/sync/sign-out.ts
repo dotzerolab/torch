@@ -9,7 +9,8 @@ import { announceSignedOut, announceSignOut } from './tabs.ts';
 
 export type SignOutDeps = {
   workspaceIds: string[];
-  pendingCount: (workspaceId: string) => number;
+  /** How many writes of the workspace wait on the device, whichever tab queued them. */
+  pendingCount: (workspaceId: string) => Promise<number>;
   /** Asks the person; resolves true to go on. Called only when writes are waiting. */
   confirm: (pending: number) => Promise<boolean>;
   /** Ends the session on the server. */
@@ -24,7 +25,8 @@ export type SignOutDeps = {
 };
 
 export async function runSignOut(deps: SignOutDeps): Promise<'signed-out' | 'cancelled'> {
-  const pending = deps.workspaceIds.reduce((sum, id) => sum + deps.pendingCount(id), 0);
+  const counts = await Promise.all(deps.workspaceIds.map((id) => deps.pendingCount(id)));
+  const pending = counts.reduce((sum, count) => sum + count, 0);
   if (pending > 0 && !(await deps.confirm(pending))) return 'cancelled';
   markSigningOut();
   // The tab that holds the device store must close it before its files can go; it is not signed out yet, so it waits.
@@ -40,10 +42,6 @@ export async function runSignOut(deps: SignOutDeps): Promise<'signed-out' | 'can
   return 'signed-out';
 }
 
-/** How many writes of these workspaces have not reached the server. */
-export const pendingWrites = (workspaceIds: string[]) =>
-  workspaceIds.reduce((sum, id) => sum + outbox.pendingCount(id), 0);
-
 /** The page's sign-out: `confirm` shows the dialog; the rest is the real session, store and outbox. */
 export function signOutWorkspaces(
   workspaceIds: string[],
@@ -51,7 +49,7 @@ export function signOutWorkspaces(
 ) {
   return runSignOut({
     workspaceIds,
-    pendingCount: outbox.pendingCount,
+    pendingCount: outbox.storedCount,
     confirm,
     logout: () => endSession({ navigate: false }),
     wipeWorkspace: async (id) => {
