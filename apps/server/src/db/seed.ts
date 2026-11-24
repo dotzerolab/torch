@@ -259,7 +259,7 @@ function isLocalDatabase(databaseUrl: string | undefined): boolean {
  * the one that names this machine (a shell that exports only a remote DATABASE_URL must not seed it). Production is
  * never seeded, flag or not.
  */
-function assertSeedAllowed(allowRemote: boolean): void {
+export function assertSeedAllowed(allowRemote: boolean): void {
   if (process.env.NODE_ENV === 'production') {
     throw new Error('seedDev refuses to run when NODE_ENV=production');
   }

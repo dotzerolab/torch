@@ -37,11 +37,14 @@ export function useSession(): SessionState {
   return state;
 }
 
-/** Ends the session on the server, then reloads onto /login so nothing of the signed-in page stays in memory. */
-export async function signOut(): Promise<void> {
+/**
+ * Ends the session on the server, then (unless `navigate` is false) reloads onto /login so nothing of the signed-in
+ * page stays in memory. The sign-out flow of the shell passes `false`: it wipes the device copy first.
+ */
+export async function signOut({ navigate = true }: { navigate?: boolean } = {}): Promise<void> {
   try {
     await apiFetch<undefined>('/api/auth/logout', { method: 'POST' });
   } finally {
-    window.location.assign('/login');
+    if (navigate) window.location.assign('/login');
   }
 }

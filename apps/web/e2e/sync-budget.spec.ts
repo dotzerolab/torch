@@ -60,3 +60,61 @@ test('write not starved: at most four shapes stay in flight, also after the team
   expect(shapesNow()).toBeLessThanOrEqual(MAX_IN_FLIGHT_SYNC);
   await context.close();
 });
+
+test('write not starved with two tabs: a follower on another team than the leader opens no fifth shape, and takes its team once a slot frees', async ({
+  browser,
+  baseURL,
+}) => {
+  const context = await browser.newContext({ baseURL });
+  await openSessionAs(context, baseURL, 'owner');
+
+  // The tabs of one browser share its connections per origin: the shapes in flight are counted over both.
+  const inFlight = new Map<Request, string>();
+  let peak = 0;
+  const isSync = (url: string) => new URL(url).pathname.startsWith('/api/sync/');
+  context.on('request', (request) => {
+    if (!isSync(request.url())) return;
+    inFlight.set(request, new URL(request.url()).pathname);
+    peak = Math.max(peak, new Set(inFlight.values()).size);
+  });
+  const done = (request: Request) => inFlight.delete(request);
+  const shapesNow = () => new Set(inFlight.values()).size;
+  context.on('requestfinished', done);
+  context.on('requestfailed', done);
+
+  // The first tab opens first, so it leads: it syncs the team ENG.
+  const leader = await context.newPage();
+  await leader.goto('/');
+  await expect(leader.getByTestId('issue-title-3')).toHaveValue('ENG issue 3');
+  // The second tab follows it, on the team OPS: ENG and OPS together would be one shape too many.
+  const follower = await context.newPage();
+  await follower.goto('/');
+  await expect(follower.getByTestId('issue-title-3')).toHaveValue('ENG issue 3');
+  await follower.getByTestId('team-OPS').click();
+  await expect(follower).toHaveURL(/\/teams\/OPS/);
+  await leader.waitForTimeout(2500);
+  expect(shapesNow()).toBeLessThanOrEqual(MAX_IN_FLIGHT_SYNC);
+
+  // Writes of both tabs still go through at once (the follower's own team is ENG again for this: it has rows to edit).
+  const title = `Budget ${crypto.randomUUID().slice(0, 8)}`;
+  const field = leader.getByTestId('issue-title-5');
+  await field.fill(title);
+  const write = leader.waitForResponse(
+    (response) => response.request().method() === 'PATCH' && response.url().includes('/issues/'),
+  );
+  const started = Date.now();
+  await field.press('Enter');
+  const response = await write;
+  const took = Date.now() - started;
+  expect(response.status()).toBe(200);
+  expect(took).toBeLessThan(WRITE_MS);
+  expect(shapesNow()).toBeLessThanOrEqual(MAX_IN_FLIGHT_SYNC);
+
+  // The leader moves on to OPS: its ENG shape closes, and the follower's team shows what the follower asked for.
+  await leader.getByTestId('team-OPS').click();
+  await expect(follower.getByTestId('issue-title-3')).toHaveValue('OPS issue 3', { timeout: 5000 });
+  await leader.waitForTimeout(1500);
+  expect(shapesNow()).toBeLessThanOrEqual(MAX_IN_FLIGHT_SYNC);
+  expect(peak).toBeLessThanOrEqual(MAX_IN_FLIGHT_WHILE_SWITCHING);
+  await context.close();
+});

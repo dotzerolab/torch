@@ -72,6 +72,97 @@ describe('syncRegistry', () => {
     expect(registry.get({ kind: 'teams', workspaceId: ws }).id).toBe('teams-w1~3');
   });
 
+  it('tells onSettled listeners of a kind when its current instance settles, and ignores a replaced one', () => {
+    const contexts: Array<{ id: string; settled: () => void }> = [];
+    const build = (_key: ShapeKey, id: string, context: { settled: () => void }) => {
+      contexts.push({ id, settled: context.settled });
+      return { cleanup() {} };
+    };
+    const registry = createRegistry({
+      teams: build,
+      members: build,
+      ownMemberships: build,
+      issues: build,
+      workflowStates: build,
+      teamMembers: build,
+    } as unknown as Factories);
+    const onTeams = vi.fn();
+    const onMembers = vi.fn();
+    registry.onSettled('teams', onTeams);
+    registry.onSettled('members', onMembers);
+    registry.get({ kind: 'teams', workspaceId: ws });
+    registry.get({ kind: 'members', workspaceId: ws });
+
+    contexts[0]?.settled();
+    contexts[0]?.settled();
+    expect(onTeams).toHaveBeenCalledTimes(2);
+    expect(onTeams).toHaveBeenCalledWith(ws);
+    expect(onMembers).not.toHaveBeenCalled();
+
+    // A restarted shape: the old instance may still answer once while it stops; nobody must hear it.
+    registry.restart({ kind: 'teams', workspaceId: ws });
+    registry.get({ kind: 'teams', workspaceId: ws });
+    contexts[0]?.settled();
+    expect(onTeams).toHaveBeenCalledTimes(2);
+    contexts[2]?.settled();
+    expect(onTeams).toHaveBeenCalledTimes(3);
+  });
+
+  it('tells an instance that ends whether it was paused or replaced', async () => {
+    const contexts: Array<{ paused: () => boolean }> = [];
+    const build = (_key: ShapeKey, _id: string, context: { paused: () => boolean }) => {
+      contexts.push(context);
+      return { cleanup() {} };
+    };
+    const registry = createRegistry({
+      teams: build,
+      members: build,
+      ownMemberships: build,
+      issues: build,
+      workflowStates: build,
+      teamMembers: build,
+    } as unknown as Factories);
+    registry.get(team('issues'));
+    registry.get({ kind: 'members', workspaceId: ws });
+    expect(contexts.map((c) => c.paused())).toEqual([false, false]);
+    registry.hold(team('issues'))();
+    registry.restart({ kind: 'members', workspaceId: ws });
+    registry.dropTeam(ws, 't1');
+    expect(contexts[1]?.paused()).toBe(false);
+    // The team shape was ended by `dropTeam` here; a pause is what `hold` does over budget:
+    const paused = createRegistry({ issues: build } as unknown as Factories);
+    const before = contexts.length;
+    paused.get(team('issues'));
+    for (const t of ['t2', 't3', 't4', 't5']) paused.get(team('issues', t));
+    const release = paused.hold(team('issues'));
+    release();
+    await Promise.resolve();
+    expect(contexts[before]?.paused()).toBe(true);
+    expect(contexts[before + 1]?.paused()).toBe(false);
+  });
+
+  it('stops telling a listener that unsubscribed', () => {
+    let settle = () => {};
+    const build = (_key: ShapeKey, _id: string, context: { settled: () => void }) => {
+      settle = context.settled;
+      return { cleanup() {} };
+    };
+    const registry = createRegistry({
+      teams: build,
+      members: build,
+      ownMemberships: build,
+      issues: build,
+      workflowStates: build,
+      teamMembers: build,
+    } as unknown as Factories);
+    const listener = vi.fn();
+    const off = registry.onSettled('teams', listener);
+    registry.get({ kind: 'teams', workspaceId: ws });
+    off();
+    settle();
+    expect(listener).not.toHaveBeenCalled();
+  });
+
   it('restart of a shape nobody read yet creates nothing and stays quiet', () => {
     const { factories, made } = fakeFactories();
     const registry = createRegistry(factories);
@@ -206,7 +297,8 @@ describe('live shape budget', () => {
     vi.advanceTimersByTime(1);
     await Promise.resolve();
     expect(fake.cleaned).toBe(1);
-    expect(registry.get(team('issues')).id).toBe('issues-w1-t1~2');
+    // Nobody reads it, so the instance that starts again keeps the id (and with it the device copy it resumes from).
+    expect(registry.get(team('issues')).id).toBe('issues-w1-t1');
   });
 
   it('coming back in time keeps the open shape', async () => {
@@ -236,6 +328,64 @@ describe('live shape budget', () => {
     expect(registry.liveCount()).toBe(MAX_LIVE_SHAPES);
   });
 
+  it('tells whether a shape is open and how many readers hold it', () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    expect(registry.isOpen(team('issues'))).toBe(false);
+    registry.get(team('issues'));
+    expect(registry.isOpen(team('issues'))).toBe(true);
+    expect(registry.holdCount(team('issues'))).toBe(0);
+    const first = registry.hold(team('issues'));
+    registry.hold(team('issues'));
+    expect(registry.holdCount(team('issues'))).toBe(2);
+    first();
+    expect(registry.holdCount(team('issues'))).toBe(1);
+  });
+
+  it('pauseNow ends a team shape nobody holds at once, and leaves a held one alone', async () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    const free = registry.get(team('issues', 'free'));
+    const kept = registry.get(team('issues', 'kept'));
+    registry.hold(team('issues', 'kept'));
+    registry.pauseNow(team('issues', 'free'));
+    registry.pauseNow(team('issues', 'kept'));
+    await Promise.resolve();
+    expect(free.cleaned).toBe(1);
+    expect(kept.cleaned).toBe(0);
+    expect(registry.isOpen(team('issues', 'free'))).toBe(false);
+  });
+
+  it('asks the page to make room when a reader takes the page above its budget', () => {
+    const { factories } = fakeFactories();
+    const overBudget = vi.fn();
+    const registry = createRegistry(factories, { overBudget });
+    open(registry);
+    registry.get(team('issues', 't1'));
+    registry.hold(team('issues', 't1'));
+    expect(overBudget).not.toHaveBeenCalled();
+    registry.get(team('issues', 't2'));
+    registry.hold(team('issues', 't2'));
+    expect(overBudget).toHaveBeenCalledTimes(1);
+  });
+
+  it('a reader that lets go and reads again in the same tick keeps the shape, also over the budget', async () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    open(registry);
+    registry.get(team('issues', 't0'));
+    registry.hold(team('issues', 't0'));
+    const fake = registry.get(team('issues', 't1'));
+    expect(registry.liveCount()).toBe(MAX_LIVE_SHAPES + 1);
+    // What a development render does to an effect: it ends the effect and starts it again at once, with a live query
+    // still bound to the open instance, which must not be replaced under it.
+    registry.hold(team('issues', 't1'))();
+    registry.hold(team('issues', 't1'));
+    await Promise.resolve();
+    expect(fake.cleaned).toBe(0);
+    expect(registry.get(team('issues', 't1'))).toBe(fake);
+  });
+
   it('a reader of a restarted shape does not pause the new instance when it lets go of the old one', async () => {
     const { factories } = fakeFactories();
     const registry = createRegistry(factories);
@@ -254,33 +404,22 @@ describe('live shape budget', () => {
 // The membership watcher and the registry together: a team the person left and later rejoins must sync again
 // whichever of the two signals (the own-membership change, the teams rows) arrives first.
 describe('a team that is left and then rejoined', () => {
-  type Change = {
-    type: 'insert' | 'update' | 'delete';
-    key: string;
-    value: Record<string, unknown>;
-  };
-
-  function watchable(id: string, keys: string[]) {
-    let listener: ((changes: Change[]) => void) | undefined;
+  function watchable(id: string, initial: string[], context: { settled: () => void }) {
+    let keys = initial;
+    // A new instance is never settled on the spot: its first answer arrives a moment later.
+    queueMicrotask(context.settled);
     return {
       id,
       inert: false,
       cleanup() {},
       async preload() {},
-      // A new instance is never ready on the spot: its first sync arrives a moment later.
-      onFirstReady(callback: () => void) {
-        queueMicrotask(callback);
-      },
-      subscribeChanges(callback: (changes: Change[]) => void) {
-        listener = callback;
-        return {
-          unsubscribe() {
-            listener = undefined;
-          },
-        };
-      },
       keys: () => keys,
-      emit: (...changes: Change[]) => listener?.(changes),
+      get: () => undefined,
+      // A later answer of the server: the rows are `next` and the shape settles.
+      answer(next: string[]) {
+        keys = next;
+        context.settled();
+      },
     };
   }
 
@@ -293,18 +432,20 @@ describe('a team that is left and then rejoined', () => {
       cleanup() {},
     });
     const registry = createRegistry({
-      teams: (_key: ShapeKey, id: string) => {
-        const instance = watchable(id, answers.shift() ?? []);
+      teams: (_key: ShapeKey, id: string, context: { settled: () => void }) => {
+        const instance = watchable(id, answers.shift() ?? [], context);
         teams.push(instance);
         return instance;
       },
-      members: (_key: ShapeKey, id: string) => watchable(id, ['me']),
-      ownMemberships: (_key: ShapeKey, id: string) => watchable(id, []),
+      members: (_key: ShapeKey, id: string, context: { settled: () => void }) =>
+        watchable(id, ['me'], context),
+      ownMemberships: (_key: ShapeKey, id: string, context: { settled: () => void }) =>
+        watchable(id, [], context),
       issues: build,
       workflowStates: build,
       teamMembers: build,
     } as unknown as Factories);
-    const stop = startMembershipWatcher(ws, 'me', registry as unknown as WatcherRegistry);
+    const stop = startMembershipWatcher(ws, 'me', registry as unknown as WatcherRegistry, () => {});
     return { registry, teams, stop };
   }
 
@@ -344,10 +485,48 @@ describe('a team that is left and then rejoined', () => {
     registry.restart(teamsKey); // re-added: first sync without the team, its row comes next
     await settle();
     expect(issues(registry).inert).toBe(true);
-    teams[2]?.emit({ type: 'insert', key: 't1', value: {} });
+    teams[2]?.answer(['t1']);
 
     expect(registry.isGone(ws, 't1')).toBe(false);
     expect(issues(registry).inert).toBe(false);
     stop();
+  });
+});
+
+describe('syncRegistry across tabs', () => {
+  it('a leader continues from the generation the device holds', () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories, { storedGeneration: () => 3 });
+    expect(registry.get({ kind: 'teams', workspaceId: ws }).id).toBe('teams-w1~3');
+    registry.restart({ kind: 'teams', workspaceId: ws });
+    expect(registry.get({ kind: 'teams', workspaceId: ws }).id).toBe('teams-w1~4');
+  });
+
+  it('a follower reads under ids that are never a device id, and ignores what the device holds', () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories, {
+      role: () => 'follower',
+      storedGeneration: () => 3,
+    });
+    expect(registry.get({ kind: 'teams', workspaceId: ws }).id).toBe('mirror-teams-w1');
+  });
+
+  it('promote ends the follower instances of the workspace and starts leader ones from the device copy', () => {
+    const { factories, made } = fakeFactories();
+    let role: 'leader' | 'follower' = 'follower';
+    const registry = createRegistry(factories, { role: () => role, storedGeneration: () => 2 });
+    const follower = registry.get({ kind: 'teams', workspaceId: ws });
+    const other = registry.get({ kind: 'teams', workspaceId: 'w2' });
+    const listener = vi.fn();
+    registry.subscribe(listener);
+    role = 'leader';
+    registry.promote(ws);
+    expect(follower.cleaned).toBe(1);
+    expect(other.cleaned).toBe(0);
+    expect(listener).toHaveBeenCalled();
+    const leader = registry.get({ kind: 'teams', workspaceId: ws });
+    expect(leader).not.toBe(follower);
+    expect(leader.id).toBe('teams-w1~2');
+    expect(made.map((fake) => fake.id)).toContain('teams-w1~2');
   });
 });

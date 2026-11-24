@@ -4,6 +4,7 @@ packages:
 
 # Dependency build scripts are denied unless listed here (esbuild ships its binary as a platform package).
 allowBuilds:
+  "@journeyapps/wa-sqlite": false
   esbuild: false
 
 minimumReleaseAgeExclude:

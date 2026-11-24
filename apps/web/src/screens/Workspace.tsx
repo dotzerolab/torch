@@ -2,7 +2,7 @@ import { useLiveQuery } from '@tanstack/react-db';
 import type { Locale } from '@torch/shared/i18n';
 import { t } from '@torch/shared/i18n';
 import { issueUpdateInput } from '@torch/shared/mutations/issue';
-import { useState } from 'react';
+import { memo, useCallback, useState } from 'react';
 import { ApiError } from '../api.ts';
 import { mutationErrorMessage } from '../errors.ts';
 import { useShell } from '../shell/ShellContext.ts';
@@ -46,6 +46,38 @@ function TitleField({
   );
 }
 
+/**
+ * One row of the list. Memoised: a change to one issue gives the list a new array but leaves every other issue object as
+ * it was, so only the changed row renders (10,000 rows would otherwise miss the 100 ms bar for a local update).
+ */
+const IssueRow = memo(function IssueRow({
+  issue,
+  teamKey,
+  locale,
+  onSave,
+}: {
+  issue: SyncedIssue;
+  teamKey: string;
+  locale: Locale;
+  onSave: (issue: SyncedIssue, title: string) => void;
+}) {
+  return (
+    <li className="issue-row" data-testid={`issue-${issue.number}`}>
+      <span className="issue-row__id">
+        {teamKey}-{issue.number}
+      </span>
+      <TitleField
+        issue={issue}
+        label={t(locale, 'issue.titleLabel', { key: `${teamKey}-${issue.number}` })}
+        onSave={(title) => onSave(issue, title)}
+      />
+      <span className="issue-row__priority" data-testid={`issue-priority-${issue.number}`}>
+        {priorityLabel(locale, issue.priority)}
+      </span>
+    </li>
+  );
+});
+
 function IssueList({
   workspaceId,
   team,
@@ -61,23 +93,26 @@ function IssueList({
   });
   const [error, setError] = useState<string | null>(null);
 
-  function save(issue: SyncedIssue, title: string) {
-    setError(null);
-    const input = issueUpdateInput.safeParse({ title });
-    if (!input.success || input.data.title === undefined) {
-      setError(mutationErrorMessage(locale, new ApiError(400, 'invalid_input', '')));
-      return;
-    }
-    const newTitle = input.data.title;
-    if (newTitle === issue.title) return;
-    // The change shows at once; a refusal rolls it back by itself and lands here with the server's code.
-    const transaction = issues.update(issue.id, (draft) => {
-      draft.title = newTitle;
-    });
-    transaction.when('settled').catch((failure: unknown) => {
-      setError(mutationErrorMessage(locale, failure));
-    });
-  }
+  const save = useCallback(
+    (issue: SyncedIssue, title: string) => {
+      setError(null);
+      const input = issueUpdateInput.safeParse({ title });
+      if (!input.success || input.data.title === undefined) {
+        setError(mutationErrorMessage(locale, new ApiError(400, 'invalid_input', '')));
+        return;
+      }
+      const newTitle = input.data.title;
+      if (newTitle === issue.title) return;
+      // The change shows at once; a refusal rolls it back by itself and lands here with the server's code.
+      const transaction = issues.update(issue.id, (draft) => {
+        draft.title = newTitle;
+      });
+      transaction.when('settled').catch((failure: unknown) => {
+        setError(mutationErrorMessage(locale, failure));
+      });
+    },
+    [issues, locale],
+  );
 
   if (!isReady) {
     return (
@@ -98,19 +133,13 @@ function IssueList({
       ) : (
         <ol className="issue-list">
           {data.map((issue) => (
-            <li key={issue.id} className="issue-row" data-testid={`issue-${issue.number}`}>
-              <span className="issue-row__id">
-                {team.key}-{issue.number}
-              </span>
-              <TitleField
-                issue={issue}
-                label={t(locale, 'issue.titleLabel', { key: `${team.key}-${issue.number}` })}
-                onSave={(title) => save(issue, title)}
-              />
-              <span className="issue-row__priority" data-testid={`issue-priority-${issue.number}`}>
-                {priorityLabel(locale, issue.priority)}
-              </span>
-            </li>
+            <IssueRow
+              key={issue.id}
+              issue={issue}
+              teamKey={team.key}
+              locale={locale}
+              onSave={save}
+            />
           ))}
         </ol>
       )}

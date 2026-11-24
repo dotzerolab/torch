@@ -1,12 +1,14 @@
 import type { Brand } from '@torch/shared/brand';
 import { Inbox, LogOut, Settings, UserRound } from 'lucide-react';
-import type { MouseEvent, ReactNode } from 'react';
-import { type SessionWorkspace, signOut } from '../auth/useSession.ts';
+import { type MouseEvent, type ReactNode, useState } from 'react';
+import type { SessionWorkspace } from '../auth/useSession.ts';
 import { Button } from '../design/components/Button.tsx';
+import { Dialog } from '../design/components/Dialog.tsx';
 import { useT } from '../design/locale.tsx';
 import type { ResolvedTheme } from '../design/theme.ts';
 import { navigate, usePathname } from '../navigation.ts';
 import type { SyncedTeam } from '../sync/collections.ts';
+import { signOutWorkspaces } from '../sync/sign-out.ts';
 import { WorkspaceSwitcher } from './WorkspaceSwitcher.tsx';
 
 /** An entry whose screen does not exist yet: shown, announced as disabled, not focusable. */
@@ -49,6 +51,19 @@ export function Sidebar({
   const t = useT();
   const pathname = usePathname();
   const onSettings = pathname === '/settings' || pathname.startsWith('/settings/');
+  // Set while the person is asked whether to sign out with changes that never reached the server.
+  const [asking, setAsking] = useState<{ pending: number; answer: (go: boolean) => void } | null>(
+    null,
+  );
+  const requestSignOut = () =>
+    signOutWorkspaces(
+      workspaces.map((candidate) => candidate.id),
+      (pending) => new Promise<boolean>((answer) => setAsking({ pending, answer })),
+    );
+  const answer = (go: boolean) => {
+    asking?.answer(go);
+    setAsking(null);
+  };
   return (
     <nav className="sidebar" aria-label={t('shell.sidebar')}>
       <WorkspaceSwitcher
@@ -117,12 +132,29 @@ export function Sidebar({
           variant="ghost"
           className="sidebar__signout"
           data-testid="sign-out"
-          onClick={() => void signOut()}
+          onClick={() => void requestSignOut()}
         >
           <LogOut size={16} aria-hidden="true" />
           {t('workspace.signOut')}
         </Button>
       </div>
+      <Dialog
+        open={asking !== null}
+        onOpenChange={(open) => {
+          if (!open) answer(false);
+        }}
+        title={t('workspace.signOut.confirmTitle')}
+        description={t('workspace.signOut.confirmBody', { count: String(asking?.pending ?? 0) })}
+      >
+        <div className="dialog__actions">
+          <Button variant="secondary" onClick={() => answer(false)}>
+            {t('workspace.signOut.stay')}
+          </Button>
+          <Button variant="danger" data-testid="sign-out-discard" onClick={() => answer(true)}>
+            {t('workspace.signOut.discard')}
+          </Button>
+        </div>
+      </Dialog>
     </nav>
   );
 }

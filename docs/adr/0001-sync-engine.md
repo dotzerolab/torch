@@ -54,6 +54,11 @@ effort is largely work we would do regardless.
 9. Electric needs a password in `DATABASE_URL` even with trust auth (boot crash otherwise); the shape proxy drops
    `content-encoding` and `content-length` when relaying.
 
+*Note, 2026-11-16:* the offline outbox of the decision is an in-house queue (`apps/web/src/sync/outbox.ts`), not
+`@tanstack/offline-transactions`. It keeps the contract: writes are stored on the device, sent in order with an
+`Idempotency-Key`, and survive a reload. The package's peer dependencies did not fit the pinned TanStack DB version, so
+it is not a dependency.
+
 Rejected: Zero. Fastest to build and best revocation, but offline writes do not survive a reload, the sync service
 needs 1-2 GB and ~2 minutes to restart on every deploy, and seven licence exceptions. Revisit only if Electric's
 revocation or write-path cost proves unworkable in P1.
