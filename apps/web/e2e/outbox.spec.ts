@@ -87,3 +87,63 @@ test('a queued write the server refuses after a reload is dropped with a message
   await expect(page.getByTestId('issue-title-8')).toHaveValue('ENG issue 8');
   await context.close();
 });
+
+test('two tabs edit offline, both reload, and every queued write reaches the server', async ({
+  browser,
+  baseURL,
+}) => {
+  const { context, page: a } = await openOwner(browser, baseURL);
+  // The second tab of the same browser follows the first one; both queue their writes in the same IndexedDB.
+  const b = await context.newPage();
+  await b.goto('/');
+  await expect(b.getByTestId('issue-title-1')).toBeVisible();
+  await context.route(ISSUE_WRITE, (route) => route.abort('connectionfailed'));
+
+  const titleA = `Tab A ${crypto.randomUUID().slice(0, 8)}`;
+  const titleB = `Tab B ${crypto.randomUUID().slice(0, 8)}`;
+  try {
+    const fieldA = a.getByTestId('issue-title-7');
+    await fieldA.fill(titleA);
+    await fieldA.press('Enter');
+    await expect(a.getByTestId('offline-banner')).toBeVisible();
+    const fieldB = b.getByTestId('issue-title-8');
+    await fieldB.fill(titleB);
+    await fieldB.press('Enter');
+    await expect(b.getByTestId('offline-banner')).toBeVisible();
+
+    // Both pages go away and come back: what each tab queued must have survived the other tab's saves.
+    await Promise.all([a.reload(), b.reload()]);
+    await expect(a.getByTestId('offline-banner')).toBeVisible();
+    await expect(b.getByTestId('offline-banner')).toBeVisible();
+
+    await context.unroute(ISSUE_WRITE);
+    await expect(a.getByTestId('offline-banner')).toHaveCount(0, { timeout: 15_000 });
+    await expect(b.getByTestId('offline-banner')).toHaveCount(0, { timeout: 15_000 });
+
+    // The server has both writes: a fresh device sees them.
+    const other = await browser.newContext({ baseURL });
+    await openSessionAs(other, baseURL, 'owner');
+    const fresh = await other.newPage();
+    await fresh.goto('/');
+    await expect(fresh.getByTestId('issue-title-7')).toHaveValue(titleA);
+    await expect(fresh.getByTestId('issue-title-8')).toHaveValue(titleB);
+    await other.close();
+  } finally {
+    // The other specs read the seeded titles of these issues.
+    await context.unroute(ISSUE_WRITE).catch(() => {});
+    for (const [issue, title] of [
+      [7, 'ENG issue 7'],
+      [8, 'ENG issue 8'],
+    ] as const) {
+      const field = a.getByTestId(`issue-title-${issue}`);
+      const answered = a.waitForResponse(
+        (response) =>
+          response.request().method() === 'PATCH' && response.url().includes('/issues/'),
+      );
+      await field.fill(title);
+      await field.press('Enter');
+      await answered.catch(() => {});
+    }
+    await context.close();
+  }
+});

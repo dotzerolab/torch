@@ -1,7 +1,13 @@
 import { type Browser, expect, type Page, test } from '@playwright/test';
 import { createDb } from '../../server/src/db.ts';
 import { restoreDemoLayoutNow } from './helpers/demo-layout.ts';
-import { liveRowCount, persistedCollections, persistedRowCount } from './helpers/device-store.ts';
+import {
+  liveRowCount,
+  liveTeamRowCount,
+  openTeamShapeInPage,
+  persistedCollections,
+  persistedRowCount,
+} from './helpers/device-store.ts';
 import { openSessionAs } from './helpers/session.ts';
 import { demoEmail } from './helpers/sign-in.ts';
 
@@ -15,7 +21,7 @@ const opsPrefix = () => `issues-${workspaceId()}-${opsTeamId()}`;
 const SEEDED_ISSUES = 50;
 const REVOCATION_MS = 2000;
 
-async function memberId(role: 'member' | 'guest'): Promise<string> {
+async function memberId(role: 'admin' | 'member' | 'guest'): Promise<string> {
   const db = createDb(process.env.DATABASE_URL as string);
   try {
     const found = await db.pool.query<{ id: string }>(
@@ -115,6 +121,76 @@ test('join reaches open page < 2 s', async ({ browser, baseURL }) => {
     timeout: REVOCATION_MS,
   });
   await member.context.close();
+  await owner.context.close();
+});
+
+test('revoked rows leave the follower tab too: < 2 s, from its memory', async ({
+  browser,
+  baseURL,
+}) => {
+  const owner = await open(browser, baseURL, 'owner');
+  await owner.page.goto('/');
+  // Two tabs of the member's browser: the first leads and syncs, the second reads through it.
+  const member = await open(browser, baseURL, 'member');
+  await member.page.goto('/');
+  await member.page.getByTestId('team-OPS').click();
+  await expect(member.page.getByTestId('issue-title-3')).toHaveValue('OPS issue 3');
+  const follower = await member.context.newPage();
+  await follower.goto('/');
+  await follower.getByTestId('team-OPS').click();
+  await expect(follower.getByTestId('issue-title-3')).toHaveValue('OPS issue 3');
+  await expect
+    .poll(() => liveTeamRowCount(follower, workspaceId(), opsTeamId()), { timeout: 5000 })
+    .toBeGreaterThanOrEqual(SEEDED_ISSUES);
+
+  await changeTeam(owner.page, 'remove', opsTeamId(), await memberId('member'));
+  await expect(follower.getByTestId('team-OPS')).toHaveCount(0, { timeout: REVOCATION_MS });
+  await expect(follower.getByTestId('issue-title-3')).toHaveValue('ENG issue 3', {
+    timeout: REVOCATION_MS,
+  });
+  await expect
+    .poll(() => liveTeamRowCount(follower, workspaceId(), opsTeamId()), { timeout: REVOCATION_MS })
+    .toBe(0);
+  await expect(member.page.getByTestId('team-OPS')).toHaveCount(0, { timeout: REVOCATION_MS });
+  // The later specs expect the member back in OPS.
+  await changeTeam(owner.page, 'add', opsTeamId(), await memberId('member'));
+  await member.context.close();
+  await owner.context.close();
+});
+
+test('revoked workflow states and team members leave the store too, not only the issues', async ({
+  browser,
+  baseURL,
+}) => {
+  const statesPrefix = `workflowStates-${workspaceId()}-${opsTeamId()}`;
+  const membersPrefix = `teamMembers-${workspaceId()}-${opsTeamId()}`;
+  const owner = await open(browser, baseURL, 'owner');
+  await owner.page.goto('/');
+  // An admin who is in OPS: opening its member list stores the team's members, opening the team its states and issues.
+  await changeTeam(owner.page, 'add', opsTeamId(), await memberId('admin'));
+  const admin = await open(browser, baseURL, 'admin');
+  await admin.page.goto('/settings/teams');
+  await admin.page.getByTestId('team-members-open-OPS').click();
+  await warm(admin.page, membersPrefix, 3);
+  await admin.page.goto('/');
+  await admin.page.getByTestId('team-OPS').click();
+  await expect(admin.page.getByTestId('issue-title-3')).toHaveValue('OPS issue 3');
+  await warm(admin.page, opsPrefix(), SEEDED_ISSUES);
+  await openTeamShapeInPage(admin.page, workspaceId(), opsTeamId(), 'workflowStates');
+  await warm(admin.page, statesPrefix, 1);
+  await warm(admin.page, membersPrefix, 3);
+
+  await changeTeam(owner.page, 'remove', opsTeamId(), await memberId('admin'));
+  await expect(admin.page.getByTestId('team-OPS')).toHaveCount(0, { timeout: REVOCATION_MS });
+  for (const prefix of [opsPrefix(), statesPrefix, membersPrefix]) {
+    await expect
+      .poll(() => persistedRowCount(admin.page, workspaceId(), prefix), { timeout: REVOCATION_MS })
+      .toBe(0);
+  }
+  expect(await persistedCollections(admin.page, workspaceId())).not.toContainEqual(
+    expect.stringContaining(opsTeamId()),
+  );
+  await admin.context.close();
   await owner.context.close();
 });
 

@@ -93,3 +93,36 @@ export function liveRowCount(
     { module: '/src/sync/shapes.ts', workspaceId, kind },
   );
 }
+
+/** How many rows the page itself holds (in memory) of a team's shape: what a follower tab mirrors from the leader. */
+export function liveTeamRowCount(
+  page: Page,
+  workspaceId: string,
+  teamId: string,
+  kind: 'issues' | 'workflowStates' | 'teamMembers' = 'issues',
+): Promise<number> {
+  return page.evaluate(
+    async ({ module, workspaceId, teamId, kind }) => {
+      const { syncRegistry } = await import(/* @vite-ignore */ module);
+      return syncRegistry.get({ kind, workspaceId, teamId }).size as number;
+    },
+    { module: '/src/sync/shapes.ts', workspaceId, teamId, kind },
+  );
+}
+
+/** Starts a team shape the way a screen that reads it would (no screen reads the workflow states yet) and waits for it. */
+export function openTeamShapeInPage(
+  page: Page,
+  workspaceId: string,
+  teamId: string,
+  kind: 'issues' | 'workflowStates' | 'teamMembers',
+): Promise<void> {
+  return page.evaluate(
+    async ({ module, workspaceId, teamId, kind }) => {
+      const { syncRegistry } = await import(/* @vite-ignore */ module);
+      syncRegistry.hold({ kind, workspaceId, teamId });
+      await syncRegistry.get({ kind, workspaceId, teamId }).preload();
+    },
+    { module: '/src/sync/shapes.ts', workspaceId, teamId, kind },
+  );
+}
