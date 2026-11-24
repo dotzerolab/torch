@@ -40,8 +40,16 @@ test('a tab that switched to another workspace does not keep the lock of the fir
     await expect(switcher.getByTestId('workspace-name').first()).toContainText(second.name);
     await leader.close();
 
-    // The tab that stayed takes over and stays live: an edit made on another device reaches it.
-    await expect.poll(() => followerRequests.count(), { timeout: 5000 }).toBeGreaterThan(0);
+    // The tab that stayed takes over within 3 s: it starts to ask for its shapes (the tab that left must not have the lock).
+    await expect.poll(() => followerRequests.count(), { timeout: 3000 }).toBeGreaterThan(0);
+
+    // The tab on the second workspace goes away before the live check. A browser lets a profile hold about six open
+    // connections per origin on HTTP/1.1, and every led workspace keeps four long polls (three of the workspace and the
+    // issues of a team): two led workspaces are eight, so one of them would wait for a slot and the check below would
+    // measure the connection pool, not the takeover. The lock was already shown to have passed to the follower.
+    await switcher.close();
+
+    // The promoted tab stays live: an edit made on another device reaches it.
     other = await browser.newContext({ baseURL });
     await openSessionAs(other, baseURL, 'owner');
     const remote = await other.newPage();
