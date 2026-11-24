@@ -14,11 +14,18 @@ export function bindSession(workspaces: readonly SessionIdentity[]) {
   for (const workspace of workspaces) members.set(workspace.id, workspace.memberId);
 }
 
+/**
+ * The browser opens a database file only when its name is short (about 55 characters; a longer one fails to open and the
+ * page would silently work from memory). The workspace id is a whole UUID, so the member is named by the first 8 hex
+ * digits of its id: enough to tell the people of one workspace apart on one device.
+ */
+export const MEMBER_TAG_LENGTH = 8;
+
 /** The prefix of every device name of this person in this workspace (store, outbox, tab channel, leader lock). */
 export function deviceScope(workspaceId: string): string {
   const memberId = members.get(workspaceId);
   if (!memberId) throw new Error(`No signed-in member is bound for workspace ${workspaceId}.`);
-  return `ws-${workspaceId}-m${memberId}`;
+  return `ws-${workspaceId}-m${memberId.replaceAll('-', '').slice(0, MEMBER_TAG_LENGTH)}`;
 }
 
 /** The scope of every workspace of the session, for the cleanup at session start. */

@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { bindTestSession, deviceScope, resetIdentityForTests } from './identity.ts';
+import { bindSession, bindTestSession, deviceScope, resetIdentityForTests } from './identity.ts';
 import {
   deleteTeamRows,
   LOCAL_SCHEMA_VERSION,
@@ -93,7 +93,14 @@ afterEach(() => resetIdentityForTests());
 
 describe('persistence', () => {
   it('names the store after the workspace, the signed-in member and the schema version, without a product name', () => {
-    expect(storeName(WS_A)).toBe(`ws-${WS_A}-mmember-of-${WS_A}-v${LOCAL_SCHEMA_VERSION}`);
+    expect(storeName(WS_A)).toBe(`ws-${WS_A}-mmemberof-v${LOCAL_SCHEMA_VERSION}`);
+  });
+
+  it('keeps every file name short enough for the browser to open it (a longer one failed to open)', () => {
+    bindSession([{ id: WS_A, memberId: 'c0a80123-4567-4abc-8def-0123456789ab' }]);
+    // The longest name is the store of a two digit schema version: the browser opens up to about 55 characters.
+    expect(storeName(WS_A, 99).length).toBeLessThanOrEqual(54);
+    expect(storeName(WS_A)).toBe(`ws-${WS_A}-mc0a80123-v${LOCAL_SCHEMA_VERSION}`);
   });
 
   it('cannot name anything before the session is known', () => {
@@ -220,11 +227,12 @@ describe('persistence', () => {
 });
 
 describe('session start', () => {
-  const MEMBER_A = `member-of-${WS_A}`;
+  const MEMBER_A = '2c6bccd5-9fdc-4eb7-8d50-f2e19358a8b9';
   const OLD = '33333333-3333-4333-8333-333333333333';
 
   it('removes what another person left, a workspace the person left, and the first names; keeps its own', async () => {
     const { platform, files, indexedDbs } = fakePlatform();
+    bindSession([{ id: WS_A, memberId: MEMBER_A }]);
     const mine = deviceScope(WS_A);
     for (const name of [
       `${mine}-v1`,
@@ -252,7 +260,7 @@ describe('session start', () => {
     resetIdentityForTests();
     const { platform } = fakePlatform();
     await startDeviceSession([{ id: WS_A, memberId: MEMBER_A }], platform);
-    expect(storeName(WS_A)).toContain(MEMBER_A);
+    expect(storeName(WS_A)).toContain('-m2c6bccd5-');
   });
 
   it('a wipe that left files behind is finished by the next session start, before any store opens', async () => {
