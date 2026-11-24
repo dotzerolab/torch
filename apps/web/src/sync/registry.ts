@@ -301,8 +301,13 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
       holds.delete(k);
       // A restart or a drop already replaced the instance this reader held: nothing of it is left to pause.
       if (entries.get(k) !== held) return;
-      if (entries.size > MAX_LIVE_SHAPES) pause(key);
-      else {
+      if (entries.size > MAX_LIVE_SHAPES) {
+        // At once, but not before the end of the tick: a reader that ends and starts again in it (a development render
+        // does this to every effect) must find the open instance, which a live query may be bound to.
+        queueMicrotask(() => {
+          if (!holds.has(k) && entries.get(k) === held) pause(key);
+        });
+      } else {
         pauseTimers.set(
           k,
           setTimeout(() => {

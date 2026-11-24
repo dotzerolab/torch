@@ -108,7 +108,7 @@ describe('syncRegistry', () => {
     expect(onTeams).toHaveBeenCalledTimes(3);
   });
 
-  it('tells an instance that ends whether it was paused or replaced', () => {
+  it('tells an instance that ends whether it was paused or replaced', async () => {
     const contexts: Array<{ paused: () => boolean }> = [];
     const build = (_key: ShapeKey, _id: string, context: { paused: () => boolean }) => {
       contexts.push(context);
@@ -136,6 +136,7 @@ describe('syncRegistry', () => {
     for (const t of ['t2', 't3', 't4', 't5']) paused.get(team('issues', t));
     const release = paused.hold(team('issues'));
     release();
+    await Promise.resolve();
     expect(contexts[before]?.paused()).toBe(true);
     expect(contexts[before + 1]?.paused()).toBe(false);
   });
@@ -366,6 +367,23 @@ describe('live shape budget', () => {
     registry.get(team('issues', 't2'));
     registry.hold(team('issues', 't2'));
     expect(overBudget).toHaveBeenCalledTimes(1);
+  });
+
+  it('a reader that lets go and reads again in the same tick keeps the shape, also over the budget', async () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    open(registry);
+    registry.get(team('issues', 't0'));
+    registry.hold(team('issues', 't0'));
+    const fake = registry.get(team('issues', 't1'));
+    expect(registry.liveCount()).toBe(MAX_LIVE_SHAPES + 1);
+    // What a development render does to an effect: it ends the effect and starts it again at once, with a live query
+    // still bound to the open instance, which must not be replaced under it.
+    registry.hold(team('issues', 't1'))();
+    registry.hold(team('issues', 't1'));
+    await Promise.resolve();
+    expect(fake.cleaned).toBe(0);
+    expect(registry.get(team('issues', 't1'))).toBe(fake);
   });
 
   it('a reader of a restarted shape does not pause the new instance when it lets go of the old one', async () => {
