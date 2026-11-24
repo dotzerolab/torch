@@ -37,7 +37,7 @@ async function memberId(role: 'admin' | 'member' | 'guest'): Promise<string> {
 async function open(
   browser: Browser,
   baseURL: string | undefined,
-  role: 'owner' | 'member' | 'guest',
+  role: 'owner' | 'admin' | 'member' | 'guest',
 ) {
   const context = await browser.newContext({ baseURL });
   await openSessionAs(context, baseURL, role);
