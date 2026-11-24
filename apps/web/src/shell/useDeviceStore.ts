@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { openWorkspaceStore, persistenceFor } from '../sync/persistence.ts';
 import { leadWorkspace, stopWorkspace, syncRegistry } from '../sync/shapes.ts';
+import { isSigningOut } from '../sync/signing-out.ts';
 import { claimRole, leaveWorkspace, onPromoted, roleOf } from '../sync/tabs.ts';
 
 /**
@@ -18,6 +19,8 @@ export function useDeviceStore(workspaceId: string): boolean {
   useEffect(() => {
     let live = true;
     const lead = async () => {
+      // The device copy is being wiped: opening its files again would only hold them open under the wipe.
+      if (isSigningOut()) return;
       await openWorkspaceStore(workspaceId).catch(() => {});
       if (!live) return;
       leadWorkspace(workspaceId);
@@ -27,7 +30,7 @@ export function useDeviceStore(workspaceId: string): boolean {
       if (live) setSettled(true);
     });
     const stopPromotion = onPromoted(workspaceId, () => {
-      void lead().then(() => live && syncRegistry.promote(workspaceId));
+      void lead().then(() => live && !isSigningOut() && syncRegistry.promote(workspaceId));
     });
     // A page restored from the back/forward cache lost its database connection (the worker ends on `pagehide`): start over.
     const onPageShow = (event: PageTransitionEvent) => {

@@ -48,11 +48,13 @@ vi.mock('../sync/shapes.ts', () => ({
   },
 }));
 
+import { markSigningOut, resetSigningOut } from '../sync/signing-out.ts';
 import { useDeviceStore } from './useDeviceStore.ts';
 
 describe('useDeviceStore', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetSigningOut();
     open.calls = 0;
     tabs.role = 'leader';
     tabs.led = [];
@@ -111,5 +113,20 @@ describe('useDeviceStore', () => {
     expect(tabs.stopped).toEqual(['w5']);
     await act(async () => {});
     expect(tabs.released).toBe(1);
+  });
+
+  it('does not open the store of a workspace, as leader or as promoted tab, while the person signs out', async () => {
+    markSigningOut();
+    const { result } = renderHook(() => useDeviceStore('w6'));
+    await act(async () => {});
+    expect(result.current).toBe(true);
+    tabs.role = 'follower';
+    renderHook(() => useDeviceStore('w7'));
+    await act(async () => {});
+    tabs.role = 'leader';
+    await act(async () => tabs.promote());
+    expect(open.calls).toBe(0);
+    expect(tabs.led).toEqual([]);
+    expect(tabs.promoted).toEqual([]);
   });
 });
