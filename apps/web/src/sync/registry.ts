@@ -115,6 +115,11 @@ export type RegistryHooks = {
    * so a leader that took over from another tab finds the id its predecessor used here.
    */
   storedGeneration?: (key: ShapeKey, baseId: string) => number;
+  /**
+   * Called when a reader takes a team shape and the page is then over its budget (`MAX_LIVE_SHAPES`): whatever is open for
+   * no screen of this tab (a shape a follower tab reads) must close to make room.
+   */
+  overBudget?: () => void;
 };
 
 export function createRegistry<F extends Factories>(factories: F, hooks: RegistryHooks = {}) {
@@ -283,6 +288,7 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     holds.set(k, (holds.get(k) ?? 0) + 1);
     clearTimeout(pauseTimers.get(k));
     pauseTimers.delete(k);
+    if (entries.size > MAX_LIVE_SHAPES) hooks.overBudget?.();
     let released = false;
     return () => {
       if (released) return;
@@ -311,6 +317,22 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
   /** How many shapes the page has open. */
   function liveCount(): number {
     return entries.size;
+  }
+
+  /** Is the shape running on this page (an instance exists)? */
+  function isOpen(key: ShapeKey): boolean {
+    return entries.has(keyOf(key));
+  }
+
+  /** How many readers hold a team shape. */
+  function holdCount(key: ShapeKey): number {
+    return holds.get(keyOf(key)) ?? 0;
+  }
+
+  /** Ends a team shape now, unless a reader holds it. It starts again, under the same id, when it is next read. */
+  function pauseNow(key: ShapeKey) {
+    if (!isTeamKey(key) || holds.has(keyOf(key))) return;
+    pause(key);
   }
 
   /** `listener` hears every settle of the current instance of a shape of this kind (any workspace). */
@@ -346,6 +368,9 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     get,
     hold,
     liveCount,
+    isOpen,
+    holdCount,
+    pauseNow,
     restart,
     dropTeam,
     reinstateTeam,

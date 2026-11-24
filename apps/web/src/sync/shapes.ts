@@ -1,6 +1,7 @@
 // The page's registry of live shapes and the hook that reads one. A shape that restarts (access changed) is a new
 // collection: `useShape` re-renders its reader with the new instance, so live queries re-bind to it.
 import { collectionFactories } from './collections.ts';
+import { createDemandBudget } from './demand-budget.ts';
 import { hubFor } from './mirror.ts';
 import { outbox } from './outbox.ts';
 import {
@@ -12,6 +13,7 @@ import {
 import {
   type CollectionFor,
   createRegistry,
+  MAX_LIVE_SHAPES,
   parseShapeId,
   type ShapeKey,
   useShapeFrom,
@@ -30,7 +32,28 @@ export const syncRegistry = createRegistry(collectionFactories, {
   onShapeRestarted: (key, baseId, keepId) => {
     void deleteShapeRows(key.workspaceId, baseId, keepId).catch(() => {});
   },
+  // A screen of this tab needs a connection: what is open only for another tab gives way.
+  overBudget: () => demandBudget.makeRoom(),
 });
+
+/** How often a shape a follower tab asked for, and that found no free slot, looks again. */
+const DEMAND_RETRY_MS = 1000;
+
+// The shapes this tab opens for follower tabs share the budget of its own screens, so a write always finds a connection.
+const demandBudget = createDemandBudget(
+  {
+    isOpen: (key) => syncRegistry.isOpen(key),
+    liveCount: () => syncRegistry.liveCount(),
+    holdCount: (key) => syncRegistry.holdCount(key),
+    open: (key) => {
+      void (syncRegistry.get(key) as { preload(): Promise<void> }).preload().catch(() => {});
+    },
+    hold: (key) => syncRegistry.hold(key),
+    pauseNow: (key) => syncRegistry.pauseNow(key),
+    subscribe: (listener) => syncRegistry.subscribe(listener),
+  },
+  { max: MAX_LIVE_SHAPES, retryMs: DEMAND_RETRY_MS },
+);
 
 /** The collection of a shape, for render: re-reads when the shape restarts or its team is dropped. */
 export function useShape<K extends ShapeKey>(key: K): CollectionFor<typeof collectionFactories, K> {
@@ -48,27 +71,8 @@ export const membersCollection = (workspaceId: string) =>
  * held here as if a screen of this tab read it, and a follower's write waits here for the txid to come back.
  */
 export function leadWorkspace(workspaceId: string) {
-  const hold = (shape: string) => {
-    const key = parseShapeId(shape);
-    let released = false;
-    let release = () => {};
-    const open = () => {
-      // The instance may have been replaced (a restart): the new one must run too.
-      void (syncRegistry.get(key) as { preload(): Promise<void> }).preload().catch(() => {});
-    };
-    open();
-    release = syncRegistry.hold(key);
-    const stop = syncRegistry.subscribe(() => {
-      if (!released) open();
-    });
-    return () => {
-      released = true;
-      stop();
-      release();
-    };
-  };
   hubFor(workspaceId).lead({
-    demand: hold,
+    demand: demandBudget.hold,
     awaitTxId: (shape, txid, timeoutMs) => {
       const collection = syncRegistry.get(parseShapeId(shape)) as {
         utils?: { awaitTxId?: (txid: number, timeoutMs?: number) => Promise<unknown> };

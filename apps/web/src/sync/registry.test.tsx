@@ -327,6 +327,47 @@ describe('live shape budget', () => {
     expect(registry.liveCount()).toBe(MAX_LIVE_SHAPES);
   });
 
+  it('tells whether a shape is open and how many readers hold it', () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    expect(registry.isOpen(team('issues'))).toBe(false);
+    registry.get(team('issues'));
+    expect(registry.isOpen(team('issues'))).toBe(true);
+    expect(registry.holdCount(team('issues'))).toBe(0);
+    const first = registry.hold(team('issues'));
+    registry.hold(team('issues'));
+    expect(registry.holdCount(team('issues'))).toBe(2);
+    first();
+    expect(registry.holdCount(team('issues'))).toBe(1);
+  });
+
+  it('pauseNow ends a team shape nobody holds at once, and leaves a held one alone', async () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    const free = registry.get(team('issues', 'free'));
+    const kept = registry.get(team('issues', 'kept'));
+    registry.hold(team('issues', 'kept'));
+    registry.pauseNow(team('issues', 'free'));
+    registry.pauseNow(team('issues', 'kept'));
+    await Promise.resolve();
+    expect(free.cleaned).toBe(1);
+    expect(kept.cleaned).toBe(0);
+    expect(registry.isOpen(team('issues', 'free'))).toBe(false);
+  });
+
+  it('asks the page to make room when a reader takes the page above its budget', () => {
+    const { factories } = fakeFactories();
+    const overBudget = vi.fn();
+    const registry = createRegistry(factories, { overBudget });
+    open(registry);
+    registry.get(team('issues', 't1'));
+    registry.hold(team('issues', 't1'));
+    expect(overBudget).not.toHaveBeenCalled();
+    registry.get(team('issues', 't2'));
+    registry.hold(team('issues', 't2'));
+    expect(overBudget).toHaveBeenCalledTimes(1);
+  });
+
   it('a reader of a restarted shape does not pause the new instance when it lets go of the old one', async () => {
     const { factories } = fakeFactories();
     const registry = createRegistry(factories);
