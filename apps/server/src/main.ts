@@ -78,7 +78,7 @@ const server = serve({ fetch: app.fetch, port });
 console.info(`server listening on port ${port}`);
 
 // Expired sign-in tokens, old sessions and dead invitations: once at startup, then every 6 hours (counts are logged).
-const stopCleanup = db ? startCleanupSchedule(db.orm) : undefined;
+const stopCleanup = db ? startCleanupSchedule(db.orm, { storage: files }) : undefined;
 
 function shutdown() {
   stopCleanup?.();

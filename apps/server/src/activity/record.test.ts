@@ -274,6 +274,8 @@ describe.skipIf(!databaseUrl)('recordIssueChange', () => {
     ['subscriber', 'removed', 'issue.subscriber_removed', 'subscribers'],
     ['link', 'added', 'issue.link_added', 'links'],
     ['link', 'removed', 'issue.link_removed', 'links'],
+    ['attachment', 'added', 'issue.attachment_added', 'attachments'],
+    ['attachment', 'removed', 'issue.attachment_removed', 'attachments'],
   ] as const)('a %s %s writes %s and one issue.updated event', async (kind, op, type, key) => {
     const { db, f, first, rows } = await setup();
     const data = { id: '44444444-4444-4444-8444-444444444444', note: 'x' };
@@ -289,6 +291,31 @@ describe.skipIf(!databaseUrl)('recordIssueChange', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ type: 'issue.updated' });
     expect(events[0]?.data.changes).toEqual({ [key]: { [op]: [data] } });
+  });
+
+  it('an attachment change carries the file name, size and type, never a storage key', async () => {
+    const { db, f, first, rows } = await setup();
+    const data = {
+      attachmentId: '55555555-5555-4555-8555-555555555555',
+      fileName: 'report.pdf',
+      size: 2048,
+      contentType: 'application/pdf',
+    };
+
+    await db.orm.transaction((tx) =>
+      recordIssueChange(tx, actorOf(f), {
+        kind: 'attachment',
+        issueId: first.id,
+        op: 'added',
+        data,
+      }),
+    );
+
+    const { activity, events } = await rows();
+    expect(activity[0]?.toValue).toEqual(data);
+    expect(events[0]?.data.changes).toEqual({ attachments: { added: [data] } });
+    expect(JSON.stringify([activity, events])).not.toContain('storage');
+    expect(JSON.stringify([activity, events])).not.toContain('workspaces/');
   });
 
   it('archiving writes issue.archived; unarchiving writes issue.updated with the archive timestamp', async () => {

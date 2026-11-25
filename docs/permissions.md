@@ -35,6 +35,9 @@ Three rules hold for every role:
 | Edit their own comment                                          |  yes  |  yes  |  yes   |  yes  |
 | Delete their own comment                                        |  yes  |  yes  |  yes   |  yes  |
 | Delete another person's comment                                 |  yes  |  yes  |   no   |  no   |
+| Attach files to an issue they can see, and read its files       |  yes  |  yes  |  yes   |  yes  |
+| Remove a file they uploaded                                     |  yes  |  yes  |  yes   |  yes  |
+| Remove a file somebody else uploaded                            |  yes  |  yes  |  yes   |  no   |
 | Add or remove another person as a subscriber                    |  yes  |  yes  |  yes   |  yes  |
 | Read the labels and workflow states of the teams they can see   |  yes  |  yes  |  yes   |  yes  |
 | Create, edit and archive labels of a team they can see          |  yes  |  yes  |  yes   |  no   |
@@ -69,6 +72,10 @@ Issue rules in short, all inside the teams a person can see (a team they cannot 
 - Comments follow the issue's team, guests included. Only the author edits a comment; the author, an owner or an admin
   deletes it (the thread keeps a tombstone). Comments are read-only on an archived issue; see the
   [comment API](api/comments.md).
+- Files follow the issue's team, guests included. The uploader, or anybody but a guest, removes a file. A file is read
+  through a link that is minted per request after the permission check and lasts 60 seconds, so losing access to the
+  team ends access to its files at once. Uploads are read-only on an archived issue; see the
+  [attachment API](api/attachments.md).
 - Nothing is deleted. Issues, labels and workflow states are archived; see the [issue API](api/issues.md).
 
 ## Teams: public and private

@@ -631,6 +631,26 @@ const HTTP_ROWS: HttpRow[] = [
   http('comments: unreact (public team)', 200, 200, 200, 200),
   http('comments: history (public team)', 200, 200, 200, 200),
 
+  // Attachments follow the issue's team, for every role (a guest attaches in the teams they belong to). The uploader
+  // removes their own file; anybody but a guest removes another person's. A file is read through a redirect (302) to a
+  // signed URL, minted only for somebody who sees the team.
+  http('attachments: init (public team)', 201, 201, 201, 201),
+  http('attachments: list (public team)', 200, 200, 200, 200),
+  http('attachments: complete (public team)', 200, 200, 200, 200),
+  http('attachments: read (public team)', 302, 302, 302, 302),
+  http('attachments: remove (public team)', 200, 200, 200, 200),
+  http('attachments: init (private team)', 201, 404, 201, 404),
+  http('attachments: list (private team)', 200, 404, 200, 404),
+  http('attachments: complete (private team)', 200, 404, 200, 404),
+  http('attachments: read (private team)', 302, 404, 302, 404),
+  http('attachments: remove (private team)', 200, 404, 200, 404),
+  http('attachments: init (public team with the owner only)', 201, 201, 201, 404),
+  http('attachments: list (public team with the owner only)', 200, 200, 200, 404),
+  http('attachments: complete (public team with the owner only)', 200, 200, 200, 404),
+  http('attachments: read (public team with the owner only)', 302, 302, 302, 404),
+  http('attachments: remove (public team with the owner only)', 200, 200, 200, 404),
+  http("attachments: remove other's (public team)", 200, 200, 200, 403),
+
   // Sync shapes: every role reads the team list and the member list (filtered by the server); a team's own shapes
   // follow the visibility of the team.
   // Labels: the workspace's are for owners and admins; a team's for anybody but a guest who sees the team. Everybody
@@ -718,7 +738,9 @@ describe('permission matrix over HTTP: completeness', () => {
     for (const r of HTTP_ROWS) {
       expect(Object.keys(r.status).sort(), r.endpoint).toEqual([...ROLES].sort());
       for (const role of ROLES) {
-        expect([200, 201, 202, 403, 404], `${r.endpoint} as ${role}`).toContain(r.status[role]);
+        expect([200, 201, 202, 302, 403, 404], `${r.endpoint} as ${role}`).toContain(
+          r.status[role],
+        );
       }
     }
   });

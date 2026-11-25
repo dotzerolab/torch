@@ -4,6 +4,7 @@
 // The cross-workspace tests and the HTTP rows of the permission matrix both read this file. A new route needs a case
 // here, or the coverage test in `cross-workspace.test.ts` fails.
 import {
+  attachment,
   comment,
   invite,
   issue,
@@ -22,6 +23,7 @@ import { type App, createApp } from '../app.ts';
 import { createSessionActorResolver } from '../auth/resolver.ts';
 import { generateToken, hashToken } from '../auth/tokens.ts';
 import type { Db, Orm } from '../db.ts';
+import { createFakeStorage, type FakeStorage } from '../files/fake-storage.ts';
 import { createIssue } from '../issues/create-issue.ts';
 import { createMemoryMailer } from '../mail/mailer.ts';
 import { loadClientActor } from '../permissions/load-actor.ts';
@@ -79,6 +81,18 @@ export type Ids = {
    */
   commentId: string;
   otherCommentId: string;
+  /**
+   * Files of each team, on an issue of their own that is new for the attempt (so they never pile up on the shared
+   * issue): a pending upload of the member who makes the call, with its object in place and ready to complete, and a
+   * ready file of the same member. `otherFileId` is a ready file of the public team uploaded by the workspace owner.
+   */
+  attachmentId: string;
+  privateAttachmentId: string;
+  ownerOnlyAttachmentId: string;
+  fileId: string;
+  privateFileId: string;
+  ownerOnlyFileId: string;
+  otherFileId: string;
   /** A member (role `member`) who belongs to all three teams. */
   memberId: string;
   /** A member (role `member`) who belongs to no team. */
@@ -155,6 +169,13 @@ export const PLACEHOLDER_IDS: Ids = {
   workspaceLabelId: ':labelId',
   commentId: ':commentId',
   otherCommentId: ':commentId',
+  attachmentId: ':attachmentId',
+  privateAttachmentId: ':attachmentId',
+  ownerOnlyAttachmentId: ':attachmentId',
+  fileId: ':attachmentId',
+  privateFileId: ':attachmentId',
+  ownerOnlyFileId: ':attachmentId',
+  otherFileId: ':attachmentId',
   stateId: ':stateId',
   privateStateId: ':stateId',
   ownerOnlyStateId: ':stateId',
@@ -197,6 +218,8 @@ type RelationKey = 'relationId' | 'privateRelationId' | 'ownerOnlyRelationId';
 type LinkKey = 'linkId' | 'privateLinkId' | 'ownerOnlyLinkId';
 type LabelKey = 'labelId' | 'privateLabelId' | 'ownerOnlyLabelId';
 type StateKey = 'stateId' | 'privateStateId' | 'ownerOnlyStateId';
+type AttachmentKey = 'attachmentId' | 'privateAttachmentId' | 'ownerOnlyAttachmentId';
+type FileKey = 'fileId' | 'privateFileId' | 'ownerOnlyFileId';
 
 /**
  * The three teams of a world with who may see (and edit the issues of) each and who may manage it, as the rules say:
@@ -211,6 +234,8 @@ const TEAMS: readonly {
   link: LinkKey;
   teamLabel: LabelKey;
   state: StateKey;
+  attachment: AttachmentKey;
+  file: FileKey;
   label: string;
   see: Rule;
   manage: Rule;
@@ -225,6 +250,8 @@ const TEAMS: readonly {
     link: 'linkId',
     teamLabel: 'labelId',
     state: 'stateId',
+    attachment: 'attachmentId',
+    file: 'fileId',
     label: 'public team',
     see: { minRole: 'guest' },
     manage: { minRole: 'admin' },
@@ -238,6 +265,8 @@ const TEAMS: readonly {
     link: 'privateLinkId',
     teamLabel: 'privateLabelId',
     state: 'privateStateId',
+    attachment: 'privateAttachmentId',
+    file: 'privateFileId',
     label: 'private team',
     see: { minRole: 'owner', alsoAllowed: ['member'] },
     manage: { minRole: 'owner' },
@@ -251,6 +280,8 @@ const TEAMS: readonly {
     link: 'ownerOnlyLinkId',
     teamLabel: 'ownerOnlyLabelId',
     state: 'ownerOnlyStateId',
+    attachment: 'ownerOnlyAttachmentId',
+    file: 'ownerOnlyFileId',
     label: 'public team with the owner only',
     see: { minRole: 'member' },
     manage: { minRole: 'admin' },
@@ -596,6 +627,47 @@ export const ENDPOINTS: EndpointCase[] = [
     minRole: 'guest',
   },
 
+  // ---- attachments: they follow the issue's team; the uploader (or anybody but a guest) removes ----
+  ...TEAMS.flatMap(({ issue: key, attachment: pending, file, label, see }): EndpointCase[] => [
+    {
+      name: `attachments: init (${label})`,
+      method: 'POST',
+      path: (ids) => `${api(ids)}/issues/${ids[key]}/attachments`,
+      body: (ids: Ids) => ({ fileName: `f-${ids.uid}.png`, contentType: 'image/png', size: 64 }),
+      ...see,
+    },
+    {
+      name: `attachments: list (${label})`,
+      method: 'GET',
+      path: (ids) => `${api(ids)}/issues/${ids[key]}/attachments`,
+      ...see,
+    },
+    {
+      name: `attachments: complete (${label})`,
+      method: 'POST',
+      path: (ids) => `${api(ids)}/attachments/${ids[pending]}/complete`,
+      ...see,
+    },
+    {
+      name: `attachments: read (${label})`,
+      method: 'GET',
+      path: (ids) => `${api(ids)}/attachments/${ids[file]}/file`,
+      ...see,
+    },
+    {
+      name: `attachments: remove (${label})`,
+      method: 'DELETE',
+      path: (ids) => `${api(ids)}/attachments/${ids[file]}`,
+      ...see,
+    },
+  ]),
+  {
+    name: "attachments: remove other's (public team)",
+    method: 'DELETE',
+    path: (ids) => `${api(ids)}/attachments/${ids.otherFileId}`,
+    minRole: 'member',
+  },
+
   // ---- labels and workflow states ----
   { name: 'labels: list', method: 'GET', path: (ids) => `${api(ids)}/labels`, minRole: 'guest' },
   {
@@ -826,6 +898,7 @@ export async function newAttempt(
   ws: Workspace,
   role: Role,
   needs: ReadonlySet<keyof Ids>,
+  files: FakeStorage,
 ): Promise<Attempt> {
   const { workspaceId } = ws;
   const actor = await addMember(orm, workspaceId, role, {
@@ -858,6 +931,13 @@ export async function newAttempt(
     workspaceLabelId: UNUSED,
     commentId: UNUSED,
     otherCommentId: UNUSED,
+    attachmentId: UNUSED,
+    privateAttachmentId: UNUSED,
+    ownerOnlyAttachmentId: UNUSED,
+    fileId: UNUSED,
+    privateFileId: UNUSED,
+    ownerOnlyFileId: UNUSED,
+    otherFileId: UNUSED,
     stateId: UNUSED,
     privateStateId: UNUSED,
     ownerOnlyStateId: UNUSED,
@@ -990,6 +1070,40 @@ export async function newAttempt(
     ids.otherCommentId = await commentBy(ws.ownerId, `Comment of the owner ${uid}`);
   }
 
+  // A file of `uploader` on a new issue of the team (files never pile up on the shared issue), with its object in the
+  // storage as a finished upload leaves it.
+  const fileFor = async (name: TeamName, uploaderId: string, status: 'pending' | 'ready') => {
+    const holder = await peerOf(name);
+    const id = crypto.randomUUID();
+    const storageKey = `workspaces/${workspaceId}/attachments/${id}`;
+    const bytes = new Uint8Array(64);
+    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    files.put(storageKey, bytes, 'image/png');
+    await orm.insert(attachment).values({
+      id,
+      workspaceId,
+      teamId: ws.teams[name],
+      issueId: holder,
+      uploaderId,
+      fileName: 'seed.png',
+      contentType: 'image/png',
+      sizeBytes: 64,
+      storageKey,
+      status,
+      readyAt: status === 'ready' ? new Date() : null,
+    });
+    return id;
+  };
+  for (const [name, pendingKey, fileKey] of [
+    ['eng', 'attachmentId', 'fileId'],
+    ['ops', 'privateAttachmentId', 'privateFileId'],
+    ['pub', 'ownerOnlyAttachmentId', 'ownerOnlyFileId'],
+  ] as const) {
+    if (needs.has(pendingKey)) ids[pendingKey] = await fileFor(name, actor.id, 'pending');
+    if (needs.has(fileKey)) ids[fileKey] = await fileFor(name, actor.id, 'ready');
+  }
+  if (needs.has('otherFileId')) ids.otherFileId = await fileFor('eng', ws.ownerId, 'ready');
+
   if (needs.has('memberId')) {
     const added = await addMember(orm, workspaceId, 'member', {
       teamIds: [ws.teams.eng, ws.teams.ops, ws.teams.pub],
@@ -1024,6 +1138,8 @@ export type World = {
  * `db`, and two workspaces. Call once per test file; attempts create their own rows.
  */
 export async function createWorld(db: Db): Promise<World> {
+  // The files of the world live in memory: the same contract as the S3 storage, no network.
+  const files = createFakeStorage();
   const app = createApp({
     brand: testBrand,
     db,
@@ -1031,6 +1147,7 @@ export async function createWorld(db: Db): Promise<World> {
     mailer: createMemoryMailer(),
     auth: createSessionActorResolver({ orm: db.orm, appUrl: ORIGIN }),
     electric: { url: 'http://electric.test:3000', secret: 'test-secret' },
+    files,
     fetchUpstream: async () =>
       new Response('[{"headers":{"control":"up-to-date"}}]', {
         status: 200,
@@ -1044,7 +1161,7 @@ export async function createWorld(db: Db): Promise<World> {
     a,
     b,
     app,
-    attempt: (ws, role, c) => newAttempt(db.orm, ws, role, c ? idsUsedBy(c) : new Set()),
+    attempt: (ws, role, c) => newAttempt(db.orm, ws, role, c ? idsUsedBy(c) : new Set(), files),
     async send(c, ids, cookie) {
       const body = bodyOf(c, ids);
       const headers: Record<string, string> = { origin: ORIGIN };

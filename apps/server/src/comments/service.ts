@@ -8,7 +8,7 @@
 // a person who sees the issue but may not do this (editing another person's comment). An archived issue is read-only.
 // The issue's `updated_at` moves with every change, in the same transaction: the web refreshes its snapshot reads of
 // comments from that change.
-import { type CommentRow, comment, commentEdit, issue, team } from '@torch/shared/db/schema';
+import { type CommentRow, comment, commentEdit } from '@torch/shared/db/schema';
 import {
   type CommentCreateInput,
   type CommentEditInput,
@@ -20,13 +20,13 @@ import {
   canComment,
   canDeleteComment,
   canEditComment,
-  canSeeTeam,
   type TeamAccess,
 } from '@torch/shared/permissions';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import type { Orm, Tx } from '../db.ts';
 import { type IssueApiError, IssueRefusal, invalidReference, refusal } from '../issues/errors.ts';
 import type { ChangeResult } from '../issues/join-changes.ts';
+import { readableIssue } from '../issues/readable-issue.ts';
 import { type Failure, lockEditableIssue, refuse, touchIssue } from '../issues/update-issue.ts';
 import { claimIdempotency, requestHashOf, storeIdempotent } from '../mutations/idempotency.ts';
 import { currentTxid } from '../mutations/txid.ts';
@@ -92,22 +92,6 @@ async function writeOnIssue<T>(
     if (error instanceof IssueRefusal) return failureOf(error.error);
     throw error;
   }
-}
-
-/** The team access of an issue for a read: null when the issue does not exist or the actor cannot see its team. */
-async function readableIssue(
-  orm: Orm,
-  actor: ClientActor,
-  issueId: string,
-): Promise<TeamAccess | null> {
-  const [subject] = await orm
-    .select({ teamId: team.id, private: team.private })
-    .from(issue)
-    .innerJoin(team, and(eq(team.workspaceId, issue.workspaceId), eq(team.id, issue.teamId)))
-    .where(and(eq(issue.workspaceId, actor.workspaceId), eq(issue.id, issueId)));
-  if (!subject) return null;
-  const access = { id: subject.teamId, workspaceId: actor.workspaceId, private: subject.private };
-  return canSeeTeam(actor, access) ? access : null;
 }
 
 /** The issue a comment belongs to, within the actor's workspace; null for an unknown or foreign id. */

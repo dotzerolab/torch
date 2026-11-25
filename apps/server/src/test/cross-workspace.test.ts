@@ -42,7 +42,8 @@ if (!databaseUrl) {
 }
 
 const UNKNOWN_UUID = '99999999-9999-4999-8999-999999999999';
-const isSuccess = (status: number) => status >= 200 && status < 300;
+// A success is a 2xx or the redirect of a file read (the signed URL).
+const isSuccess = (status: number) => status >= 200 && status < 400;
 
 // ---- every route has a case ----
 

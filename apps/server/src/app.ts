@@ -8,6 +8,7 @@ import { createAuthRoutes } from './auth/routes.ts';
 import { buildManifest } from './brand/manifest.ts';
 import { createCommentRoutes } from './comments/routes.ts';
 import type { Db } from './db.ts';
+import { createAttachmentRoutes } from './files/routes.ts';
 import type { FileStorage } from './files/storage.ts';
 import { createInviteRoutes } from './invites/routes.ts';
 import { createIssueRoutes } from './issues/routes.ts';
@@ -165,6 +166,10 @@ export function createApp(deps: AppDeps): App {
   if (deps.db?.orm && deps.auth) {
     app.route('/api', createIssueRoutes({ orm: deps.db.orm, auth: deps.auth }));
     app.route('/api', createCommentRoutes({ orm: deps.db.orm, auth: deps.auth }));
+    app.route(
+      '/api',
+      createAttachmentRoutes({ orm: deps.db.orm, auth: deps.auth, files: deps.files }),
+    );
     app.route('/api', createLabelRoutes({ orm: deps.db.orm, auth: deps.auth }));
     app.route('/api', createWorkflowRoutes({ orm: deps.db.orm, auth: deps.auth }));
     app.route('/api', createMemberRoutes({ orm: deps.db.orm, auth: deps.auth, accessBus }));

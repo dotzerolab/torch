@@ -1,7 +1,15 @@
 import { randomBytes } from 'node:crypto';
-import { idempotencyKey, invite, inviteTeam, loginToken, session } from '@torch/shared/db/schema';
+import {
+  attachment,
+  idempotencyKey,
+  invite,
+  inviteTeam,
+  loginToken,
+  session,
+} from '@torch/shared/db/schema';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Orm } from '../db.ts';
+import { createFakeStorage } from '../files/fake-storage.ts';
 import {
   createWorkspaceFixture,
   type WorkspaceFixture,
@@ -199,8 +207,20 @@ describe.skipIf(!databaseUrl)('cleanupExpiredRows', () => {
       const first = await cleanupExpiredRows(db.orm, NOW);
       const second = await cleanupExpiredRows(db.orm, NOW);
 
-      expect(first).toEqual({ loginTokens: 4, sessions: 6, invites: 4, idempotencyKeys: 0 });
-      expect(second).toEqual({ loginTokens: 0, sessions: 0, invites: 0, idempotencyKeys: 0 });
+      expect(first).toEqual({
+        loginTokens: 4,
+        sessions: 6,
+        invites: 4,
+        idempotencyKeys: 0,
+        pendingAttachments: 0,
+      });
+      expect(second).toEqual({
+        loginTokens: 0,
+        sessions: 0,
+        invites: 0,
+        idempotencyKeys: 0,
+        pendingAttachments: 0,
+      });
     });
   });
 
@@ -225,6 +245,97 @@ describe.skipIf(!databaseUrl)('cleanupExpiredRows', () => {
         sessions: 0,
         invites: 0,
         idempotencyKeys: 0,
+        pendingAttachments: 0,
+      });
+    });
+  });
+
+  describe('uploads that never finished', () => {
+    const HOUR = 60 * MINUTE;
+    async function rowsOf(db: { orm: Orm }, f: WorkspaceFixture) {
+      const issueRow = f.issues.eng[0];
+      if (!issueRow) throw new Error('fixture has no ENG issue');
+      const make = async (label: string, over: Partial<typeof attachment.$inferInsert>) => {
+        const [row] = await db.orm
+          .insert(attachment)
+          .values({
+            workspaceId: f.workspaceId,
+            teamId: f.teams.eng.id,
+            issueId: issueRow.id,
+            uploaderId: f.members.member.id,
+            fileName: `${label}.png`,
+            contentType: 'image/png',
+            sizeBytes: 10,
+            storageKey: `workspaces/${f.workspaceId}/attachments/${crypto.randomUUID()}`,
+            status: 'pending',
+            ...over,
+          })
+          .returning();
+        if (!row) throw new Error('attachment insert returned no row');
+        return row;
+      };
+      return {
+        stale: await make('stale', { createdAt: ago(25 * HOUR) }),
+        fresh: await make('fresh', { createdAt: ago(23 * HOUR) }),
+        ready: await make('ready', {
+          createdAt: ago(5 * DAY),
+          status: 'ready',
+          readyAt: ago(5 * DAY),
+        }),
+        queued: await make('queued', { createdAt: new Date(0) }),
+      };
+    }
+
+    it('removes pending uploads older than 24 hours and their objects, and keeps newer and ready ones', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const storage = createFakeStorage();
+        const rows = await rowsOf(db, f);
+        for (const row of Object.values(rows)) {
+          storage.put(row.storageKey, new Uint8Array([1]), 'image/png');
+        }
+
+        const first = await cleanupExpiredRows(db.orm, NOW, storage);
+        const second = await cleanupExpiredRows(db.orm, NOW, storage);
+
+        expect(first.pendingAttachments).toBe(2);
+        expect(second.pendingAttachments).toBe(0);
+        const left = await db.orm.select({ id: attachment.id }).from(attachment);
+        expect(left.map((row) => row.id).sort()).toEqual([rows.fresh.id, rows.ready.id].sort());
+        expect(storage.keys().sort()).toEqual(
+          [rows.fresh.storageKey, rows.ready.storageKey].sort(),
+        );
+      });
+    });
+
+    it('keeps the row of an object it could not remove, and tries again on the next run', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const storage = createFakeStorage();
+        const rows = await rowsOf(db, f);
+        storage.put(rows.queued.storageKey, new Uint8Array([1]), 'image/png');
+        storage.faults.remove = true;
+
+        const down = await cleanupExpiredRows(db.orm, NOW, storage);
+        storage.faults.remove = false;
+        const up = await cleanupExpiredRows(db.orm, NOW, storage);
+
+        expect(down.pendingAttachments).toBe(0);
+        expect(storage.keys()).toEqual([]);
+        expect(up.pendingAttachments).toBe(2);
+        expect(await db.orm.select().from(attachment)).toHaveLength(2);
+      });
+    });
+
+    it('leaves attachment rows alone when no storage is given', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        await rowsOf(db, f);
+
+        const counts = await cleanupExpiredRows(db.orm, NOW);
+
+        expect(counts.pendingAttachments).toBe(0);
+        expect(await db.orm.select().from(attachment)).toHaveLength(4);
       });
     });
   });
