@@ -31,6 +31,10 @@ Three rules hold for every role:
 | --------------------------------------------------------------- | :---: | :---: | :----: | :---: |
 | See and edit issues of the teams they can see                   |  yes  |  yes  |  yes   |  yes  |
 | Create issues; add or remove relations and links; subscribe     |  yes  |  yes  |  yes   |  yes  |
+| Comment, react and resolve threads on an issue they can see     |  yes  |  yes  |  yes   |  yes  |
+| Edit their own comment                                          |  yes  |  yes  |  yes   |  yes  |
+| Delete their own comment                                        |  yes  |  yes  |  yes   |  yes  |
+| Delete another person's comment                                 |  yes  |  yes  |   no   |  no   |
 | Add or remove another person as a subscriber                    |  yes  |  yes  |  yes   |  yes  |
 | Read the labels and workflow states of the teams they can see   |  yes  |  yes  |  yes   |  yes  |
 | Create, edit and archive labels of a team they can see          |  yes  |  yes  |  yes   |  no   |
@@ -62,6 +66,9 @@ Issue rules in short, all inside the teams a person can see (a team they cannot 
   team ids of either end. The related id of an issue in a hidden team is still visible, as an id alone.
 - Labels of a team: anybody but a guest who can see the team defines, edits and archives them. Labels of the workspace
   and the workflow states of a team: owners and admins. Guests read all of them.
+- Comments follow the issue's team, guests included. Only the author edits a comment; the author, an owner or an admin
+  deletes it (the thread keeps a tombstone). Comments are read-only on an archived issue; see the
+  [comment API](api/comments.md).
 - Nothing is deleted. Issues, labels and workflow states are archived; see the [issue API](api/issues.md).
 
 ## Teams: public and private

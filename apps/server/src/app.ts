@@ -6,6 +6,7 @@ import { csrfGuard } from './auth/csrf.ts';
 import { isSessionResolver } from './auth/resolver.ts';
 import { createAuthRoutes } from './auth/routes.ts';
 import { buildManifest } from './brand/manifest.ts';
+import { createCommentRoutes } from './comments/routes.ts';
 import type { Db } from './db.ts';
 import { createInviteRoutes } from './invites/routes.ts';
 import { createIssueRoutes } from './issues/routes.ts';
@@ -75,9 +76,9 @@ export function listRoutes(app: App): RouteInfo[] {
 // in front of every route, so an unauthenticated caller cannot make the process buffer a large body.
 const MAX_BODY_BYTES = 16 * 1024;
 
-// The issue routes take a description of up to 100000 characters, so they carry their own, larger limit (and sit
-// behind the session check before they read a byte of it).
-const ISSUE_PATH = /^\/api\/w\/[^/]+\/issues(\/|$)/;
+// The issue, comment and document routes take texts of up to 100000 characters, so each carries its own, larger limit
+// (and sits behind the session check before it reads a byte of it).
+const LARGE_BODY_PATH = /^\/api\/w\/[^/]+\/(issues|comments|documents)(\/|$)/;
 
 /** The SQLSTATE of a database error: `code` on the error or on the pg error that Drizzle wraps as its cause. */
 function databaseCode(error: Error): string | undefined {
@@ -114,7 +115,9 @@ export function createApp(deps: AppDeps): App {
     onError: (c) =>
       c.json({ error: 'invalid_input', message: 'The request body is too large.' }, 413),
   });
-  app.use('/api/*', (c, next) => (ISSUE_PATH.test(c.req.path) ? next() : smallBodies(c, next)));
+  app.use('/api/*', (c, next) =>
+    LARGE_BODY_PATH.test(c.req.path) ? next() : smallBodies(c, next),
+  );
 
   // A session slides forward when it is used; when the resolver says it did for this request, the cookie is sent
   // again with the new lifetime, so a browser in use stays signed in up to the 90-day ceiling.
@@ -158,6 +161,7 @@ export function createApp(deps: AppDeps): App {
 
   if (deps.db?.orm && deps.auth) {
     app.route('/api', createIssueRoutes({ orm: deps.db.orm, auth: deps.auth }));
+    app.route('/api', createCommentRoutes({ orm: deps.db.orm, auth: deps.auth }));
     app.route('/api', createLabelRoutes({ orm: deps.db.orm, auth: deps.auth }));
     app.route('/api', createWorkflowRoutes({ orm: deps.db.orm, auth: deps.auth }));
     app.route('/api', createMemberRoutes({ orm: deps.db.orm, auth: deps.auth, accessBus }));

@@ -4,6 +4,7 @@
 // The cross-workspace tests and the HTTP rows of the permission matrix both read this file. A new route needs a case
 // here, or the coverage test in `cross-workspace.test.ts` fails.
 import {
+  comment,
   invite,
   issue,
   issueLink,
@@ -72,6 +73,12 @@ export type Ids = {
   stateId: string;
   privateStateId: string;
   ownerOnlyStateId: string;
+  /**
+   * A comment on the first issue of the public team: one written by the member who makes the call, and one written by
+   * somebody else (the workspace owner). Both new for the attempt.
+   */
+  commentId: string;
+  otherCommentId: string;
   /** A member (role `member`) who belongs to all three teams. */
   memberId: string;
   /** A member (role `member`) who belongs to no team. */
@@ -146,6 +153,8 @@ export const PLACEHOLDER_IDS: Ids = {
   privateLabelId: ':labelId',
   ownerOnlyLabelId: ':labelId',
   workspaceLabelId: ':labelId',
+  commentId: ':commentId',
+  otherCommentId: ':commentId',
   stateId: ':stateId',
   privateStateId: ':stateId',
   ownerOnlyStateId: ':stateId',
@@ -177,6 +186,9 @@ export function idsUsedBy(c: EndpointCase): Set<keyof Ids> {
 
 const api = (ids: Ids) => `/api/w/${ids.workspaceId}`;
 const sync = (ids: Ids) => `/api/sync/w/${ids.workspaceId}`;
+/** The emoji segment of a reaction URL: the route parameter in the pattern, a real (URL-encoded) emoji in a request. */
+const emojiSegment = (ids: Ids) =>
+  ids.workspaceId === PLACEHOLDER_IDS.workspaceId ? ':emoji' : encodeURIComponent('👍');
 
 type TeamKey = 'teamId' | 'privateTeamId' | 'ownerOnlyTeamId';
 type IssueKey = 'issueId' | 'privateIssueId' | 'ownerOnlyIssueId';
@@ -511,6 +523,79 @@ export const ENDPOINTS: EndpointCase[] = [
     },
   ]),
 
+  // ---- comments: they follow the issue's team; the author edits, the author or an admin deletes ----
+  ...TEAMS.flatMap(({ issue: key, label, see }): EndpointCase[] => [
+    {
+      name: `comments: list (${label})`,
+      method: 'GET',
+      path: (ids) => `${api(ids)}/issues/${ids[key]}/comments`,
+      ...see,
+    },
+    {
+      name: `comments: create (${label})`,
+      method: 'POST',
+      path: (ids) => `${api(ids)}/issues/${ids[key]}/comments`,
+      body: (ids: Ids) => ({ body: `Comment ${ids.uid}` }),
+      ...see,
+    },
+  ]),
+  {
+    name: 'comments: edit own (public team)',
+    method: 'PATCH',
+    path: (ids) => `${api(ids)}/comments/${ids.commentId}`,
+    body: { body: 'Edited text' },
+    minRole: 'guest',
+  },
+  {
+    name: "comments: edit other's (public team)",
+    method: 'PATCH',
+    path: (ids) => `${api(ids)}/comments/${ids.otherCommentId}`,
+    body: { body: 'Edited text' },
+    minRole: 'none',
+  },
+  {
+    name: 'comments: delete own (public team)',
+    method: 'DELETE',
+    path: (ids) => `${api(ids)}/comments/${ids.commentId}`,
+    minRole: 'guest',
+  },
+  {
+    name: "comments: delete other's (public team)",
+    method: 'DELETE',
+    path: (ids) => `${api(ids)}/comments/${ids.otherCommentId}`,
+    minRole: 'admin',
+  },
+  {
+    name: 'comments: resolve (public team)',
+    method: 'POST',
+    path: (ids) => `${api(ids)}/comments/${ids.commentId}/resolve`,
+    minRole: 'guest',
+  },
+  {
+    name: 'comments: unresolve (public team)',
+    method: 'POST',
+    path: (ids) => `${api(ids)}/comments/${ids.commentId}/unresolve`,
+    minRole: 'guest',
+  },
+  {
+    name: 'comments: react (public team)',
+    method: 'PUT',
+    path: (ids) => `${api(ids)}/comments/${ids.commentId}/reactions/${emojiSegment(ids)}`,
+    minRole: 'guest',
+  },
+  {
+    name: 'comments: unreact (public team)',
+    method: 'DELETE',
+    path: (ids) => `${api(ids)}/comments/${ids.commentId}/reactions/${emojiSegment(ids)}`,
+    minRole: 'guest',
+  },
+  {
+    name: 'comments: history (public team)',
+    method: 'GET',
+    path: (ids) => `${api(ids)}/comments/${ids.commentId}/history`,
+    minRole: 'guest',
+  },
+
   // ---- labels and workflow states ----
   { name: 'labels: list', method: 'GET', path: (ids) => `${api(ids)}/labels`, minRole: 'guest' },
   {
@@ -771,6 +856,8 @@ export async function newAttempt(
     privateLabelId: UNUSED,
     ownerOnlyLabelId: UNUSED,
     workspaceLabelId: UNUSED,
+    commentId: UNUSED,
+    otherCommentId: UNUSED,
     stateId: UNUSED,
     privateStateId: UNUSED,
     ownerOnlyStateId: UNUSED,
@@ -883,6 +970,25 @@ export async function newAttempt(
     }
   }
   if (needs.has('workspaceLabelId')) ids.workspaceLabelId = await newLabelRow(null, `WL${uid}`);
+
+  const commentBy = async (authorId: string, body: string) => {
+    const [row] = await orm
+      .insert(comment)
+      .values({
+        workspaceId,
+        teamId: ws.teams.eng,
+        issueId: ws.issues.eng,
+        authorId,
+        body,
+      })
+      .returning({ id: comment.id });
+    if (!row) throw new Error('comment insert returned no row');
+    return row.id;
+  };
+  if (needs.has('commentId')) ids.commentId = await commentBy(actor.id, `Comment of ${uid}`);
+  if (needs.has('otherCommentId')) {
+    ids.otherCommentId = await commentBy(ws.ownerId, `Comment of the owner ${uid}`);
+  }
 
   if (needs.has('memberId')) {
     const added = await addMember(orm, workspaceId, 'member', {

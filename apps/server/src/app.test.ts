@@ -210,6 +210,54 @@ describe('request body limit on /api/*', () => {
   });
 });
 
+describe('body limits of the routes that take large bodies', () => {
+  const origin = 'http://app.example.test';
+  const untouchedOrm = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error('the database must not be touched');
+      },
+    },
+  ) as unknown as Orm;
+  // No session: a request that gets past the body limit reaches the route and is answered 401.
+  const app = createApp({
+    brand,
+    db: {
+      health: async () => ({ status: 'ok', walLevel: 'logical', replication: true }),
+      orm: untouchedOrm,
+    },
+    config: { appUrl: origin, trustProxy: false },
+    mailer: createMemoryMailer(),
+    auth: { resolveActor: async () => null },
+  });
+  const send = (path: string, method: string, bytes: number) =>
+    app.fetch(
+      new Request(`${origin}${path}`, {
+        method,
+        headers: { origin, 'content-type': 'application/json' },
+        body: JSON.stringify({ body: 'x'.repeat(bytes) }),
+      }),
+    );
+  const ws = crypto.randomUUID();
+  const id = crypto.randomUUID();
+
+  it.each([
+    ['POST', `/api/w/${ws}/issues/${id}/comments`],
+    ['PATCH', `/api/w/${ws}/comments/${id}`],
+  ])('%s %s takes a 100 KiB body to the route', async (method, path) => {
+    const res = await send(path, method, 100 * 1024);
+
+    expect(res.status).toBe(401);
+  });
+
+  it('a 100 KiB body to another route still answers 413', async () => {
+    const res = await send(`/api/w/${ws}/members`, 'POST', 100 * 1024);
+
+    expect(res.status).toBe(413);
+  });
+});
+
 describe('cookie-authenticated routes need the CSRF guard', () => {
   const origin = 'http://app.example.test';
   const db = {

@@ -613,6 +613,24 @@ const HTTP_ROWS: HttpRow[] = [
   http('issues: add link (public team with the owner only)', 201, 201, 201, 404),
   http('issues: remove link (public team with the owner only)', 200, 200, 200, 404),
 
+  // Comments follow the issue's team, for every role. The author edits their own comment (nobody edits another
+  // person's, the owner included: 403); the author deletes their own comment and an owner or admin anybody's.
+  http('comments: list (public team)', 200, 200, 200, 200),
+  http('comments: create (public team)', 201, 201, 201, 201),
+  http('comments: list (private team)', 200, 404, 200, 404),
+  http('comments: create (private team)', 201, 404, 201, 404),
+  http('comments: list (public team with the owner only)', 200, 200, 200, 404),
+  http('comments: create (public team with the owner only)', 201, 201, 201, 404),
+  http('comments: edit own (public team)', 200, 200, 200, 200),
+  http("comments: edit other's (public team)", 403, 403, 403, 403),
+  http('comments: delete own (public team)', 200, 200, 200, 200),
+  http("comments: delete other's (public team)", 200, 200, 403, 403),
+  http('comments: resolve (public team)', 200, 200, 200, 200),
+  http('comments: unresolve (public team)', 200, 200, 200, 200),
+  http('comments: react (public team)', 200, 200, 200, 200),
+  http('comments: unreact (public team)', 200, 200, 200, 200),
+  http('comments: history (public team)', 200, 200, 200, 200),
+
   // Sync shapes: every role reads the team list and the member list (filtered by the server); a team's own shapes
   // follow the visibility of the team.
   // Labels: the workspace's are for owners and admins; a team's for anybody but a guest who sees the team. Everybody
