@@ -2,8 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   type Actor,
   canAddSelfToTeam,
+  canAttach,
   canChangeMemberRole,
+  canComment,
   canDeactivateMember,
+  canDeleteComment,
+  canEditComment,
+  canEditDocuments,
   canEditIssues,
   canGrantRole,
   canInvite,
@@ -14,6 +19,8 @@ import {
   canManageTeamMembership,
   canManageTeams,
   canManageWorkflow,
+  canReadDocuments,
+  canRemoveAttachment,
   canSeeMember,
   canSeeMemberEmail,
   canSeeTeam,
@@ -134,6 +141,9 @@ describe('OBJECT_TYPES', () => {
       'issue',
       'label',
       'workflow_state',
+      'comment',
+      'attachment',
+      'document',
     ]);
   });
 });
@@ -471,5 +481,90 @@ describe('canManageLabels and canManageWorkflow', () => {
     expect(canManageWorkflow(actor('owner', []), team({ workspaceId: OTHER_WORKSPACE }))).toBe(
       false,
     );
+  });
+});
+
+describe('comments, attachments and documents', () => {
+  const OTHER = OTHER_MEMBER;
+  type Relation = 'in team' | 'public, not in team' | 'private, not in team' | 'other workspace';
+  const RELATIONS: Relation[] = [
+    'in team',
+    'public, not in team',
+    'private, not in team',
+    'other workspace',
+  ];
+  const world = (role: Role, relation: Relation) => ({
+    actor: actor(role, relation === 'in team' || relation === 'other workspace' ? [TEAM] : []),
+    team: team({
+      private: relation === 'private, not in team',
+      workspaceId: relation === 'other workspace' ? OTHER_WORKSPACE : WORKSPACE,
+    }),
+  });
+  // Who can see the team in each relation (a guest outside the team sees nothing): the base every rule builds on.
+  const sees = (role: Role, relation: Relation): boolean =>
+    relation === 'in team' || (relation === 'public, not in team' && role !== 'guest');
+
+  describe.each(ROLES)('as %s', (role) => {
+    it.each(RELATIONS)('comment and attach follow the team (%s)', (relation) => {
+      const { actor: a, team: t } = world(role, relation);
+
+      expect(canComment(a, t)).toBe(sees(role, relation));
+      expect(canAttach(a, t)).toBe(sees(role, relation));
+      expect(canReadDocuments(a, t)).toBe(sees(role, relation));
+    });
+
+    it.each(RELATIONS)(
+      'edit a comment: only the author, and only with sight of the team (%s)',
+      (relation) => {
+        const { actor: a, team: t } = world(role, relation);
+
+        expect(canEditComment(a, t, { authorId: SELF })).toBe(sees(role, relation));
+        expect(canEditComment(a, t, { authorId: OTHER })).toBe(false);
+      },
+    );
+
+    it.each(RELATIONS)('delete a comment: the author, or an owner or admin (%s)', (relation) => {
+      const { actor: a, team: t } = world(role, relation);
+      const staff = role === 'owner' || role === 'admin';
+
+      expect(canDeleteComment(a, t, { authorId: SELF })).toBe(sees(role, relation));
+      expect(canDeleteComment(a, t, { authorId: OTHER })).toBe(sees(role, relation) && staff);
+    });
+
+    it.each(RELATIONS)('remove a file: the uploader, or anyone but a guest (%s)', (relation) => {
+      const { actor: a, team: t } = world(role, relation);
+
+      expect(canRemoveAttachment(a, t, { uploaderId: SELF })).toBe(sees(role, relation));
+      expect(canRemoveAttachment(a, t, { uploaderId: OTHER })).toBe(
+        sees(role, relation) && role !== 'guest',
+      );
+    });
+
+    it.each(RELATIONS)(
+      'edit documents: anyone but a guest, with sight of the team (%s)',
+      (relation) => {
+        const { actor: a, team: t } = world(role, relation);
+
+        expect(canEditDocuments(a, t)).toBe(sees(role, relation) && role !== 'guest');
+      },
+    );
+  });
+
+  it('a guest comments and attaches in their team but cannot edit its documents', () => {
+    const guest = actor('guest', [TEAM]);
+
+    expect(canComment(guest, team())).toBe(true);
+    expect(canAttach(guest, team())).toBe(true);
+    expect(canReadDocuments(guest, team())).toBe(true);
+    expect(canEditDocuments(guest, team())).toBe(false);
+  });
+
+  it('an admin may delete another author comment, a member may not', () => {
+    expect(canDeleteComment(actor('admin', [TEAM]), team(), { authorId: OTHER })).toBe(true);
+    expect(canDeleteComment(actor('member', [TEAM]), team(), { authorId: OTHER })).toBe(false);
+  });
+
+  it('an owner is not allowed to edit another author comment', () => {
+    expect(canEditComment(actor('owner', [TEAM]), team(), { authorId: OTHER })).toBe(false);
   });
 });

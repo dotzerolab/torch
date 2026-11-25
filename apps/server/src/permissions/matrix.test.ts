@@ -12,9 +12,14 @@
 import {
   type Actor,
   canAddSelfToTeam,
+  canAttach,
   canChangeMemberRole,
+  canComment,
   canCreateIssue,
   canDeactivateMember,
+  canDeleteComment,
+  canEditComment,
+  canEditDocuments,
   canEditIssues,
   canGrantRole,
   canInvite,
@@ -25,6 +30,8 @@ import {
   canManageTeamMembership,
   canManageTeams,
   canManageWorkflow,
+  canReadDocuments,
+  canRemoveAttachment,
   canSeeMember,
   canSeeMemberEmail,
   canSeeTeam,
@@ -189,6 +196,63 @@ export const MATRIX: Record<ObjectType, MatrixRow[]> = {
     NOBODY('manage', 'not in team, private'),
     NOBODY('manage', 'other workspace'),
   ],
+  comment: [
+    // Comments follow the issue's team, for every role (a guest comments in the teams they belong to).
+    row('create', true, true, true, true, 'in team'),
+    row('create', true, true, true, false, 'not in team, public'),
+    NOBODY('create', 'not in team, private'),
+    NOBODY('create', 'other workspace'),
+    // Reacting and resolving a thread are open to whoever can comment.
+    row('react or resolve', true, true, true, true, 'in team'),
+    row('react or resolve', true, true, true, false, 'not in team, public'),
+    NOBODY('react or resolve', 'not in team, private'),
+    NOBODY('react or resolve', 'other workspace'),
+    // Only the author edits a comment; nobody edits another person's, an owner included.
+    row('edit own', true, true, true, true, 'in team'),
+    row('edit own', true, true, true, false, 'not in team, public'),
+    NOBODY('edit own', 'not in team, private'),
+    NOBODY('edit own', 'other workspace'),
+    NOBODY('edit other', 'in team'),
+    NOBODY('edit other', 'not in team, public'),
+    NOBODY('edit other', 'not in team, private'),
+    NOBODY('edit other', 'other workspace'),
+    // The author deletes their own comment; an owner or admin deletes anybody's, for a team they can see.
+    row('delete own', true, true, true, true, 'in team'),
+    row('delete own', true, true, true, false, 'not in team, public'),
+    NOBODY('delete own', 'not in team, private'),
+    NOBODY('delete own', 'other workspace'),
+    row('delete other', true, true, false, false, 'in team'),
+    row('delete other', true, true, false, false, 'not in team, public'),
+    NOBODY('delete other', 'not in team, private'),
+    NOBODY('delete other', 'other workspace'),
+  ],
+  attachment: [
+    // A guest attaches files in the teams they belong to, like everybody else who sees the team.
+    row('add', true, true, true, true, 'in team'),
+    row('add', true, true, true, false, 'not in team, public'),
+    NOBODY('add', 'not in team, private'),
+    NOBODY('add', 'other workspace'),
+    // The uploader removes their own file; anybody but a guest removes another person's.
+    row('remove own', true, true, true, true, 'in team'),
+    row('remove own', true, true, true, false, 'not in team, public'),
+    NOBODY('remove own', 'not in team, private'),
+    NOBODY('remove own', 'other workspace'),
+    row('remove other', true, true, true, false, 'in team'),
+    row('remove other', true, true, true, false, 'not in team, public'),
+    NOBODY('remove other', 'not in team, private'),
+    NOBODY('remove other', 'other workspace'),
+  ],
+  document: [
+    // A team's documents: everybody who sees the team reads them; everybody but a guest edits them.
+    row('view', true, true, true, true, 'in team'),
+    row('view', true, true, true, false, 'not in team, public'),
+    NOBODY('view', 'not in team, private'),
+    NOBODY('view', 'other workspace'),
+    row('edit', true, true, true, false, 'in team'),
+    row('edit', true, true, true, false, 'not in team, public'),
+    NOBODY('edit', 'not in team, private'),
+    NOBODY('edit', 'other workspace'),
+  ],
 };
 
 // ---- fixtures, in memory ----
@@ -321,6 +385,23 @@ const EVALUATORS: Record<ObjectType, Record<string, Evaluate>> = {
   },
   workflow_state: {
     manage: (s) => canManageWorkflow(s.actor, s.team),
+  },
+  comment: {
+    create: (s) => canComment(s.actor, s.team),
+    'react or resolve': (s) => canComment(s.actor, s.team),
+    'edit own': (s) => canEditComment(s.actor, s.team, { authorId: SELF }),
+    'edit other': (s) => canEditComment(s.actor, s.team, { authorId: OTHER_MEMBER }),
+    'delete own': (s) => canDeleteComment(s.actor, s.team, { authorId: SELF }),
+    'delete other': (s) => canDeleteComment(s.actor, s.team, { authorId: OTHER_MEMBER }),
+  },
+  attachment: {
+    add: (s) => canAttach(s.actor, s.team),
+    'remove own': (s) => canRemoveAttachment(s.actor, s.team, { uploaderId: SELF }),
+    'remove other': (s) => canRemoveAttachment(s.actor, s.team, { uploaderId: OTHER_MEMBER }),
+  },
+  document: {
+    view: (s) => canReadDocuments(s.actor, s.team),
+    edit: (s) => canEditDocuments(s.actor, s.team),
   },
 };
 
