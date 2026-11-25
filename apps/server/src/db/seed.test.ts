@@ -1,4 +1,6 @@
 import {
+  comment,
+  document,
   issue,
   issueLabel,
   issueRelation,
@@ -171,6 +173,27 @@ describe.skipIf(!databaseUrl)('seedDev (Postgres)', () => {
       expect(withParent).toHaveLength(1);
       expect(withParent[0]?.parentId).not.toBe(withParent[0]?.id);
       expect(onIssues.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('the demo workspace has a comment thread with a reply and a reaction, and a team document', async () => {
+    await withTempDatabase(async (db) => {
+      await seedDev(db.orm);
+
+      const comments = await db.orm.select().from(comment);
+      const roots = comments.filter((row) => row.parentId === null);
+      const replies = comments.filter((row) => row.parentId !== null);
+      const documents = await db.orm.select().from(document);
+
+      expect(roots).toHaveLength(2);
+      expect(replies).toHaveLength(1);
+      expect(replies[0]?.parentId).toBe(roots[0]?.id);
+      expect(comments.every((row) => row.issueId === roots[0]?.issueId)).toBe(true);
+      expect(comments.some((row) => Object.keys(row.reactions).length > 0)).toBe(true);
+      expect(comments.every((row) => row.body.length > 0 && row.deletedAt === null)).toBe(true);
+      expect(documents).toHaveLength(1);
+      expect(documents[0]?.title.length).toBeGreaterThan(0);
+      expect(documents[0]?.body.length).toBeGreaterThan(0);
     });
   });
 

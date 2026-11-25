@@ -847,7 +847,19 @@ export const ENDPOINTS: EndpointCase[] = [
     path: (ids) => `${sync(ids)}/workspace-labels`,
     minRole: 'guest',
   },
-  ...TEAMS.flatMap(({ team: key, issue, label, see }): EndpointCase[] => [
+  ...TEAMS.flatMap(({ team: key, issue, document: doc, label, see }): EndpointCase[] => [
+    {
+      name: `sync: team documents (${label})`,
+      method: 'GET',
+      path: (ids) => `${sync(ids)}/teams/${ids[key]}/documents`,
+      ...see,
+    },
+    {
+      name: `sync: document content (${label})`,
+      method: 'GET',
+      path: (ids) => `${sync(ids)}/documents/${ids[doc]}/content`,
+      ...see,
+    },
     ...(
       [
         ['labels', 'labels'],
@@ -864,7 +876,7 @@ export const ENDPOINTS: EndpointCase[] = [
         ...see,
       }),
     ),
-    ...(['detail', 'activity'] as const).map(
+    ...(['detail', 'activity', 'comments', 'attachments'] as const).map(
       (route): EndpointCase => ({
         name: `sync: issue ${route} (${label})`,
         method: 'GET',

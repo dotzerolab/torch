@@ -2,6 +2,8 @@
 // data. `pnpm --filter @torch/server db:seed` (after `db:migrate`). Idempotent; refuses to run in production.
 // `insertWorkspaceLayout` is the one definition of the layout, shared with the test fixture.
 import {
+  comment,
+  document,
   type IssueRow,
   issue,
   issueLabel,
@@ -227,6 +229,47 @@ async function insertIssueModelDemo(tx: Tx, layout: WorkspaceLayout): Promise<vo
   await tx.update(issue).set({ parentId: second.id }).where(eq(issue.id, third.id));
 }
 
+/**
+ * What the dev workspace shows of comments and documents: a thread of two comments with a reaction on the first issue
+ * of ENG, a second comment from somebody else, and one document of the team.
+ */
+async function insertCommentsAndDocumentsDemo(tx: Tx, layout: WorkspaceLayout): Promise<void> {
+  const [first] = layout.issues.eng;
+  if (!first) return;
+  const { workspaceId } = layout;
+  const engId = layout.teams.eng.id;
+  const { owner, admin, member: teammate } = layout.members;
+  const base = { workspaceId, teamId: engId, issueId: first.id };
+
+  const [root] = await tx
+    .insert(comment)
+    .values({
+      ...base,
+      authorId: owner.id,
+      body: 'Looks good to me. Shipping this behind a flag first.',
+      reactions: { '👍': [teammate.id, admin.id] },
+    })
+    .returning();
+  if (!root) throw new Error('comment insert returned no row');
+  await tx.insert(comment).values([
+    {
+      ...base,
+      parentId: root.id,
+      authorId: teammate.id,
+      body: 'Agreed. I will check it on staging.',
+    },
+    { ...base, authorId: admin.id, body: 'Do we need a note in the changelog for this one?' },
+  ]);
+  await tx.insert(document).values({
+    workspaceId,
+    teamId: engId,
+    title: 'Team handbook',
+    body: '# Team handbook\n\nHow we work: small changes, reviewed the same day.\n',
+    createdBy: owner.id,
+    updatedBy: owner.id,
+  });
+}
+
 const DEMO_EMAILS: Record<LayoutRole, string> = {
   owner: 'owner@example.test',
   admin: 'admin@example.test',
@@ -310,6 +353,7 @@ export async function seedDev(
       issuesPerTeam,
     });
     await insertIssueModelDemo(tx, layout);
+    await insertCommentsAndDocumentsDemo(tx, layout);
     return { created: true, workspaceSlug: 'demo' as const };
   });
 }

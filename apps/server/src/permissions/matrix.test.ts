@@ -727,6 +727,10 @@ const HTTP_ROWS: HttpRow[] = [
   http('sync: issue relations (public team)', 200, 200, 200, 200),
   http('sync: issue detail (public team)', 200, 200, 200, 200),
   http('sync: issue activity (public team)', 200, 200, 200, 200),
+  http('sync: issue comments (public team)', 200, 200, 200, 200),
+  http('sync: issue attachments (public team)', 200, 200, 200, 200),
+  http('sync: team documents (public team)', 200, 200, 200, 200),
+  http('sync: document content (public team)', 200, 200, 200, 200),
   http('sync: labels (private team)', 200, 404, 200, 404),
   http('sync: issue labels (private team)', 200, 404, 200, 404),
   http('sync: issue subscribers (private team)', 200, 404, 200, 404),
@@ -734,6 +738,10 @@ const HTTP_ROWS: HttpRow[] = [
   http('sync: issue relations (private team)', 200, 404, 200, 404),
   http('sync: issue detail (private team)', 200, 404, 200, 404),
   http('sync: issue activity (private team)', 200, 404, 200, 404),
+  http('sync: issue comments (private team)', 200, 404, 200, 404),
+  http('sync: issue attachments (private team)', 200, 404, 200, 404),
+  http('sync: team documents (private team)', 200, 404, 200, 404),
+  http('sync: document content (private team)', 200, 404, 200, 404),
   http('sync: labels (public team with the owner only)', 200, 200, 200, 404),
   http('sync: issue labels (public team with the owner only)', 200, 200, 200, 404),
   http('sync: issue subscribers (public team with the owner only)', 200, 200, 200, 404),
@@ -741,6 +749,10 @@ const HTTP_ROWS: HttpRow[] = [
   http('sync: issue relations (public team with the owner only)', 200, 200, 200, 404),
   http('sync: issue detail (public team with the owner only)', 200, 200, 200, 404),
   http('sync: issue activity (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue comments (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue attachments (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: team documents (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: document content (public team with the owner only)', 200, 200, 200, 404),
 ];
 
 describe('permission matrix over HTTP: completeness', () => {

@@ -261,6 +261,93 @@ export function issueActivityShape(issueId: string): ShapeDefinition {
   };
 }
 
+// ---- comments, attachments and documents ----
+
+/**
+ * The comments of one opened issue. Comment text syncs per opened issue, never in a list (ADR 0001 section 4); a
+ * deleted comment's text is blank in the row itself. The caller has already checked that the actor can see the issue's
+ * team.
+ */
+export function issueCommentsShape(issueId: string): ShapeDefinition {
+  return {
+    table: 'comment',
+    where: 'issue_id = $1',
+    params: [issueId],
+    columns: [
+      'id',
+      'workspace_id',
+      'team_id',
+      'issue_id',
+      'parent_id',
+      'author_id',
+      'body',
+      'reactions',
+      'created_at',
+      'edited_at',
+      'resolved_at',
+      'resolved_by',
+      'deleted_at',
+    ],
+  };
+}
+
+/**
+ * The finished files of one opened issue. A pending upload is not part of it, and the storage key and the status never
+ * leave the server: a file is read through a signed URL minted after the permission check. Same precondition as
+ * `issueCommentsShape`.
+ */
+export function issueAttachmentsShape(issueId: string): ShapeDefinition {
+  return {
+    table: 'attachment',
+    where: "issue_id = $1 AND status = 'ready'",
+    params: [issueId],
+    columns: [
+      'id',
+      'workspace_id',
+      'team_id',
+      'issue_id',
+      'uploader_id',
+      'file_name',
+      'content_type',
+      'size_bytes',
+      'created_at',
+    ],
+  };
+}
+
+/**
+ * The documents of one team, titles only: a body syncs per opened document (`documentContentShape`). The caller has
+ * already checked that the actor can see `teamId`.
+ */
+export function teamDocumentsShape(teamId: string): ShapeDefinition {
+  return {
+    table: 'document',
+    where: 'team_id = $1',
+    params: [teamId],
+    columns: [
+      'id',
+      'workspace_id',
+      'team_id',
+      'title',
+      'created_by',
+      'updated_by',
+      'created_at',
+      'updated_at',
+      'archived_at',
+    ],
+  };
+}
+
+/** The body of one opened document. The caller has already checked that the actor can see the document's team. */
+export function documentContentShape(documentId: string): ShapeDefinition {
+  return {
+    table: 'document',
+    where: 'id = $1',
+    params: [documentId],
+    columns: ['id', 'workspace_id', 'team_id', 'body'],
+  };
+}
+
 /**
  * The actor's own team memberships, workspace-wide. Everything the client needs to notice that its own access
  * changed (a join or removal of a private team) arrives here as one small shape. Both values come from the
