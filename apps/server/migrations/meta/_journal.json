@@ -50,6 +50,13 @@
       "when": 1794817770304,
       "tag": "0006_relation_related_issue_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1795609893689,
+      "tag": "0007_comments_attachments_documents",
+      "breakpoints": true
     }
   ]
 }

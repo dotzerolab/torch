@@ -747,6 +747,211 @@ export const issueTemplate = pgTable(
   ],
 );
 
+/**
+ * A comment on an issue. Threads are one level deep: a reply points at a top-level comment of the same issue (the
+ * composite parent key makes a parent of another issue impossible; the service refuses a reply to a reply). Only a
+ * thread root resolves. `reactions` maps an emoji to the member ids that used it, changed under the row lock. A deleted
+ * comment is a tombstone: `deleted_at` set, `body` blank and its edit rows removed, so no deleted text survives.
+ */
+export const comment = pgTable(
+  'comment',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id').notNull(),
+    teamId: uuid('team_id').notNull(),
+    issueId: uuid('issue_id').notNull(),
+    parentId: uuid('parent_id'),
+    authorId: uuid('author_id').notNull(),
+    body: text('body').notNull(),
+    reactions: jsonb('reactions').$type<Record<string, string[]>>().notNull().default({}),
+    createdAt: createdAt(),
+    editedAt: timestamp('edited_at', { withTimezone: true }),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    resolvedBy: uuid('resolved_by'),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  },
+  (t) => [
+    // Target of the parent key and of the edit history: a comment is found by (workspace, issue, id).
+    unique('comment_workspace_issue_id_unique').on(t.workspaceId, t.issueId, t.id),
+    index('comment_issue_created_idx').on(t.issueId, t.createdAt, t.id),
+    check('comment_reactions_object', sql`jsonb_typeof(${t.reactions}) = 'object'`),
+    check('comment_parent_not_self', sql`${t.parentId} <> ${t.id}`),
+    check('comment_resolve_roots_only', sql`${t.resolvedAt} is null or ${t.parentId} is null`),
+    check('comment_body_length', sql`char_length(${t.body}) <= 20000`),
+    foreignKey({
+      name: 'comment_issue_fk',
+      columns: [t.workspaceId, t.teamId, t.issueId],
+      foreignColumns: [issue.workspaceId, issue.teamId, issue.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'comment_parent_fk',
+      columns: [t.workspaceId, t.issueId, t.parentId],
+      foreignColumns: [t.workspaceId, t.issueId, t.id],
+    }),
+    foreignKey({
+      name: 'comment_author_fk',
+      columns: [t.workspaceId, t.authorId],
+      foreignColumns: [member.workspaceId, member.id],
+    }),
+    foreignKey({
+      name: 'comment_resolved_by_fk',
+      columns: [t.workspaceId, t.resolvedBy],
+      foreignColumns: [member.workspaceId, member.id],
+    }),
+  ],
+);
+
+/** The previous body of an edited comment, one row per change. Never synced; read over REST by people who see the issue. */
+export const commentEdit = pgTable(
+  'comment_edit',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id').notNull(),
+    teamId: uuid('team_id').notNull(),
+    issueId: uuid('issue_id').notNull(),
+    commentId: uuid('comment_id').notNull(),
+    body: text('body').notNull(),
+    editedBy: uuid('edited_by').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index('comment_edit_comment_created_idx').on(t.commentId, t.createdAt, t.id),
+    foreignKey({
+      name: 'comment_edit_issue_fk',
+      columns: [t.workspaceId, t.teamId, t.issueId],
+      foreignColumns: [issue.workspaceId, issue.teamId, issue.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'comment_edit_comment_fk',
+      columns: [t.workspaceId, t.issueId, t.commentId],
+      foreignColumns: [comment.workspaceId, comment.issueId, comment.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'comment_edit_editor_fk',
+      columns: [t.workspaceId, t.editedBy],
+      foreignColumns: [member.workspaceId, member.id],
+    }),
+  ],
+);
+
+/** The two states of an upload: the row exists as soon as the browser may send the file, and is ready once verified. */
+export const ATTACHMENT_STATUSES = ['pending', 'ready'] as const;
+export type AttachmentStatus = (typeof ATTACHMENT_STATUSES)[number];
+
+/**
+ * A file attached to an issue. The file itself lives in object storage under `storage_key`, which is never synced and
+ * never shown to a client: reads go through a signed URL minted after the permission check. The row is `pending` until
+ * the server has checked the stored object (size, type, first bytes), then `ready`; only ready rows sync.
+ */
+export const attachment = pgTable(
+  'attachment',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id').notNull(),
+    teamId: uuid('team_id').notNull(),
+    issueId: uuid('issue_id').notNull(),
+    uploaderId: uuid('uploader_id').notNull(),
+    fileName: text('file_name').notNull(),
+    contentType: text('content_type').notNull(),
+    sizeBytes: integer('size_bytes').notNull(),
+    storageKey: text('storage_key').notNull().unique(),
+    status: text('status', { enum: ATTACHMENT_STATUSES }).notNull().default('pending'),
+    createdAt: createdAt(),
+    readyAt: timestamp('ready_at', { withTimezone: true }),
+  },
+  (t) => [
+    index('attachment_issue_idx').on(t.issueId),
+    // The cleanup job finds old pending rows here.
+    index('attachment_status_created_idx').on(t.status, t.createdAt),
+    check('attachment_size_range', sql`${t.sizeBytes} between 1 and 26214400`),
+    check('attachment_file_name_length', sql`char_length(${t.fileName}) between 1 and 200`),
+    check('attachment_status_known', sql`${t.status} in ('pending', 'ready')`),
+    check(
+      'attachment_ready_at_matches_status',
+      sql`(${t.status} = 'ready') = (${t.readyAt} is not null)`,
+    ),
+    foreignKey({
+      name: 'attachment_issue_fk',
+      columns: [t.workspaceId, t.teamId, t.issueId],
+      foreignColumns: [issue.workspaceId, issue.teamId, issue.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'attachment_uploader_fk',
+      columns: [t.workspaceId, t.uploaderId],
+      foreignColumns: [member.workspaceId, member.id],
+    }),
+  ],
+);
+
+/**
+ * A document of a team (the link to a project arrives with projects). Edits are last-writer-wins; the previous title
+ * and body of a changed document go to `document_revision`. Archived documents stay readable.
+ */
+export const document = pgTable(
+  'document',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id').notNull(),
+    teamId: uuid('team_id').notNull(),
+    title: text('title').notNull(),
+    body: text('body').notNull().default(''),
+    createdBy: uuid('created_by').notNull(),
+    updatedBy: uuid('updated_by').notNull(),
+    createdAt: createdAt(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    archivedAt: timestamp('archived_at', { withTimezone: true }),
+  },
+  (t) => [
+    unique('document_workspace_team_id_unique').on(t.workspaceId, t.teamId, t.id),
+    index('document_team_updated_idx').on(t.teamId, t.updatedAt),
+    check('document_title_length', sql`char_length(${t.title}) between 1 and 255`),
+    check('document_body_length', sql`char_length(${t.body}) <= 100000`),
+    foreignKey({
+      name: 'document_team_fk',
+      columns: [t.workspaceId, t.teamId],
+      foreignColumns: [team.workspaceId, team.id],
+    }),
+    foreignKey({
+      name: 'document_created_by_fk',
+      columns: [t.workspaceId, t.createdBy],
+      foreignColumns: [member.workspaceId, member.id],
+    }),
+    foreignKey({
+      name: 'document_updated_by_fk',
+      columns: [t.workspaceId, t.updatedBy],
+      foreignColumns: [member.workspaceId, member.id],
+    }),
+  ],
+);
+
+/** The title and body a document had before an edit, one row per change. Never synced; read over REST. */
+export const documentRevision = pgTable(
+  'document_revision',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id').notNull(),
+    teamId: uuid('team_id').notNull(),
+    documentId: uuid('document_id').notNull(),
+    title: text('title').notNull(),
+    body: text('body').notNull(),
+    editedBy: uuid('edited_by').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index('document_revision_document_created_idx').on(t.documentId, t.createdAt, t.id),
+    foreignKey({
+      name: 'document_revision_document_fk',
+      columns: [t.workspaceId, t.teamId, t.documentId],
+      foreignColumns: [document.workspaceId, document.teamId, document.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'document_revision_editor_fk',
+      columns: [t.workspaceId, t.editedBy],
+      foreignColumns: [member.workspaceId, member.id],
+    }),
+  ],
+);
+
 export type WorkspaceRow = typeof workspace.$inferSelect;
 export type MemberRow = typeof member.$inferSelect;
 export type TeamRow = typeof team.$inferSelect;
@@ -764,6 +969,11 @@ export type ExternalRefRow = typeof externalRef.$inferSelect;
 export type IdempotencyKeyRow = typeof idempotencyKey.$inferSelect;
 export type SavedViewRow = typeof savedView.$inferSelect;
 export type IssueTemplateRow = typeof issueTemplate.$inferSelect;
+export type CommentRow = typeof comment.$inferSelect;
+export type CommentEditRow = typeof commentEdit.$inferSelect;
+export type AttachmentRow = typeof attachment.$inferSelect;
+export type DocumentRow = typeof document.$inferSelect;
+export type DocumentRevisionRow = typeof documentRevision.$inferSelect;
 export type LoginTokenRow = typeof loginToken.$inferSelect;
 export type SessionRow = typeof session.$inferSelect;
 export type InviteRow = typeof invite.$inferSelect;
