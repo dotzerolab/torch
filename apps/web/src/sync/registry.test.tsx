@@ -8,13 +8,40 @@ import {
   type Cleanable,
   createRegistry,
   type Factories,
+  isShapeId,
+  isSnapshotKind,
   MAX_LIVE_SHAPES,
   PAUSE_AFTER_MS,
+  parseShapeId,
   type ShapeKey,
+  SNAPSHOT_KINDS,
+  shapeId,
+  TEAM_KINDS,
   useShapeFrom,
 } from './registry.ts';
 
 type Fake = Cleanable & { id: string; inert: boolean; cleaned: number };
+
+const KIND_NAMES = [
+  'teams',
+  'members',
+  'ownMemberships',
+  'workspaceLabels',
+  'issues',
+  'workflowStates',
+  'teamMembers',
+  'labels',
+  'issueLabels',
+  'issueRelations',
+  'issueLinks',
+  'issueSubscribers',
+  'issueDetail',
+  'issueActivity',
+] as const;
+/** A factory table where every kind is made by `make`. */
+function allKinds<T>(make: T): { [K in (typeof KIND_NAMES)[number]]: T } {
+  return Object.fromEntries(KIND_NAMES.map((kind) => [kind, make])) as never;
+}
 
 function fakeFactories() {
   const made: Fake[] = [];
@@ -30,14 +57,7 @@ function fakeFactories() {
     made.push(fake);
     return fake;
   };
-  const factories = {
-    teams: build,
-    members: build,
-    ownMemberships: build,
-    issues: build,
-    workflowStates: build,
-    teamMembers: build,
-  } satisfies Factories;
+  const factories = allKinds(build) satisfies Factories;
   return { factories, made };
 }
 
@@ -78,14 +98,7 @@ describe('syncRegistry', () => {
       contexts.push({ id, settled: context.settled });
       return { cleanup() {} };
     };
-    const registry = createRegistry({
-      teams: build,
-      members: build,
-      ownMemberships: build,
-      issues: build,
-      workflowStates: build,
-      teamMembers: build,
-    } as unknown as Factories);
+    const registry = createRegistry(allKinds(build) as unknown as Factories);
     const onTeams = vi.fn();
     const onMembers = vi.fn();
     registry.onSettled('teams', onTeams);
@@ -114,14 +127,7 @@ describe('syncRegistry', () => {
       contexts.push(context);
       return { cleanup() {} };
     };
-    const registry = createRegistry({
-      teams: build,
-      members: build,
-      ownMemberships: build,
-      issues: build,
-      workflowStates: build,
-      teamMembers: build,
-    } as unknown as Factories);
+    const registry = createRegistry(allKinds(build) as unknown as Factories);
     registry.get(team('issues'));
     registry.get({ kind: 'members', workspaceId: ws });
     expect(contexts.map((c) => c.paused())).toEqual([false, false]);
@@ -147,14 +153,7 @@ describe('syncRegistry', () => {
       settle = context.settled;
       return { cleanup() {} };
     };
-    const registry = createRegistry({
-      teams: build,
-      members: build,
-      ownMemberships: build,
-      issues: build,
-      workflowStates: build,
-      teamMembers: build,
-    } as unknown as Factories);
+    const registry = createRegistry(allKinds(build) as unknown as Factories);
     const listener = vi.fn();
     const off = registry.onSettled('teams', listener);
     registry.get({ kind: 'teams', workspaceId: ws });
@@ -217,9 +216,9 @@ describe('syncRegistry', () => {
 
 // react-db keys a live query by the ids of its source collections: if a restarted shape kept its id the query
 // would stay bound to the collection that was cleaned up and never see the new rows.
-function localFactory(rows: () => { id: string }[]) {
-  const make = (_key: ShapeKey, id: string) =>
-    createCollection<{ id: string }>({
+function localFactory(rows: () => { id: string }[], made: Array<{ status: string }> = []) {
+  const make = (_key: ShapeKey, id: string) => {
+    const collection = createCollection<{ id: string }>({
       id,
       getKey: (row) => row.id,
       sync: {
@@ -231,14 +230,10 @@ function localFactory(rows: () => { id: string }[]) {
         },
       },
     });
-  return {
-    teams: make,
-    members: make,
-    ownMemberships: make,
-    issues: make,
-    workflowStates: make,
-    teamMembers: make,
-  } satisfies Factories;
+    made.push(collection);
+    return collection;
+  };
+  return allKinds(make) satisfies Factories;
 }
 
 type LocalCollection = ReturnType<ReturnType<typeof localFactory>['teams']>;
@@ -270,6 +265,39 @@ describe('useShapeFrom with a live query', () => {
     });
     await act(async () => {});
     expect(screen.getByTestId('ids').textContent).toBe('b,c');
+  });
+});
+
+const labelsKey = { kind: 'labels', workspaceId: ws, teamId: 't1' } as const;
+
+function SnapshotList() {
+  if (!liveRegistry) throw new Error('no registry');
+  const collection = useShapeFrom(liveRegistry, labelsKey);
+  const { data } = useLiveQuery({
+    query: (q) => q.from({ row: collection as unknown as LocalCollection }),
+  });
+  return <p data-testid="labels">{data.map((row) => (row as { id: string }).id).join(',')}</p>;
+}
+
+describe('refreshing a snapshot shape', () => {
+  it('re-binds an open reader to the new collection and cleans the old one up', async () => {
+    let rows = [{ id: 'a' }];
+    const made: Array<{ status: string }> = [];
+    liveRegistry = createRegistry(localFactory(() => rows, made));
+    render(<SnapshotList />);
+    await act(async () => {});
+    expect(screen.getByTestId('labels').textContent).toBe('a');
+    expect(made).toHaveLength(1);
+
+    rows = [{ id: 'b' }, { id: 'c' }];
+    await act(async () => {
+      liveRegistry?.refresh(labelsKey);
+    });
+    await act(async () => {});
+    expect(screen.getByTestId('labels').textContent).toBe('b,c');
+    expect(made).toHaveLength(2);
+    expect(made[0]?.status).toBe('cleaned-up');
+    expect(made[1]?.status).toBe('ready');
   });
 });
 
@@ -528,5 +556,223 @@ describe('syncRegistry across tabs', () => {
     expect(leader).not.toBe(follower);
     expect(leader.id).toBe('teams-w1~2');
     expect(made.map((fake) => fake.id)).toContain('teams-w1~2');
+  });
+});
+
+describe('snapshot shapes', () => {
+  const labels = (teamId = 't1') => ({ kind: 'labels', workspaceId: ws, teamId }) as const;
+  const detail = (issueId = 'i1', teamId = 't1') =>
+    ({ kind: 'issueDetail', workspaceId: ws, teamId, issueId }) as const;
+  const activity = (issueId = 'i1') =>
+    ({ kind: 'issueActivity', workspaceId: ws, teamId: 't1', issueId }) as const;
+
+  function openLive(
+    registry: ReturnType<typeof createRegistry<ReturnType<typeof fakeFactories>['factories']>>,
+  ) {
+    registry.get({ kind: 'teams', workspaceId: ws });
+    registry.get({ kind: 'members', workspaceId: ws });
+    registry.get({ kind: 'ownMemberships', workspaceId: ws });
+    registry.get(team('issues'));
+  }
+
+  it('names the snapshot kinds: the existing workflow states and the new read-only tables', () => {
+    expect([...SNAPSHOT_KINDS].sort()).toEqual(
+      [
+        'issueActivity',
+        'issueDetail',
+        'issueLabels',
+        'issueLinks',
+        'issueRelations',
+        'issueSubscribers',
+        'labels',
+        'workflowStates',
+        'workspaceLabels',
+      ].sort(),
+    );
+    for (const kind of SNAPSHOT_KINDS) expect(isSnapshotKind(kind)).toBe(true);
+    for (const kind of ['teams', 'members', 'ownMemberships', 'issues', 'teamMembers']) {
+      expect(isSnapshotKind(kind)).toBe(false);
+    }
+    expect(isSnapshotKind('nonsense')).toBe(false);
+  });
+
+  it('snapshots are not live: nine open snapshots leave the live count and the budget alone', () => {
+    const { factories } = fakeFactories();
+    const overBudget = vi.fn();
+    const registry = createRegistry(factories, { overBudget });
+    openLive(registry);
+    const keys: ShapeKey[] = [
+      labels(),
+      team('workflowStates'),
+      { kind: 'issueLabels', workspaceId: ws, teamId: 't1' },
+      { kind: 'issueRelations', workspaceId: ws, teamId: 't1' },
+      { kind: 'issueLinks', workspaceId: ws, teamId: 't1' },
+      { kind: 'issueSubscribers', workspaceId: ws, teamId: 't1' },
+      { kind: 'workspaceLabels', workspaceId: ws },
+      detail(),
+      activity(),
+    ];
+    for (const key of keys) {
+      registry.get(key);
+      registry.hold(key);
+    }
+    expect(registry.liveCount()).toBe(MAX_LIVE_SHAPES);
+    expect(overBudget).not.toHaveBeenCalled();
+    // The same count of live shapes would be over budget.
+    registry.get(team('issues', 't2'));
+    registry.hold(team('issues', 't2'));
+    expect(registry.liveCount()).toBe(MAX_LIVE_SHAPES + 1);
+    expect(overBudget).toHaveBeenCalledOnce();
+  });
+
+  it('a released snapshot waits the usual delay even when the page is over its budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const { factories } = fakeFactories();
+      const registry = createRegistry(factories);
+      openLive(registry);
+      registry.get(team('issues', 't2'));
+      const snapshot = registry.get(labels());
+      registry.hold(labels())();
+      await Promise.resolve();
+      // A live team shape would close at once here; a snapshot holds no connection that is worth freeing.
+      expect(snapshot.cleaned).toBe(0);
+      vi.advanceTimersByTime(PAUSE_AFTER_MS);
+      await Promise.resolve();
+      expect(snapshot.cleaned).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('refresh replaces the instance with a new id, tells readers and cleans the old one up', async () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    const listener = vi.fn();
+    const first = registry.get(labels());
+    registry.subscribe(listener);
+    registry.refresh(labels());
+    await Promise.resolve();
+    const second = registry.get(labels());
+    expect(second).not.toBe(first);
+    expect(first.id).toBe('labels-w1-t1');
+    expect(second.id).toBe('labels-w1-t1~2');
+    expect(first.cleaned).toBe(1);
+    expect(listener).toHaveBeenCalledOnce();
+    registry.refresh(labels());
+    expect(registry.get(labels()).id).toBe('labels-w1-t1~3');
+  });
+
+  it('refresh of a snapshot nobody read creates nothing and stays quiet', () => {
+    const { factories, made } = fakeFactories();
+    const registry = createRegistry(factories);
+    const listener = vi.fn();
+    registry.subscribe(listener);
+    registry.refresh(labels());
+    expect(made).toHaveLength(0);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('refresh leaves a live shape alone', () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    const issues = registry.get(team('issues'));
+    registry.refresh(team('issues'));
+    expect(registry.get(team('issues'))).toBe(issues);
+    expect(issues.cleaned).toBe(0);
+  });
+
+  it('older device copies go once the new instance has settled, not before (an offline refresh keeps the old copy)', async () => {
+    const contexts: Array<{ settled: () => void }> = [];
+    const build = (_key: ShapeKey, _id: string, context: { settled: () => void }) => {
+      contexts.push(context);
+      return { cleanup() {} };
+    };
+    const onShapeRestarted = vi.fn();
+    const registry = createRegistry(allKinds(build) as unknown as Factories, { onShapeRestarted });
+    registry.get(labels());
+    registry.refresh(labels());
+    await Promise.resolve();
+    registry.get(labels());
+    await Promise.resolve();
+    // The new instance has not heard from the server: the copy on the device is all that shows labels offline.
+    expect(onShapeRestarted).not.toHaveBeenCalled();
+    contexts[1]?.settled();
+    expect(onShapeRestarted).toHaveBeenCalledOnce();
+    expect(onShapeRestarted).toHaveBeenCalledWith(labels(), 'labels-w1-t1', 'labels-w1-t1~2');
+    // Later answers of the same instance delete nothing more.
+    contexts[1]?.settled();
+    expect(onShapeRestarted).toHaveBeenCalledOnce();
+  });
+
+  it('an instance that was replaced again before it settled deletes nothing', async () => {
+    const contexts: Array<{ settled: () => void }> = [];
+    const build = (_key: ShapeKey, _id: string, context: { settled: () => void }) => {
+      contexts.push(context);
+      return { cleanup() {} };
+    };
+    const onShapeRestarted = vi.fn();
+    const registry = createRegistry(allKinds(build) as unknown as Factories, { onShapeRestarted });
+    registry.get(labels());
+    registry.refresh(labels());
+    registry.get(labels());
+    registry.refresh(labels());
+    registry.get(labels());
+    contexts[1]?.settled();
+    expect(onShapeRestarted).not.toHaveBeenCalled();
+    contexts[2]?.settled();
+    expect(onShapeRestarted).toHaveBeenCalledWith(labels(), 'labels-w1-t1', 'labels-w1-t1~3');
+  });
+
+  it('dropTeam ends the snapshots of the team, the per-issue ones included, and keeps the workspace ones', async () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    const workspaceLabels = registry.get({ kind: 'workspaceLabels', workspaceId: ws });
+    const otherTeam = registry.get(labels('t2'));
+    const mine = [registry.get(labels()), registry.get(detail()), registry.get(activity('i2'))];
+    registry.dropTeam(ws, 't1');
+    await Promise.resolve();
+    expect(mine.map((fake) => fake.cleaned)).toEqual([1, 1, 1]);
+    expect([workspaceLabels.cleaned, otherTeam.cleaned]).toEqual([0, 0]);
+    // The team stays gone: its snapshots are inert until its id returns.
+    expect(registry.get(detail()).inert).toBe(true);
+    registry.reinstateTeam(ws, 't1');
+    expect(registry.get(detail()).inert).toBe(false);
+  });
+
+  it('names an issue shape by workspace, team and issue, and reads the name back', () => {
+    const keys: ShapeKey[] = [{ kind: 'teams', workspaceId: ws }, team('issues'), detail('i9')];
+    expect(keys.map(shapeId)).toEqual(['teams:w1', 'issues:w1:t1', 'issueDetail:w1:t1:i9']);
+    for (const key of keys) expect(parseShapeId(shapeId(key))).toEqual(key);
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    expect(registry.get(detail('i9')).id).toBe('issueDetail-w1-t1-i9');
+    expect(registry.get({ kind: 'workspaceLabels', workspaceId: ws }).id).toBe(
+      'workspaceLabels-w1',
+    );
+  });
+
+  it('shares only live shapes between tabs: a snapshot id from another tab is not a shape id', () => {
+    expect(isShapeId('issues:w1:t1')).toBe(true);
+    expect(isShapeId('teamMembers:w1:t1')).toBe(true);
+    expect(isShapeId('teams:w1')).toBe(true);
+    for (const id of [
+      'labels:w1:t1',
+      'workflowStates:w1:t1',
+      'workspaceLabels:w1',
+      'issueDetail:w1:t1:i1',
+      'issues:w1',
+      'issues:w1:t1:i1',
+      'issueDetail:w1:t1',
+    ]) {
+      expect(isShapeId(id)).toBe(false);
+    }
+  });
+
+  it('the kinds a team owns include its snapshots and the per-issue ones, but not the workspace labels', () => {
+    expect(TEAM_KINDS).toEqual(
+      expect.arrayContaining(['issues', 'labels', 'issueDetail', 'issueActivity', 'teamMembers']),
+    );
+    expect(TEAM_KINDS).not.toContain('workspaceLabels');
   });
 });
