@@ -651,6 +651,30 @@ const HTTP_ROWS: HttpRow[] = [
   http('attachments: remove (public team with the owner only)', 200, 200, 200, 404),
   http("attachments: remove other's (public team)", 200, 200, 200, 403),
 
+  // Team documents follow the team: everybody who sees it reads them; anybody but a guest creates, edits and archives
+  // them (a guest in the team gets 403).
+  http('documents: list (public team)', 200, 200, 200, 200),
+  http('documents: create (public team)', 201, 201, 201, 403),
+  http('documents: get (public team)', 200, 200, 200, 200),
+  http('documents: update (public team)', 200, 200, 200, 403),
+  http('documents: archive (public team)', 200, 200, 200, 403),
+  http('documents: unarchive (public team)', 200, 200, 200, 403),
+  http('documents: revisions (public team)', 200, 200, 200, 200),
+  http('documents: list (private team)', 200, 404, 200, 404),
+  http('documents: create (private team)', 201, 404, 201, 404),
+  http('documents: get (private team)', 200, 404, 200, 404),
+  http('documents: update (private team)', 200, 404, 200, 404),
+  http('documents: archive (private team)', 200, 404, 200, 404),
+  http('documents: unarchive (private team)', 200, 404, 200, 404),
+  http('documents: revisions (private team)', 200, 404, 200, 404),
+  http('documents: list (public team with the owner only)', 200, 200, 200, 404),
+  http('documents: create (public team with the owner only)', 201, 201, 201, 404),
+  http('documents: get (public team with the owner only)', 200, 200, 200, 404),
+  http('documents: update (public team with the owner only)', 200, 200, 200, 404),
+  http('documents: archive (public team with the owner only)', 200, 200, 200, 404),
+  http('documents: unarchive (public team with the owner only)', 200, 200, 200, 404),
+  http('documents: revisions (public team with the owner only)', 200, 200, 200, 404),
+
   // Sync shapes: every role reads the team list and the member list (filtered by the server); a team's own shapes
   // follow the visibility of the team.
   // Labels: the workspace's are for owners and admins; a team's for anybody but a guest who sees the team. Everybody

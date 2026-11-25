@@ -6,6 +6,7 @@
 import {
   attachment,
   comment,
+  document,
   invite,
   issue,
   issueLink,
@@ -93,6 +94,10 @@ export type Ids = {
   privateFileId: string;
   ownerOnlyFileId: string;
   otherFileId: string;
+  /** A document of each team, new for the attempt. */
+  documentId: string;
+  privateDocumentId: string;
+  ownerOnlyDocumentId: string;
   /** A member (role `member`) who belongs to all three teams. */
   memberId: string;
   /** A member (role `member`) who belongs to no team. */
@@ -176,6 +181,9 @@ export const PLACEHOLDER_IDS: Ids = {
   privateFileId: ':attachmentId',
   ownerOnlyFileId: ':attachmentId',
   otherFileId: ':attachmentId',
+  documentId: ':documentId',
+  privateDocumentId: ':documentId',
+  ownerOnlyDocumentId: ':documentId',
   stateId: ':stateId',
   privateStateId: ':stateId',
   ownerOnlyStateId: ':stateId',
@@ -220,6 +228,7 @@ type LabelKey = 'labelId' | 'privateLabelId' | 'ownerOnlyLabelId';
 type StateKey = 'stateId' | 'privateStateId' | 'ownerOnlyStateId';
 type AttachmentKey = 'attachmentId' | 'privateAttachmentId' | 'ownerOnlyAttachmentId';
 type FileKey = 'fileId' | 'privateFileId' | 'ownerOnlyFileId';
+type DocumentKey = 'documentId' | 'privateDocumentId' | 'ownerOnlyDocumentId';
 
 /**
  * The three teams of a world with who may see (and edit the issues of) each and who may manage it, as the rules say:
@@ -236,11 +245,14 @@ const TEAMS: readonly {
   state: StateKey;
   attachment: AttachmentKey;
   file: FileKey;
+  document: DocumentKey;
   label: string;
   see: Rule;
   manage: Rule;
   /** Who may define a label of the team: anybody but a guest who sees the team. */
   defineLabel: Rule;
+  /** Who may create, edit and archive the team's documents: anybody but a guest who sees the team. */
+  editDocuments: Rule;
 }[] = [
   {
     team: 'teamId',
@@ -252,10 +264,12 @@ const TEAMS: readonly {
     state: 'stateId',
     attachment: 'attachmentId',
     file: 'fileId',
+    document: 'documentId',
     label: 'public team',
     see: { minRole: 'guest' },
     manage: { minRole: 'admin' },
     defineLabel: { minRole: 'member' },
+    editDocuments: { minRole: 'member' },
   },
   {
     team: 'privateTeamId',
@@ -267,10 +281,12 @@ const TEAMS: readonly {
     state: 'privateStateId',
     attachment: 'privateAttachmentId',
     file: 'privateFileId',
+    document: 'privateDocumentId',
     label: 'private team',
     see: { minRole: 'owner', alsoAllowed: ['member'] },
     manage: { minRole: 'owner' },
     defineLabel: { minRole: 'owner', alsoAllowed: ['member'] },
+    editDocuments: { minRole: 'owner', alsoAllowed: ['member'] },
   },
   {
     team: 'ownerOnlyTeamId',
@@ -282,10 +298,12 @@ const TEAMS: readonly {
     state: 'ownerOnlyStateId',
     attachment: 'ownerOnlyAttachmentId',
     file: 'ownerOnlyFileId',
+    document: 'ownerOnlyDocumentId',
     label: 'public team with the owner only',
     see: { minRole: 'member' },
     manage: { minRole: 'admin' },
     defineLabel: { minRole: 'member' },
+    editDocuments: { minRole: 'member' },
   },
 ];
 
@@ -668,6 +686,56 @@ export const ENDPOINTS: EndpointCase[] = [
     minRole: 'member',
   },
 
+  // ---- team documents: everybody who sees the team reads; anybody but a guest writes ----
+  ...TEAMS.flatMap(
+    ({ team: teamKey, document: doc, label, see, editDocuments }): EndpointCase[] => [
+      {
+        name: `documents: list (${label})`,
+        method: 'GET',
+        path: (ids) => `${api(ids)}/teams/${ids[teamKey]}/documents`,
+        ...see,
+      },
+      {
+        name: `documents: create (${label})`,
+        method: 'POST',
+        path: (ids) => `${api(ids)}/teams/${ids[teamKey]}/documents`,
+        body: (ids: Ids) => ({ title: `Document ${ids.uid}`, body: 'Text' }),
+        ...editDocuments,
+      },
+      {
+        name: `documents: get (${label})`,
+        method: 'GET',
+        path: (ids) => `${api(ids)}/documents/${ids[doc]}`,
+        ...see,
+      },
+      {
+        name: `documents: update (${label})`,
+        method: 'PATCH',
+        path: (ids) => `${api(ids)}/documents/${ids[doc]}`,
+        body: { title: 'Edited title' },
+        ...editDocuments,
+      },
+      {
+        name: `documents: archive (${label})`,
+        method: 'POST',
+        path: (ids) => `${api(ids)}/documents/${ids[doc]}/archive`,
+        ...editDocuments,
+      },
+      {
+        name: `documents: unarchive (${label})`,
+        method: 'POST',
+        path: (ids) => `${api(ids)}/documents/${ids[doc]}/unarchive`,
+        ...editDocuments,
+      },
+      {
+        name: `documents: revisions (${label})`,
+        method: 'GET',
+        path: (ids) => `${api(ids)}/documents/${ids[doc]}/revisions`,
+        ...see,
+      },
+    ],
+  ),
+
   // ---- labels and workflow states ----
   { name: 'labels: list', method: 'GET', path: (ids) => `${api(ids)}/labels`, minRole: 'guest' },
   {
@@ -938,6 +1006,9 @@ export async function newAttempt(
     privateFileId: UNUSED,
     ownerOnlyFileId: UNUSED,
     otherFileId: UNUSED,
+    documentId: UNUSED,
+    privateDocumentId: UNUSED,
+    ownerOnlyDocumentId: UNUSED,
     stateId: UNUSED,
     privateStateId: UNUSED,
     ownerOnlyStateId: UNUSED,
@@ -1103,6 +1174,27 @@ export async function newAttempt(
     if (needs.has(fileKey)) ids[fileKey] = await fileFor(name, actor.id, 'ready');
   }
   if (needs.has('otherFileId')) ids.otherFileId = await fileFor('eng', ws.ownerId, 'ready');
+
+  for (const [name, documentKey] of [
+    ['eng', 'documentId'],
+    ['ops', 'privateDocumentId'],
+    ['pub', 'ownerOnlyDocumentId'],
+  ] as const) {
+    if (!needs.has(documentKey)) continue;
+    const [row] = await orm
+      .insert(document)
+      .values({
+        workspaceId,
+        teamId: ws.teams[name],
+        title: `Doc ${uid}`,
+        body: 'Seed text',
+        createdBy: ws.ownerId,
+        updatedBy: ws.ownerId,
+      })
+      .returning({ id: document.id });
+    if (!row) throw new Error('document insert returned no row');
+    ids[documentKey] = row.id;
+  }
 
   if (needs.has('memberId')) {
     const added = await addMember(orm, workspaceId, 'member', {

@@ -8,6 +8,7 @@ import { createAuthRoutes } from './auth/routes.ts';
 import { buildManifest } from './brand/manifest.ts';
 import { createCommentRoutes } from './comments/routes.ts';
 import type { Db } from './db.ts';
+import { createDocumentRoutes } from './documents/routes.ts';
 import { createAttachmentRoutes } from './files/routes.ts';
 import type { FileStorage } from './files/storage.ts';
 import { createInviteRoutes } from './invites/routes.ts';
@@ -82,7 +83,8 @@ const MAX_BODY_BYTES = 16 * 1024;
 
 // The issue, comment and document routes take texts of up to 100000 characters, so each carries its own, larger limit
 // (and sits behind the session check before it reads a byte of it).
-const LARGE_BODY_PATH = /^\/api\/w\/[^/]+\/(issues|comments|documents)(\/|$)/;
+const LARGE_BODY_PATH =
+  /^\/api\/w\/[^/]+\/(issues|comments|documents|teams\/[^/]+\/documents)(\/|$)/;
 
 /** The SQLSTATE of a database error: `code` on the error or on the pg error that Drizzle wraps as its cause. */
 function databaseCode(error: Error): string | undefined {
@@ -170,6 +172,7 @@ export function createApp(deps: AppDeps): App {
       '/api',
       createAttachmentRoutes({ orm: deps.db.orm, auth: deps.auth, files: deps.files }),
     );
+    app.route('/api', createDocumentRoutes({ orm: deps.db.orm, auth: deps.auth }));
     app.route('/api', createLabelRoutes({ orm: deps.db.orm, auth: deps.auth }));
     app.route('/api', createWorkflowRoutes({ orm: deps.db.orm, auth: deps.auth }));
     app.route('/api', createMemberRoutes({ orm: deps.db.orm, auth: deps.auth, accessBus }));

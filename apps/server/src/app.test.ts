@@ -245,14 +245,21 @@ describe('body limits of the routes that take large bodies', () => {
   it.each([
     ['POST', `/api/w/${ws}/issues/${id}/comments`],
     ['PATCH', `/api/w/${ws}/comments/${id}`],
+    ['POST', `/api/w/${ws}/teams/${id}/documents`],
+    ['PATCH', `/api/w/${ws}/documents/${id}`],
   ])('%s %s takes a 100 KiB body to the route', async (method, path) => {
     const res = await send(path, method, 100 * 1024);
 
     expect(res.status).toBe(401);
   });
 
-  it('a 100 KiB body to another route still answers 413', async () => {
-    const res = await send(`/api/w/${ws}/members`, 'POST', 100 * 1024);
+  it.each([
+    ['POST', `/api/w/${ws}/members`],
+    ['PATCH', `/api/w/${ws}/teams/${id}`],
+    ['POST', `/api/w/${ws}/teams/${id}/members`],
+    ['POST', `/api/w/${ws}/issues/${id}/attachments`],
+  ])('a 100 KiB body to %s %s still answers 413', async (method, path) => {
+    const res = await send(path, method, 100 * 1024);
 
     expect(res.status).toBe(413);
   });

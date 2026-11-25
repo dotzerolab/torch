@@ -38,6 +38,8 @@ Three rules hold for every role:
 | Attach files to an issue they can see, and read its files       |  yes  |  yes  |  yes   |  yes  |
 | Remove a file they uploaded                                     |  yes  |  yes  |  yes   |  yes  |
 | Remove a file somebody else uploaded                            |  yes  |  yes  |  yes   |  no   |
+| Read the documents of a team they can see                       |  yes  |  yes  |  yes   |  yes  |
+| Create, edit and archive the documents of a team they can see   |  yes  |  yes  |  yes   |  no   |
 | Add or remove another person as a subscriber                    |  yes  |  yes  |  yes   |  yes  |
 | Read the labels and workflow states of the teams they can see   |  yes  |  yes  |  yes   |  yes  |
 | Create, edit and archive labels of a team they can see          |  yes  |  yes  |  yes   |  no   |
@@ -76,6 +78,8 @@ Issue rules in short, all inside the teams a person can see (a team they cannot 
   through a link that is minted per request after the permission check and lasts 60 seconds, so losing access to the
   team ends access to its files at once. Uploads are read-only on an archived issue; see the
   [attachment API](api/attachments.md).
+- Documents belong to a team. Everybody who sees the team reads them (a list never carries the text); everybody but a
+  guest writes them. An archived document is read-only until unarchived; see the [document API](api/documents.md).
 - Nothing is deleted. Issues, labels and workflow states are archived; see the [issue API](api/issues.md).
 
 ## Teams: public and private
