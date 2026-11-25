@@ -19,12 +19,21 @@ export const ISSUE_ERROR_CODES = [
   'workflow_state_name_taken',
   'workflow_state_required',
   'move_target_required',
+  // Comments, attachments and documents.
+  'comment_deleted',
+  'document_archived',
+  'file_too_large',
+  'file_type_not_allowed',
+  'file_rejected',
+  'storage_unavailable',
+  'too_many_attachments',
+  'rate_limited',
 ] as const;
 export type IssueErrorCode = (typeof ISSUE_ERROR_CODES)[number];
 
 export type IssueApiError = {
   code: IssueErrorCode;
-  status: 400 | 401 | 403 | 404 | 409 | 413 | 422;
+  status: 400 | 401 | 403 | 404 | 409 | 413 | 415 | 422 | 429 | 503;
   message?: string;
   details?: Record<string, unknown>;
 };
@@ -47,6 +56,14 @@ const MESSAGES: Record<IssueErrorCode, string> = {
   workflow_state_required:
     'A team keeps at least one backlog or unstarted state and one completed state.',
   move_target_required: 'This state has issues: say where they move with moveIssuesTo.',
+  comment_deleted: 'This comment was deleted.',
+  document_archived: 'An archived document cannot be changed. Unarchive it first.',
+  file_too_large: 'The file is larger than the size limit.',
+  file_type_not_allowed: 'This type of file is not allowed.',
+  file_rejected: 'The uploaded file did not match what was declared and was removed.',
+  storage_unavailable: 'File storage is not available. Try again later.',
+  too_many_attachments: 'This issue has reached its limit of attachments or pending uploads.',
+  rate_limited: 'Too many requests. Try again in a moment.',
 };
 
 // Every answer is about one person's data: nothing may be kept by a browser or a proxy.
