@@ -124,3 +124,29 @@ company's platform, needs from the operator:
 - a token for the API: the REST API and its tokens are planned, so there is nothing to hand out yet;
 - the health endpoints, reachable from where the system runs, to know whether the instance is ready;
 - the backups of section 5, with a restore that has been tried.
+
+## 8. Attachment storage
+
+Attachments go to S3-compatible object storage, straight from the browser: the Torch server presigns each upload and
+signs each download, and never carries the file. Without `S3_ENDPOINT` the server starts with attachments off (it logs
+`attachments are off`) and the attachment calls answer 503 `storage_unavailable`.
+
+- **Variables:** `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` (all four, or the server
+  refuses to start and names the missing one); optional `S3_REGION`, `S3_FORCE_PATH_STYLE`, `S3_PUBLIC_ENDPOINT` and
+  `ATTACHMENT_MAX_BYTES`. See [`.env.example`](../.env.example).
+- **The bucket is private.** Nothing in it is ever served without a signed URL; do not enable public reads or a website
+  endpoint. Use a key that can read, write and delete in that bucket only.
+- **The browser must reach the storage.** Uploads and downloads go from the browser to the storage address. When the
+  storage sits on a private network, publish it under its own name behind the proxy and set `S3_PUBLIC_ENDPOINT` to that
+  address (with TLS): signed requests are valid for the host they were signed for.
+- **Run `pnpm --filter @torch/server storage:setup` once.** It creates the bucket when it is missing and applies the CORS
+  rules for `APP_URL` (POST, PUT, GET and HEAD from that origin, nobody else). It is safe to run again. A managed service
+  that does not accept CORS through the API needs the same rule set in its console: the one origin of `APP_URL`, methods
+  POST, PUT, GET and HEAD, any header.
+- **Lifecycle:** uploads that were started and never finished leave a row the server deletes after 24 hours, together with
+  any object. Also add a rule to the bucket that aborts incomplete multipart uploads after one day.
+- **Back up the bucket** with the database: a restored database whose files are gone shows attachments that cannot be
+  opened. Use the provider's versioning or replication, or copy the bucket on the schedule of the database dump.
+- **Limits:** 25 MiB per file, 50 files per issue, a fixed list of types (images, PDF, text, CSV, Markdown, JSON, zip and
+  Office files). SVG and HTML are never accepted.
+

@@ -8,6 +8,7 @@ import { createAuthRoutes } from './auth/routes.ts';
 import { buildManifest } from './brand/manifest.ts';
 import { createCommentRoutes } from './comments/routes.ts';
 import type { Db } from './db.ts';
+import type { FileStorage } from './files/storage.ts';
 import { createInviteRoutes } from './invites/routes.ts';
 import { createIssueRoutes } from './issues/routes.ts';
 import { createLabelRoutes } from './labels/routes.ts';
@@ -34,6 +35,8 @@ export type AppDeps = {
   electric?: ElectricConfig;
   /** Turns a request into the Actor of one workspace (the session cookie in production). Data routes mount only when it is present. */
   auth?: ActorResolver;
+  /** Object storage for attachments (S3_ENDPOINT and friends). Absent: the attachment routes answer 503 `storage_unavailable`. */
+  files?: FileStorage;
   /** Replaces `fetch` towards Electric in tests. */
   fetchUpstream?: typeof fetch;
   /** Clock for sessions and tokens; tests move it. */
