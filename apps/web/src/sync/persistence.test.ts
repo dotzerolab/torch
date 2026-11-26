@@ -143,24 +143,26 @@ describe('persistence', () => {
     expect(files.has(storeName(WS_A))).toBe(true);
   });
 
-  it('older stores are rebuilt: comments, files and documents are stored kinds now, so the earlier layouts are deleted on open and the current one kept', async () => {
+  it('older stores are rebuilt: My Issues is a stored collection now, so the earlier layouts are deleted on open and the current one kept', async () => {
     const { platform, files } = fakePlatform();
     const scope = deviceScope(WS_A);
     files.add(`${scope}-v1`);
     files.add(`${scope}-v1-journal`);
     files.add(`${scope}-v2`);
     files.add(`${scope}-v2-journal`);
-    // A store of the layout the page writes now (a second tab opened it earlier) stays.
     files.add(`${scope}-v3`);
+    files.add(`${scope}-v3-journal`);
+    // A store of the layout the page writes now (a second tab opened it earlier) stays.
+    files.add(`${scope}-v4`);
 
     const store = await openWorkspaceStore(WS_A, platform);
 
-    expect(LOCAL_SCHEMA_VERSION).toBe(3);
-    expect(store.name).toBe(`${scope}-v3`);
-    for (const old of ['v1', 'v1-journal', 'v2', 'v2-journal']) {
+    expect(LOCAL_SCHEMA_VERSION).toBe(4);
+    expect(store.name).toBe(`${scope}-v4`);
+    for (const old of ['v1', 'v1-journal', 'v2', 'v2-journal', 'v3', 'v3-journal']) {
       expect(files.has(`${scope}-${old}`)).toBe(false);
     }
-    expect(files.has(`${scope}-v3`)).toBe(true);
+    expect(files.has(`${scope}-v4`)).toBe(true);
   });
 
   it('does not take a version that merely starts with the current one for the current store', async () => {
