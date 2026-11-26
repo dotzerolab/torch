@@ -42,6 +42,31 @@ describe('SettingsLayout', () => {
   });
 });
 
+describe('SettingsLayout tabs for workflow and labels', () => {
+  const tabsOf = (role: SessionWorkspace['role']) => {
+    render(
+      <LocaleProvider locale="en">
+        <SettingsLayout workspace={workspace(role)}>
+          <p>page</p>
+        </SettingsLayout>
+      </LocaleProvider>,
+    );
+    return screen.getAllByRole('link').map((link) => link.textContent);
+  };
+
+  it.each(['owner', 'admin'] as const)('lists workflow and labels for %s', (role) => {
+    expect(tabsOf(role)).toEqual(['Profile', 'Teams', 'Workflow', 'Labels', 'Members']);
+  });
+
+  it('member sees Labels but not Workflow', () => {
+    expect(tabsOf('member')).toEqual(['Profile', 'Teams', 'Labels']);
+  });
+
+  it('guest sees neither', () => {
+    expect(tabsOf('guest')).toEqual(['Profile', 'Teams']);
+  });
+});
+
 describe('MembersPage', () => {
   it.each(['member', 'guest'] as const)(
     'shows a no-access state to a %s, and nothing else',

@@ -26,10 +26,26 @@ export function mutationErrorMessage(locale: Locale, error: unknown): string {
   return t(locale, 'mutation.error.unknown');
 }
 
-const ADMIN_CODES: ReadonlySet<string> = new Set<AdminErrorCode>(ADMIN_ERROR_CODES);
+/** The refusals of the workflow and label calls the settings screens add to the admin ones. */
+const WORKFLOW_ERROR_CODES = [
+  'invalid_reference',
+  'workflow_state_name_taken',
+  'workflow_state_required',
+  'move_target_required',
+  'label_name_taken',
+] as const;
+type WorkflowErrorCode = (typeof WORKFLOW_ERROR_CODES)[number];
+
+const ADMIN_CODES: ReadonlySet<string> = new Set<string>([
+  ...ADMIN_ERROR_CODES,
+  ...WORKFLOW_ERROR_CODES,
+]);
 
 /** What a person reads for a refusal of an admin call (members, teams, invites). One text per code, in EN and IT. */
-export function adminErrorMessage(locale: Locale, code: AdminErrorCode): string {
+export function adminErrorMessage(
+  locale: Locale,
+  code: AdminErrorCode | WorkflowErrorCode,
+): string {
   return t(locale, `admin.error.${code}`);
 }
 
@@ -39,7 +55,8 @@ export function adminErrorMessage(locale: Locale, code: AdminErrorCode): string 
  */
 export function adminFailureMessage(locale: Locale, error: unknown): string {
   if (error instanceof ApiError) {
-    if (ADMIN_CODES.has(error.code)) return adminErrorMessage(locale, error.code as AdminErrorCode);
+    if (ADMIN_CODES.has(error.code))
+      return adminErrorMessage(locale, error.code as AdminErrorCode | WorkflowErrorCode);
     if (error.code === 'network') return t(locale, 'admin.error.network');
     if (error.message) return error.message;
   }

@@ -87,3 +87,23 @@ describe('adminFailureMessage', () => {
     expect(adminFailureMessage('en', new Error('boom'))).toBe('The change could not be saved.');
   });
 });
+
+describe('adminFailureMessage for the workflow and label refusals', () => {
+  const CODES = [
+    'invalid_reference',
+    'workflow_state_name_taken',
+    'workflow_state_required',
+    'move_target_required',
+    'label_name_taken',
+  ];
+
+  it.each(LOCALES.flatMap((locale) => CODES.map((code) => [locale, code] as const)))(
+    'shows a translated text for %s %s, not the server text',
+    (locale, code) => {
+      const text = adminFailureMessage(locale, new ApiError(422, code, 'developer text'));
+      expect(text).not.toBe('developer text');
+      expect(text).not.toMatch(/^admin\.error\./);
+      expect(text.trim()).not.toBe('');
+    },
+  );
+});
