@@ -2697,6 +2697,50 @@ describe.skipIf(!databaseUrl)('GET /api/sync/my-issues (fake Electric)', () => {
     });
   });
 
+  it('an open request ends when a public team is created, and the next one carries the new team', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const bus = createAccessBus();
+      // The long-poll waits until the proxy ends it; every other request is answered at once.
+      const upstream = fakeUpstream(async (call) => {
+        if (call.url.searchParams.get('live') !== 'true') return emptyShape();
+        return new Promise<Response>((_resolve, reject) => {
+          call.init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError')),
+          );
+        });
+      });
+      const app = buildApp(db, upstream.fetchUpstream, bus);
+      const owner = as(f.members.owner.id, { headers: { origin: TEST_ORIGIN } });
+
+      const pending = get(
+        app,
+        `${myIssuesPath(f)}?offset=5_1&handle=h-1&cursor=77&live=true`,
+        as(f.members.member.id),
+      );
+      await vi.waitFor(() => expect(bus.tracked()).toBe(1));
+
+      const created = await get(app, `/api/w/${f.workspaceId}/teams`, {
+        ...owner,
+        method: 'POST',
+        headers: { ...owner.headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ key: 'NEW', name: 'New team' }),
+      });
+      expect(created.status).toBe(201);
+      const { teamId } = (await created.json()) as { teamId: string };
+
+      const ended = await pending;
+      expect(ended.status).toBe(200);
+      expect(await ended.json()).toEqual([{ headers: { control: 'up-to-date' } }]);
+      expect(bus.tracked()).toBe(0);
+
+      upstream.calls.length = 0;
+      const next = await get(app, `${myIssuesPath(f)}?offset=-1`, as(f.members.member.id));
+      expect(next.status).toBe(200);
+      expect(sentParams(upstream.calls[0])).toContain(teamId);
+    });
+  });
+
   it('an open request ends for the person whose role changes and for everybody when a team turns private', async () => {
     await withTempDatabase(async (db) => {
       const f = await createWorkspaceFixture(db.orm);

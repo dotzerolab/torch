@@ -908,6 +908,27 @@ describe.skipIf(!databaseUrl)('team changes signal the access bus', () => {
     });
   });
 
+  it('creating a public team tells the whole workspace, a private one only its creator, a refused one nobody', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const owner = await actorOf(db, f.workspaceId, f.members.owner.id);
+      const guest = await actorOf(db, f.workspaceId, f.members.guest.id);
+      const bus = recordingBus();
+
+      successOf(await createTeam(db.orm, owner, { key: 'PUB', name: 'Public' }, bus));
+      expect(bus.calls).toEqual([{ workspaceId: f.workspaceId, memberIds: 'all' }]);
+
+      successOf(
+        await createTeam(db.orm, owner, { key: 'SEC', name: 'Secret', private: true }, bus),
+      );
+      expect(bus.calls[1]).toEqual({ workspaceId: f.workspaceId, memberIds: [f.members.owner.id] });
+
+      expect((await createTeam(db.orm, guest, { key: 'NOPE', name: 'No' }, bus)).ok).toBe(false);
+      expect((await createTeam(db.orm, owner, { key: 'PUB', name: 'Again' }, bus)).ok).toBe(false);
+      expect(bus.calls).toHaveLength(2);
+    });
+  });
+
   it('a refused update tells nobody', async () => {
     await withTempDatabase(async (db) => {
       const f = await createWorkspaceFixture(db.orm);
