@@ -4,6 +4,7 @@
 import { attachment, idempotencyKey, invite, loginToken, session } from '@torch/shared/db/schema';
 import { and, asc, eq, isNull, lt, or } from 'drizzle-orm';
 import type { Orm } from '../db.ts';
+import { stagingKeyOf } from '../files/keys.ts';
 import type { FileStorage } from '../files/storage.ts';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -61,10 +62,14 @@ export async function cleanupExpiredRows(
   };
 }
 
-/** Removes the object, then the row, of every upload that has been pending for over 24 hours; returns how many rows went. */
+/** Removes the objects (the staged one and the published key), then the row, of every upload that has been pending for over 24 hours; returns how many rows went. */
 async function removeStaleUploads(orm: Orm, now: Date, storage: FileStorage): Promise<number> {
   const stale = await orm
-    .select({ id: attachment.id, storageKey: attachment.storageKey })
+    .select({
+      id: attachment.id,
+      workspaceId: attachment.workspaceId,
+      storageKey: attachment.storageKey,
+    })
     .from(attachment)
     .where(
       and(
@@ -78,6 +83,7 @@ async function removeStaleUploads(orm: Orm, now: Date, storage: FileStorage): Pr
   let removed = 0;
   for (const row of stale) {
     try {
+      await storage.remove(stagingKeyOf(row.workspaceId, row.id));
       await storage.remove(row.storageKey);
     } catch {
       continue; // the row stays, so the next run tries again

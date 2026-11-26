@@ -5,7 +5,7 @@ import { runMigrations } from '../../server/src/db/migrate.ts';
 import { seedDev } from '../../server/src/db/seed.ts';
 import { createDb } from '../../server/src/db.ts';
 import { readStorageConfig } from '../../server/src/files/config.ts';
-import { corsRules, createS3BucketAdmin } from '../../server/src/files/storage.ts';
+import { corsRules, createS3BucketAdmin, lifecycleRules } from '../../server/src/files/storage.ts';
 import { restoreDemoLayout } from './helpers/demo-layout.ts';
 
 const REQUIRED = ['DATABASE_URL', 'ELECTRIC_URL', 'ELECTRIC_SECRET', 'SMTP_URL', 'MAILPIT_API_URL'];
@@ -83,4 +83,5 @@ async function prepareStorage(): Promise<void> {
   if (!(await admin.bucketExists())) await admin.createBucket();
   const origins = ['http://localhost:23200', 'http://localhost:23201'];
   await admin.putCors({ CORSRules: origins.flatMap((origin) => corsRules(origin).CORSRules) });
+  await admin.putLifecycle(lifecycleRules());
 }

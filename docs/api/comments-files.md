@@ -46,8 +46,8 @@ server then checks what is stored.
 2. Send the file to `upload.url` as `multipart/form-data`: every entry of `upload.fields` first, in order, then the file
    as the last field named `file`. Send no cookie to the storage. The storage itself refuses a body over the declared
    size or of another type.
-3. `POST /attachments/:attachmentId/complete`. The server compares the stored size, type and first bytes with what was
-   declared and publishes the file. A file that is not what it said is deleted: 422 `file_rejected`.
+3. `POST /attachments/:attachmentId/complete`. The storage copies the staged file to the file's own key, and the server
+   compares the stored size, type and first bytes of that copy with what was declared and publishes the file. A file that is not what it said is deleted: 422 `file_rejected`.
 
 If a step fails, start again from step 1; an upload nobody completes is removed after 24 hours.
 

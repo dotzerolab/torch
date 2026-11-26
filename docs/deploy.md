@@ -139,12 +139,17 @@ signs each download, and never carries the file. Without `S3_ENDPOINT` the serve
 - **The browser must reach the storage.** Uploads and downloads go from the browser to the storage address. When the
   storage sits on a private network, publish it under its own name behind the proxy and set `S3_PUBLIC_ENDPOINT` to that
   address (with TLS): signed requests are valid for the host they were signed for.
-- **Run `pnpm --filter @torch/server storage:setup` once.** It creates the bucket when it is missing and applies the CORS
-  rules for `APP_URL` (POST, PUT, GET and HEAD from that origin, nobody else). It is safe to run again. A managed service
-  that does not accept CORS through the API needs the same rule set in its console: the one origin of `APP_URL`, methods
-  POST, PUT, GET and HEAD, any header.
-- **Lifecycle:** uploads that were started and never finished leave a row the server deletes after 24 hours, together with
-  any object. Also add a rule to the bucket that aborts incomplete multipart uploads after one day.
+- **Run `pnpm --filter @torch/server storage:setup` once.** It creates the bucket when it is missing, applies the CORS
+  rules for `APP_URL` (POST, PUT, GET and HEAD from that origin, nobody else) and the lifecycle rules below. It is safe
+  to run again. A managed service that does not accept CORS or lifecycle rules through the API needs the same rule sets
+  in its console: for CORS the one origin of `APP_URL`, methods POST, PUT, GET and HEAD, any header.
+- **Lifecycle:** the browser uploads to a staging key under `uploads/`; the server copies a checked file to its own key
+  (`workspaces/<workspace>/attachments/<id>`) and removes the staged one. Uploads that were started and never finished
+  leave a row the server deletes after 24 hours, together with its objects. Two bucket rules cover what the server
+  cannot see, and `storage:setup` applies both: **expire every object under the `uploads/` prefix after 1 day** (a signed
+  upload request can be used again until it expires, so a staged object can come back after it was removed), and abort
+  incomplete multipart uploads after 1 day. On a service where you set them by hand, use a prefix filter `uploads/`
+  (not a wildcard) for the first rule.
 - **Back up the bucket** with the database: a restored database whose files are gone shows attachments that cannot be
   opened. Use the provider's versioning or replication, or copy the bucket on the schedule of the database dump.
 - **Limits:** 25 MiB per file, 50 files per issue, a fixed list of types (images, PDF, text, CSV, Markdown, JSON, zip and

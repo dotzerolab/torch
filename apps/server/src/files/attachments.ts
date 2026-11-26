@@ -1,7 +1,13 @@
 // Issue attachments (spec section 16). The file never passes through this server: `initAttachment` stores a pending row
-// and hands the browser a presigned upload request whose policy pins the key, the type and the size range; the
-// browser sends the file to the storage; `completeAttachment` then verifies the stored object (size, type, first bytes)
-// and publishes the row; reads are a signed URL of 60 seconds minted after the permission check, never stored or logged.
+// and hands the browser a presigned upload request whose policy pins a STAGING key, the type and the size range; the
+// browser sends the file to the storage; `completeAttachment` then has the storage copy the staged object to the row's
+// own key, verifies that copy (size, type, first bytes) and publishes the row; reads are a signed URL of 60 seconds
+// minted after the permission check, never stored or logged.
+//
+// Why a copy: a presigned POST policy can be used again until it expires, so whatever it names can change after it was
+// verified. The browser can only ever write the staging key; the row's own key is written by the server alone, so what
+// was verified is what is published. Nothing the storage does happens inside a transaction: `complete` checks who may,
+// leaves the transaction, talks to the storage, and then opens a second one to lock, re-check and publish.
 //
 // Rows are `pending` until verified and only `ready` rows are listed or synced. An object is never removed before the
 // database says it should be: a removal first turns the row into a "queued removal" (pending, created at the epoch, so
@@ -23,11 +29,12 @@ import { PENDING_UPLOAD_MAX_AGE_MS } from '../db/cleanup.ts';
 import type { Orm, Tx } from '../db.ts';
 import { type ChangeResult, changeIssueJoin } from '../issues/join-changes.ts';
 import { readableIssue } from '../issues/readable-issue.ts';
-import { type Failure, refuse } from '../issues/update-issue.ts';
+import { type Failure, refuse, touchIssue } from '../issues/update-issue.ts';
 import { currentTxid } from '../mutations/txid.ts';
 import { currentActor } from '../permissions/current-actor.ts';
 import type { ClientActor } from '../permissions/load-actor.ts';
 import { isUuid } from '../util/uuid.ts';
+import { finalKeyOf, stagingKeyOf } from './keys.ts';
 import { sniffMatches } from './sniff.ts';
 import type { FileStorage, UploadRequest } from './storage.ts';
 
@@ -56,9 +63,6 @@ export const DOWNLOAD_LIFETIME_SECONDS = 60;
 const SNIFF_BYTES = 512;
 /** The created-at of a row that queued its own removal: older than any limit, so the next cleanup run takes it. */
 const QUEUED_AT = new Date(0);
-
-const keyOf = (workspaceId: string, attachmentId: string) =>
-  `workspaces/${workspaceId}/attachments/${attachmentId}`;
 
 export function toAttachmentDto(row: AttachmentRow): AttachmentDto {
   return {
@@ -106,9 +110,14 @@ const queueRemoval = (tx: Tx, row: AttachmentRow) =>
     .set({ status: 'pending', readyAt: null, createdAt: QUEUED_AT })
     .where(and(eq(attachment.workspaceId, row.workspaceId), eq(attachment.id, row.id)));
 
-/** After the commit: removes the object, then the row. A failure leaves the queued row for the cleanup job. */
+/**
+ * After the commit: removes the staged object (it may have been sent again) and the published one, then the row. The
+ * staged one goes first, so a copy that has not started yet finds nothing to copy. A failure leaves the queued row for
+ * the cleanup job, which removes both keys again.
+ */
 async function finishRemoval(orm: Orm, storage: FileStorage, row: AttachmentRow): Promise<void> {
   try {
+    await storage.remove(stagingKeyOf(row.workspaceId, row.id));
     await storage.remove(row.storageKey);
     await orm
       .delete(attachment)
@@ -200,7 +209,7 @@ export async function initAttachment(
         fileName: safeFileName(data.fileName),
         contentType: data.contentType,
         sizeBytes: data.size,
-        storageKey: keyOf(actor.workspaceId, id),
+        storageKey: finalKeyOf(actor.workspaceId, id),
         status: 'pending',
         createdAt: sql`clock_timestamp()`,
       })
@@ -210,7 +219,7 @@ export async function initAttachment(
     let upload: UploadRequest;
     try {
       upload = await storage.presignUpload({
-        key: created.storageKey,
+        key: stagingKeyOf(created.workspaceId, created.id),
         contentType: created.contentType,
         size: created.sizeBytes,
         expiresInSeconds: UPLOAD_LIFETIME_SECONDS,
@@ -224,10 +233,37 @@ export async function initAttachment(
   });
 }
 
+/** What the check of a copied file found: it holds what was declared, it does not, or there was nothing to check. */
+type Verdict = 'ok' | 'rejected' | 'missing';
+
 /**
- * Verifies the stored object against what was declared (size, stored type, first bytes) and publishes the row. Only
+ * Has the storage copy the staged object to the row's own key, then checks that copy: size, stored type and first
+ * bytes against what was declared. Throws when the storage cannot be reached.
+ */
+async function copyAndVerify(storage: FileStorage, row: AttachmentRow): Promise<Verdict> {
+  const copied = await storage.copy(stagingKeyOf(row.workspaceId, row.id), row.storageKey);
+  if (!copied) return 'missing';
+  const head = await storage.head(row.storageKey);
+  if (!head) return 'missing';
+  const start = await storage.readStart(row.storageKey, SNIFF_BYTES);
+  const declaredType = row.contentType.toLowerCase();
+  const storedType = head.contentType?.trim().toLowerCase() ?? null;
+  return head.size === row.sizeBytes &&
+    storedType === declaredType &&
+    sniffMatches(declaredType, start)
+    ? 'ok'
+    : 'rejected';
+}
+
+/**
+ * Verifies the uploaded file against what was declared (size, stored type, first bytes) and publishes the row. Only
  * the uploader completes. A file that does not match is removed with its row and answers 422 `file_rejected`; a missing
  * object answers the same and leaves the row pending, so the upload can be sent again. Doing it twice changes nothing.
+ *
+ * Three steps, and the storage is spoken to in the middle one only, never inside a transaction (a slow storage must not
+ * hold the issue's row lock or a connection): (1) a short transaction that checks who may and whether there is
+ * anything to do; (2) the copy and its check; (3) a second transaction that locks the issue, checks everything again
+ * and publishes or discards, because the world may have moved in between (a removal, an archive, another complete).
  */
 export async function completeAttachment(
   orm: Orm,
@@ -238,7 +274,49 @@ export async function completeAttachment(
   const issueId = await issueIdOf(orm, requested.workspaceId, attachmentId);
   if (!issueId) return refuse('not_found', 404);
 
-  let rejected: AttachmentRow | undefined;
+  const refuseUnlessMayComplete = (
+    row: AttachmentRow | undefined,
+    actor: ClientActor,
+    access: Parameters<typeof canAttach>[1],
+  ): Failure | null => {
+    if (!row || isStale(row)) return refuse('not_found', 404);
+    if (!canAttach(actor, access)) return refuse('forbidden', 403);
+    if (row.uploaderId !== actor.memberId) return refuse('forbidden', 403);
+    return null;
+  };
+
+  // 1. Who may, and is there anything to verify.
+  const gate = await changeIssueJoin(
+    orm,
+    requested,
+    issueId,
+    'see',
+    async ({ tx, actor, access }) => {
+      const row = await lockAttachment(tx, actor.workspaceId, attachmentId);
+      const refusal = refuseUnlessMayComplete(row, actor, access);
+      if (refusal || !row) return refusal ?? refuse('not_found', 404);
+      return { value: row, changed: false };
+    },
+  );
+  if (!gate.ok) return gate;
+  if (gate.value.status === 'ready') {
+    return { ok: true, txid: gate.txid, value: toAttachmentDto(gate.value) };
+  }
+  const pending = gate.value;
+
+  // 2. The storage: copy, then check the copy.
+  let verdict: Verdict;
+  try {
+    verdict = await copyAndVerify(storage, pending);
+  } catch {
+    return storageUnavailable();
+  }
+  if (verdict === 'missing') {
+    return refuse('file_rejected', 422, { message: 'The file has not been uploaded.' });
+  }
+
+  // 3. Lock, check again, publish or discard.
+  let discarded: AttachmentRow | undefined;
   const result = await changeIssueJoin(
     orm,
     requested,
@@ -246,34 +324,31 @@ export async function completeAttachment(
     'see',
     async ({ tx, actor, access }) => {
       const row = await lockAttachment(tx, actor.workspaceId, attachmentId);
-      if (!row || isStale(row)) return refuse('not_found', 404);
-      if (!canAttach(actor, access)) return refuse('forbidden', 403);
-      if (row.uploaderId !== actor.memberId) return refuse('forbidden', 403);
-      if (row.status === 'ready') return { value: toAttachmentDto(row), changed: false };
+      const refusal = refuseUnlessMayComplete(row, actor, access);
+      if (refusal || !row) return refusal ?? refuse('not_found', 404);
 
-      let head: Awaited<ReturnType<FileStorage['head']>>;
-      let start: Uint8Array = new Uint8Array();
-      try {
-        head = await storage.head(row.storageKey);
-        if (head) start = await storage.readStart(row.storageKey, SNIFF_BYTES);
-      } catch {
-        return storageUnavailable();
-      }
-      if (!head) {
-        return refuse('file_rejected', 422, { message: 'The file has not been uploaded.' });
-      }
-
-      const declaredType = row.contentType.toLowerCase();
-      const storedType = head.contentType?.trim().toLowerCase() ?? null;
-      if (
-        head.size !== row.sizeBytes ||
-        storedType !== declaredType ||
-        !sniffMatches(declaredType, start)
-      ) {
+      if (verdict === 'rejected') {
+        // Another complete may have published the row meanwhile: this copy replaced the published bytes with bytes that
+        // fail the check, so the file goes as a removal would take it.
         await queueRemoval(tx, row);
-        rejected = row;
+        discarded = row;
+        if (row.status === 'ready') {
+          await recordIssueChange(tx, actor, {
+            kind: 'attachment',
+            issueId: row.issueId,
+            op: 'removed',
+            data: {
+              attachmentId: row.id,
+              fileName: row.fileName,
+              size: row.sizeBytes,
+              contentType: row.contentType,
+            },
+          });
+          await touchIssue(tx, actor.workspaceId, row.issueId);
+        }
         return refuse('file_rejected', 422);
       }
+      if (row.status === 'ready') return { value: toAttachmentDto(row), changed: false };
 
       const [published] = await tx
         .update(attachment)
@@ -296,8 +371,24 @@ export async function completeAttachment(
     },
   );
 
-  if (rejected) await finishRemoval(orm, storage, rejected);
+  if (discarded) {
+    await finishRemoval(orm, storage, discarded);
+  } else if (result.ok) {
+    // The staged copy has done its job. If this fails, the bucket expires it.
+    await storage.remove(stagingKeyOf(pending.workspaceId, pending.id)).catch(() => {});
+  } else if (result.status === 404 && !(await rowExists(orm, pending))) {
+    // The row is gone (a removal won): nothing may keep the copy that landed after it.
+    await storage.remove(pending.storageKey).catch(() => {});
+  }
   return result;
+}
+
+async function rowExists(orm: Orm, row: AttachmentRow): Promise<boolean> {
+  const [found] = await orm
+    .select({ id: attachment.id })
+    .from(attachment)
+    .where(and(eq(attachment.workspaceId, row.workspaceId), eq(attachment.id, row.id)));
+  return !!found;
 }
 
 /**

@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { readStorageConfig, type StorageConfig } from './config.ts';
+import { UPLOAD_PREFIX } from './keys.ts';
 import {
   corsRules,
   createS3Storage,
   ensureBucket,
   type FileStorage,
+  lifecycleRules,
   type UploadRequest,
 } from './storage.ts';
 import { type ContractWorld, describeStorageContract } from './storage-contract.ts';
@@ -118,6 +120,29 @@ describe('corsRules', () => {
   });
 });
 
+describe('lifecycleRules', () => {
+  it('expires the staging prefix after a day and aborts incomplete multipart uploads after a day', () => {
+    const { Rules } = lifecycleRules() as {
+      Rules: {
+        Status: string;
+        Filter: { Prefix: string };
+        Expiration?: { Days: number };
+        AbortIncompleteMultipartUpload?: { DaysAfterInitiation: number };
+      }[];
+    };
+
+    const staged = Rules.find((rule) => rule.Filter.Prefix === UPLOAD_PREFIX);
+    const multipart = Rules.find((rule) => rule.AbortIncompleteMultipartUpload);
+    expect(UPLOAD_PREFIX).toBe('uploads/');
+    expect(staged).toMatchObject({ Status: 'Enabled', Expiration: { Days: 1 } });
+    expect(multipart).toMatchObject({
+      Status: 'Enabled',
+      AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 },
+    });
+    expect(Rules.every((rule) => rule.Status === 'Enabled')).toBe(true);
+  });
+});
+
 // ---- the real storage service (the dev compose one), skipped loudly without S3_ENDPOINT ----
 
 const config = process.env.S3_ENDPOINT ? readStorageConfig(process.env) : null;
@@ -202,6 +227,34 @@ describe.skipIf(!config)('S3 storage (integration)', () => {
       expect(res.headers.get('content-type')).toBe('application/pdf');
       expect(res.headers.get('content-disposition')).toContain('attachment');
       expect(new Uint8Array(await res.arrayBuffer())).toEqual(body);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  it('a second POST with the same presigned request after the copy does not change the published object', async () => {
+    const w = await world();
+    const staged = keyOf();
+    const published = keyOf();
+    const first = new Uint8Array(64);
+    first.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    try {
+      const request = await storage.presignUpload({
+        key: staged,
+        contentType: 'image/png',
+        size: 64,
+        expiresInSeconds: 300,
+      });
+      expect((await sendUpload(request, first)).ok).toBe(true);
+      expect(await storage.copy(staged, published)).toBe(true);
+      await storage.remove(staged);
+
+      // The request is a policy and stays good until it expires: the browser (or anybody holding it) can send again.
+      const again = await sendUpload(request, new TextEncoder().encode('<html>other</html>'));
+
+      expect(again.ok).toBe(true);
+      expect(await storage.head(published)).toEqual({ size: 64, contentType: 'image/png' });
+      expect([...(await storage.readStart(published, 100))]).toEqual([...first]);
     } finally {
       await w.cleanup();
     }

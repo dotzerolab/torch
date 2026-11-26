@@ -3,17 +3,20 @@
 // the stored object, and reads are a redirect to a short-lived signed URL minted after the permission check.
 // Nothing here logs a URL, a key or a field: a signed request is a bearer credential for its lifetime.
 import {
+  CopyObjectCommand,
   CreateBucketCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadBucketCommand,
   HeadObjectCommand,
   PutBucketCorsCommand,
+  PutBucketLifecycleConfigurationCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { StorageConfig } from './config.ts';
+import { UPLOAD_PREFIX } from './keys.ts';
 
 /** What the browser sends to put a file in the storage: a form POST (fields, then the file) or a PUT with headers. */
 export type UploadRequest = {
@@ -43,6 +46,11 @@ export type FileStorage = {
   head(key: string): Promise<{ size: number; contentType: string | null } | null>;
   /** The first `bytes` bytes of an object (a ranged read). */
   readStart(key: string, bytes: number): Promise<Uint8Array>;
+  /**
+   * Copies an object to another key inside the storage (the bytes never pass this server), keeping its type, and
+   * replaces whatever the target held. False when the source does not exist; nothing is created then.
+   */
+  copy(fromKey: string, toKey: string): Promise<boolean>;
   /** Deletes an object; a missing key is not an error. */
   remove(key: string): Promise<void>;
 };
@@ -132,6 +140,23 @@ export function createS3Storage(config: StorageConfig): FileStorage {
       return (await res.Body?.transformToByteArray()) ?? new Uint8Array();
     },
 
+    async copy(fromKey, toKey) {
+      try {
+        await inside.send(
+          new CopyObjectCommand({
+            Bucket,
+            Key: toKey,
+            CopySource: `${Bucket}/${fromKey.split('/').map(encodeURIComponent).join('/')}`,
+            MetadataDirective: 'COPY',
+          }),
+        );
+        return true;
+      } catch (error) {
+        if (isMissing(error)) return false;
+        throw error;
+      }
+    },
+
     async remove(key) {
       await inside.send(new DeleteObjectCommand({ Bucket, Key: key }));
     },
@@ -153,11 +178,37 @@ export function corsRules(appUrl: string): { CORSRules: object[] } {
   };
 }
 
+/**
+ * The bucket rules for objects nobody finished: whatever is left under the staging prefix goes after one day (a
+ * presigned upload request can be used again until it expires, so a staged object can reappear after its removal), and
+ * an incomplete multipart upload is aborted after one day. A lifecycle filter is a key prefix, which is why the staging
+ * keys start with it.
+ */
+export function lifecycleRules(): { Rules: object[] } {
+  return {
+    Rules: [
+      {
+        ID: 'expire-staged-uploads',
+        Status: 'Enabled',
+        Filter: { Prefix: UPLOAD_PREFIX },
+        Expiration: { Days: 1 },
+      },
+      {
+        ID: 'abort-incomplete-multipart-uploads',
+        Status: 'Enabled',
+        Filter: { Prefix: '' },
+        AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 },
+      },
+    ],
+  };
+}
+
 /** What `storage:setup` needs from a storage service; a thin layer over the SDK so the setup logic is testable. */
 export type BucketAdmin = {
   bucketExists(): Promise<boolean>;
   createBucket(): Promise<void>;
   putCors(rules: { CORSRules: object[] }): Promise<void>;
+  putLifecycle(rules: { Rules: object[] }): Promise<void>;
 };
 
 export function createS3BucketAdmin(config: StorageConfig): BucketAdmin {
@@ -179,6 +230,14 @@ export function createS3BucketAdmin(config: StorageConfig): BucketAdmin {
     async putCors(rules) {
       await client.send(
         new PutBucketCorsCommand({ Bucket, CORSConfiguration: rules as { CORSRules: never[] } }),
+      );
+    },
+    async putLifecycle(rules) {
+      await client.send(
+        new PutBucketLifecycleConfigurationCommand({
+          Bucket,
+          LifecycleConfiguration: rules as { Rules: never[] },
+        }),
       );
     },
   };

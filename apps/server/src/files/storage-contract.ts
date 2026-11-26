@@ -62,6 +62,57 @@ export function describeStorageContract(
       }
     });
 
+    it('copy puts the bytes and the type at another key and leaves the source alone', async () => {
+      const world = await make();
+      const from = keyOf();
+      const to = keyOf();
+      try {
+        await world.upload(from, bytes(1, 2, 3, 4, 5), 'application/pdf');
+
+        const copied = await world.storage.copy(from, to);
+
+        expect(copied).toBe(true);
+        expect(await world.storage.head(to)).toEqual({ size: 5, contentType: 'application/pdf' });
+        expect([...(await world.storage.readStart(to, 100))]).toEqual([1, 2, 3, 4, 5]);
+        expect(await world.storage.head(from)).toEqual({ size: 5, contentType: 'application/pdf' });
+      } finally {
+        await world.storage.remove(from);
+        await world.storage.remove(to);
+        await world.cleanup();
+      }
+    });
+
+    it('copy of a missing source answers false and creates nothing', async () => {
+      const world = await make();
+      const to = keyOf();
+      try {
+        const copied = await world.storage.copy(keyOf(), to);
+
+        expect(copied).toBe(false);
+        expect(await world.storage.head(to)).toBeNull();
+      } finally {
+        await world.cleanup();
+      }
+    });
+
+    it('copy replaces what the target key held', async () => {
+      const world = await make();
+      const from = keyOf();
+      const to = keyOf();
+      try {
+        await world.upload(to, bytes(9, 9), 'text/plain');
+        await world.upload(from, bytes(1, 2, 3), 'application/pdf');
+
+        await world.storage.copy(from, to);
+
+        expect(await world.storage.head(to)).toEqual({ size: 3, contentType: 'application/pdf' });
+      } finally {
+        await world.storage.remove(from);
+        await world.storage.remove(to);
+        await world.cleanup();
+      }
+    });
+
     it('presignDownload gives a URL for the key and never the secret', async () => {
       const world = await make();
       const key = keyOf();

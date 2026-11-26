@@ -8,7 +8,7 @@ import {
   teamMember,
 } from '@torch/shared/db/schema';
 import { MAX_ATTACHMENTS_PER_ISSUE } from '@torch/shared/mutations/attachment';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { describe, expect, it, vi } from 'vitest';
 import { cleanupExpiredRows } from '../db/cleanup.ts';
 import type { Db } from '../db.ts';
@@ -28,6 +28,8 @@ import {
   removeAttachment,
 } from './attachments.ts';
 import { createFakeStorage } from './fake-storage.ts';
+import { finalKeyOf, stagingKeyOf } from './keys.ts';
+import type { FileStorage } from './storage.ts';
 
 const databaseUrl = process.env.DATABASE_URL;
 
@@ -99,6 +101,7 @@ describe.skipIf(!databaseUrl)('attachments', () => {
     object: { bytes?: Uint8Array; contentType?: string } = {},
   ) {
     const started = got(await init(w, actor, over));
+    // `key` is where the browser puts the file (the staging key); `finalKey` is where a verified file ends up.
     const key = started.value.upload.fields?.key ?? '';
     const size = over.size ?? 100;
     w.storage.put(
@@ -106,8 +109,18 @@ describe.skipIf(!databaseUrl)('attachments', () => {
       object.bytes ?? png(size),
       object.contentType ?? over.contentType ?? 'image/png',
     );
-    return { id: started.value.attachment.id, key };
+    const id = started.value.attachment.id;
+    return { id, key, finalKey: finalKeyOf(w.f.workspaceId, id) };
   }
+
+  /** Whether the issue row can be locked right now by somebody else (it cannot while a transaction holds it). */
+  const issueLockFree = (w: World) =>
+    w.db.orm
+      .transaction(async (tx) => {
+        await tx.execute(sql`select id from issue where id = ${w.issue.id} for update nowait`);
+        return true;
+      })
+      .catch(() => false);
 
   async function restrict(
     db: Db,
@@ -163,7 +176,12 @@ describe.skipIf(!databaseUrl)('attachments', () => {
       expect(stored?.storageKey).toBe(
         `workspaces/${w.f.workspaceId}/attachments/${started.value.attachment.id}`,
       );
-      expect(started.value.upload.fields?.key).toBe(stored?.storageKey);
+      // The browser sends the file to a staging key; the row's own key is never writable by the browser.
+      expect(started.value.upload.fields?.key).toBe(
+        stagingKeyOf(w.f.workspaceId, started.value.attachment.id),
+      );
+      expect(started.value.upload.fields?.key).not.toBe(stored?.storageKey);
+      expect(started.value.upload.fields?.key).toMatch(/^uploads\//);
       // The row's key is never part of what the client reads about the file.
       expect(JSON.stringify(started.value.attachment)).not.toContain('workspaces/');
     });
@@ -401,6 +419,10 @@ describe.skipIf(!databaseUrl)('attachments', () => {
         1,
       );
       expect(JSON.stringify([activity, events])).not.toContain(file.key);
+      expect(JSON.stringify([activity, events])).not.toContain(file.finalKey);
+      // The file was copied to its own key and the staged copy is gone.
+      expect(w.storage.keys()).toEqual([file.finalKey]);
+      expect(stored?.storageKey).toBe(file.finalKey);
       // The issue moves, so the web refreshes its snapshot read of the files.
       expect(await updatedAtOf(w.db, w.issue.id)).toBeGreaterThan(before);
     });
@@ -412,7 +434,7 @@ describe.skipIf(!databaseUrl)('attachments', () => {
       const result = await completeAttachment(w.db.orm, w.storage, w.member, file.id);
 
       expect(result).toMatchObject({ ok: false, status: 422, code: 'file_rejected' });
-      expect(w.storage.keys()).not.toContain(file.key);
+      expect(w.storage.keys()).toEqual([]);
       expect(await rowOf(w.db, file.id)).toBeUndefined();
     });
 
@@ -423,7 +445,7 @@ describe.skipIf(!databaseUrl)('attachments', () => {
       const result = await completeAttachment(w.db.orm, w.storage, w.member, file.id);
 
       expect(result).toMatchObject({ ok: false, status: 422, code: 'file_rejected' });
-      expect(w.storage.keys()).not.toContain(file.key);
+      expect(w.storage.keys()).toEqual([]);
       expect(await rowOf(w.db, file.id)).toBeUndefined();
     });
 
@@ -434,7 +456,7 @@ describe.skipIf(!databaseUrl)('attachments', () => {
       const result = await completeAttachment(w.db.orm, w.storage, w.member, file.id);
 
       expect(result).toMatchObject({ ok: false, status: 422, code: 'file_rejected' });
-      expect(w.storage.keys()).not.toContain(file.key);
+      expect(w.storage.keys()).toEqual([]);
       expect(await rowOf(w.db, file.id)).toBeUndefined();
     });
 
@@ -468,9 +490,135 @@ describe.skipIf(!databaseUrl)('attachments', () => {
         expect(await listAttachments(w.db.orm, w.member, w.issue.id)).toMatchObject({ value: [] });
         const counts = await cleanupExpiredRows(w.db.orm, new Date(), w.storage);
         expect(counts.pendingAttachments).toBe(1);
-        expect(w.storage.keys()).not.toContain(file.key);
+        expect(w.storage.keys()).toEqual([]);
         expect(await rowOf(w.db, file.id)).toBeUndefined();
       });
+    });
+
+    it('the file is read, copied and checked with no lock on the issue held, so a slow storage blocks nothing', async () => {
+      const w = await world('LCK');
+      const file = await uploaded(w, w.member);
+      const probes: { call: string; free: boolean }[] = [];
+      const base = w.storage;
+      const watched: FileStorage = {
+        ...base,
+        head: async (key) => {
+          probes.push({ call: 'head', free: await issueLockFree(w) });
+          return base.head(key);
+        },
+        readStart: async (key, bytes) => {
+          probes.push({ call: 'readStart', free: await issueLockFree(w) });
+          return base.readStart(key, bytes);
+        },
+        copy: async (from, to) => {
+          probes.push({ call: 'copy', free: await issueLockFree(w) });
+          return base.copy(from, to);
+        },
+        remove: async (key) => {
+          probes.push({ call: 'remove', free: await issueLockFree(w) });
+          return base.remove(key);
+        },
+      };
+
+      got(await completeAttachment(w.db.orm, watched, w.member, file.id));
+
+      expect(probes.map((probe) => probe.call)).toEqual(
+        expect.arrayContaining(['copy', 'head', 'readStart', 'remove']),
+      );
+      expect(probes.filter((probe) => !probe.free)).toEqual([]);
+    });
+
+    it('a copy that does not hold the declared bytes is removed with its row, staged copy included', async () => {
+      const w = await world('BAD');
+      const file = await uploaded(w, w.member, {}, { bytes: text('<html>'.padEnd(100, ' ')) });
+
+      const result = await completeAttachment(w.db.orm, w.storage, w.member, file.id);
+
+      expect(result).toMatchObject({ ok: false, status: 422, code: 'file_rejected' });
+      expect(w.storage.keys()).toEqual([]);
+      expect(await rowOf(w.db, file.id)).toBeUndefined();
+    });
+
+    it('bytes posted to the staging key again after complete never reach the published file', async () => {
+      const w = await world('RPO');
+      const file = await uploaded(w, w.member, { size: 64 });
+      got(await completeAttachment(w.db.orm, w.storage, w.member, file.id));
+
+      // The signed upload request is a policy and works until it expires: somebody sends again.
+      w.storage.put(file.key, text('<html>other</html>'), 'image/png');
+      const again = got(await completeAttachment(w.db.orm, w.storage, w.member, file.id));
+
+      expect(again.value.status).toBe('ready');
+      expect(await w.storage.head(file.finalKey)).toEqual({ size: 64, contentType: 'image/png' });
+      expect([...(await w.storage.readStart(file.finalKey, 8))]).toEqual([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      ]);
+    });
+
+    it('a storage that cannot copy answers 503, writes nothing and lets the upload be completed later', async () => {
+      const w = await world('CPF');
+      const file = await uploaded(w, w.member);
+      w.storage.faults.copy = true;
+
+      const down = await completeAttachment(w.db.orm, w.storage, w.member, file.id);
+      w.storage.faults.copy = false;
+      const retry = await completeAttachment(w.db.orm, w.storage, w.member, file.id);
+
+      expect(down).toMatchObject({ ok: false, status: 503, code: 'storage_unavailable' });
+      expect(retry.ok).toBe(true);
+      expect(w.storage.keys()).toEqual([file.finalKey]);
+    });
+
+    it('a second complete that overwrites the published file with bytes that fail the check removes the file', async () => {
+      const w = await world('RAC');
+      const file = await uploaded(w, w.member, { size: 64 });
+      const base = w.storage;
+      let raced = false;
+      const racing: FileStorage = {
+        ...base,
+        copy: async (from, to) => {
+          if (!raced) {
+            raced = true;
+            // The other complete runs to its end while this one is in flight, then the staged bytes change.
+            got(await completeAttachment(w.db.orm, base, w.member, file.id));
+            base.put(from, text('<html>swapped</html>'.padEnd(64, ' ')), 'image/png');
+          }
+          return base.copy(from, to);
+        },
+      };
+
+      const result = await completeAttachment(w.db.orm, racing, w.member, file.id);
+
+      expect(result).toMatchObject({ ok: false, status: 422, code: 'file_rejected' });
+      expect(await rowOf(w.db, file.id)).toBeUndefined();
+      expect(w.storage.keys()).toEqual([]);
+      expect(got(await listAttachments(w.db.orm, w.member, w.issue.id)).value).toEqual([]);
+      const kinds = (await activityOf(w.db, w.issue.id))
+        .map((row) => row.type)
+        .filter((type) => type.startsWith('issue.attachment'));
+      expect(kinds).toEqual(['issue.attachment_added', 'issue.attachment_removed']);
+    });
+
+    it('a removal that wins while the copy is in flight leaves no object behind', async () => {
+      const w = await world('RWN');
+      const file = await uploaded(w, w.member);
+      const base = w.storage;
+      const racing: FileStorage = {
+        ...base,
+        copy: async (from, to) => {
+          const copied = await base.copy(from, to);
+          got(await removeAttachment(w.db.orm, base, w.member, file.id));
+          // the in-flight copy lands after the removal finished
+          if (copied) base.put(to, png(100), 'image/png');
+          return copied;
+        },
+      };
+
+      const result = await completeAttachment(w.db.orm, racing, w.member, file.id);
+
+      expect(result).toMatchObject({ ok: false, status: 404 });
+      expect(await rowOf(w.db, file.id)).toBeUndefined();
+      expect(w.storage.keys()).toEqual([]);
     });
 
     it('complete twice is one activity row', async () => {
@@ -753,7 +901,7 @@ describe.skipIf(!databaseUrl)('attachments', () => {
 
       got(await removeAttachment(w.db.orm, w.storage, w.member, file.id));
 
-      expect(w.storage.keys()).not.toContain(file.key);
+      expect(w.storage.keys()).toEqual([]);
       expect(await rowOf(w.db, file.id)).toBeUndefined();
       const removed = (await activityOf(w.db, w.issue.id)).filter(
         (row) => row.type === 'issue.attachment_removed',
@@ -782,7 +930,7 @@ describe.skipIf(!databaseUrl)('attachments', () => {
           ok: false,
           status: 404,
         });
-        expect(w.storage.keys()).toContain(file.key);
+        expect(w.storage.keys()).toContain(file.finalKey);
         // Not even its uploader can bring it back.
         expect(await completeAttachment(w.db.orm, w.storage, w.member, file.id)).toMatchObject({
           ok: false,
@@ -792,7 +940,7 @@ describe.skipIf(!databaseUrl)('attachments', () => {
         const counts = await cleanupExpiredRows(w.db.orm, new Date(), w.storage);
 
         expect(counts.pendingAttachments).toBe(1);
-        expect(w.storage.keys()).not.toContain(file.key);
+        expect(w.storage.keys()).toEqual([]);
         expect(await rowOf(w.db, file.id)).toBeUndefined();
       });
     });
@@ -806,7 +954,7 @@ describe.skipIf(!databaseUrl)('attachments', () => {
 
       expect(other).toMatchObject({ ok: false, status: 404 });
       expect(own.ok).toBe(true);
-      expect(w.storage.keys()).not.toContain(file.key);
+      expect(w.storage.keys()).toEqual([]);
       expect(await rowOf(w.db, file.id)).toBeUndefined();
       expect(
         (await activityOf(w.db, w.issue.id)).filter((row) =>
@@ -827,7 +975,7 @@ describe.skipIf(!databaseUrl)('attachments', () => {
 
       expect(archived).toMatchObject({ ok: false, status: 409, code: 'issue_archived' });
       expect(foreignAttempt).toMatchObject({ ok: false, status: 404 });
-      expect(w.storage.keys()).toContain(file.key);
+      expect(w.storage.keys()).toContain(file.finalKey);
     });
   });
 

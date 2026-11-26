@@ -18,6 +18,11 @@ the conventions every call shares (paths under `/api/w/:workspaceId`, JSON bodie
 - **The storage checks the size and the type itself** (the presigned request carries a policy), and the server checks
   them again, and the first bytes of the file, when the upload is completed. A file that is not what it said is deleted
   and answers 422 `file_rejected`.
+- **The upload request can only write a staging copy.** It names a key of its own, and a signed upload request works
+  until it expires, so it could be used again after the check. When you complete the upload, the storage copies the
+  staged file to the file's own key (the server never reads the file), the server checks that copy, and only then
+  publishes the file. Nothing the browser holds can write the published key, so the file that was checked is the file
+  that is served. A staged object that is sent again later is never published, and the bucket expires it.
 - **An archived issue is read-only**, uploads included (409 `issue_archived`).
 - An upload nobody completes is removed after 24 hours, with its object.
 - The name is cleaned (no directory, quote, line break or hidden formatting character; at most 200 characters) and the
@@ -43,6 +48,7 @@ Without file storage on the server, every call but the list answers 503 `storage
    itself as the last field named `file`. The request is valid for 5 minutes. The storage refuses a body that is
    larger than the declared size or that has another content type.
 3. `POST /attachments/:attachmentId/complete`. The file is listed (and the issue moves) only after this succeeds.
+   Complete once: the staged file is removed after it, and sending the request again does not change the published file.
 
 ### Reading
 

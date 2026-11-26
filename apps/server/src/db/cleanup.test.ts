@@ -10,6 +10,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Orm } from '../db.ts';
 import { createFakeStorage } from '../files/fake-storage.ts';
+import { stagingKeyOf } from '../files/keys.ts';
 import {
   createWorkspaceFixture,
   type WorkspaceFixture,
@@ -304,6 +305,24 @@ describe.skipIf(!databaseUrl)('cleanupExpiredRows', () => {
         expect(left.map((row) => row.id).sort()).toEqual([rows.fresh.id, rows.ready.id].sort());
         expect(storage.keys().sort()).toEqual(
           [rows.fresh.storageKey, rows.ready.storageKey].sort(),
+        );
+      });
+    });
+
+    it('removes the staged object of a stale upload together with the published key', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const storage = createFakeStorage();
+        const rows = await rowsOf(db, f);
+        for (const row of [rows.stale, rows.fresh]) {
+          storage.put(row.storageKey, new Uint8Array([1]), 'image/png');
+          storage.put(stagingKeyOf(row.workspaceId, row.id), new Uint8Array([1]), 'image/png');
+        }
+
+        await cleanupExpiredRows(db.orm, NOW, storage);
+
+        expect(storage.keys().sort()).toEqual(
+          [rows.fresh.storageKey, stagingKeyOf(rows.fresh.workspaceId, rows.fresh.id)].sort(),
         );
       });
     });

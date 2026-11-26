@@ -10,14 +10,14 @@ export type FakeStorage = FileStorage & {
   /** Every download URL minted so far. */
   urlsMinted: string[];
   /** Set one to true and that call throws, as a storage outage would. */
-  faults: { head: boolean; readStart: boolean; remove: boolean; presign: boolean };
+  faults: { head: boolean; readStart: boolean; remove: boolean; presign: boolean; copy: boolean };
 };
 
 const ORIGIN = 'https://storage.example.test';
 
 export function createFakeStorage(opts: { maxBytes?: number } = {}): FakeStorage {
   const objects = new Map<string, { bytes: Uint8Array; contentType: string }>();
-  const faults = { head: false, readStart: false, remove: false, presign: false };
+  const faults = { head: false, readStart: false, remove: false, presign: false, copy: false };
   const urlsMinted: string[] = [];
   const check = (name: keyof typeof faults) => {
     if (faults[name]) throw new Error('storage is down');
@@ -60,6 +60,13 @@ export function createFakeStorage(opts: { maxBytes?: number } = {}): FakeStorage
     async readStart(key, bytes) {
       check('readStart');
       return objects.get(key)?.bytes.slice(0, bytes) ?? new Uint8Array();
+    },
+    async copy(fromKey, toKey) {
+      check('copy');
+      const found = objects.get(fromKey);
+      if (!found) return false;
+      objects.set(toKey, { bytes: new Uint8Array(found.bytes), contentType: found.contentType });
+      return true;
     },
     async remove(key) {
       check('remove');
