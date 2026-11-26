@@ -27,7 +27,7 @@ export function DocumentsScreen({
   const t = useT();
   const locale = useLocale();
   const { actor, team: access } = useActor(team.id);
-  const { byId } = useMembers(workspaceId);
+  const { nameOf } = useMembers(workspaceId);
   const { documents, ready } = useTeamDocuments(workspaceId, team.id);
   const [archived, setArchived] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -103,7 +103,7 @@ export function DocumentsScreen({
                 <span className="documents__meta">
                   {t('documents.updated', {
                     time: formatMoment(locale, document.updated_at),
-                    name: byId.get(document.updated_by)?.name ?? t('comments.formerMember'),
+                    name: nameOf(document.updated_by),
                   })}
                 </span>
               </button>

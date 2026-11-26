@@ -207,6 +207,7 @@
   "comments.empty": "No comments yet.",
   "comments.removed": "Comment removed",
   "comments.formerMember": "Former member",
+  "comments.workspaceMember": "A workspace member",
   "comments.edited": "edited",
   "comments.sending": "Sending…",
   "comments.composer.label": "Write a comment",

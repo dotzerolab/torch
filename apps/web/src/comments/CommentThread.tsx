@@ -44,7 +44,7 @@ export function CommentThread({
   const locale = useLocale();
   const { actor, team } = useActor(teamId);
   const { comments, ready } = useIssueComments(workspaceId, teamId, issueId);
-  const { members, byId } = useMembers(workspaceId);
+  const { members, byId, nameOf } = useMembers(workspaceId);
   const [error, setError] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<string | null>(null);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
@@ -90,6 +90,7 @@ export function CommentThread({
         comment={comment}
         workspaceId={workspaceId}
         members={byId}
+        nameOf={nameOf}
         mentions={mentions}
         memberId={actor.memberId}
         readOnly={!writable}
@@ -158,14 +159,13 @@ export function CommentThread({
           {threads.map(({ top, replies }) => {
             const resolved = top.resolved_at !== null && top.deleted_at === null;
             const expanded = !resolved || open.has(top.id);
-            const resolver = top.resolved_by ? byId.get(top.resolved_by) : undefined;
             return (
               <li key={top.id} className="thread" data-testid={`thread-${top.id}`}>
                 {resolved && !expanded ? (
                   <div className="thread__resolved">
                     <span>
                       {t('comments.resolved', {
-                        name: resolver?.name ?? t('comments.formerMember'),
+                        name: nameOf(top.resolved_by ?? ''),
                       })}
                     </span>
                     <span className="thread__count">
@@ -196,7 +196,7 @@ export function CommentThread({
                       <div className="thread__resolved thread__resolved--open">
                         <span>
                           {t('comments.resolved', {
-                            name: resolver?.name ?? t('comments.formerMember'),
+                            name: nameOf(top.resolved_by ?? ''),
                           })}
                         </span>
                         <Button
@@ -221,7 +221,7 @@ export function CommentThread({
                         <Composer
                           scope={`${issueId}:${top.id}`}
                           label={t('comments.composer.replyLabel', {
-                            name: byId.get(top.author_id)?.name ?? t('comments.formerMember'),
+                            name: nameOf(top.author_id),
                           })}
                           placeholder={t('comments.composer.placeholder')}
                           submitLabel={t('comments.composer.reply')}

@@ -18,6 +18,7 @@ export function EditHistory({
   commentId,
   current,
   members,
+  nameOf,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -25,6 +26,7 @@ export function EditHistory({
   commentId: string;
   current: string;
   members: ReadonlyMap<string, SyncedMember>;
+  nameOf?: (id: string) => string;
 }) {
   const t = useT();
   const locale = useLocale();
@@ -57,7 +59,9 @@ export function EditHistory({
             {state.edits.map((edit) => (
               <li key={edit.id} className="history__item">
                 <p className="history__meta">
-                  {members.get(edit.editedBy)?.name ?? t('comments.formerMember')}
+                  {nameOf
+                    ? nameOf(edit.editedBy)
+                    : (members.get(edit.editedBy)?.name ?? t('comments.workspaceMember'))}
                   {' · '}
                   <time dateTime={edit.createdAt}>{formatMoment(locale, edit.createdAt)}</time>
                 </p>

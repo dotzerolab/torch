@@ -207,6 +207,7 @@
   "comments.empty": "Ancora nessun commento.",
   "comments.removed": "Commento rimosso",
   "comments.formerMember": "Ex membro",
+  "comments.workspaceMember": "Un membro dello spazio di lavoro",
   "comments.edited": "modificato",
   "comments.sending": "Invio…",
   "comments.composer.label": "Scrivi un commento",

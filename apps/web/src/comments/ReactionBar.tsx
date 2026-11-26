@@ -13,12 +13,14 @@ export function ReactionBar({
   reactions,
   memberId,
   members,
+  nameOf,
   readOnly,
   onToggle,
 }: {
   reactions: Record<string, string[]>;
   memberId: string;
   members: ReadonlyMap<string, SyncedMember>;
+  nameOf?: (id: string) => string;
   readOnly: boolean;
   onToggle: (emoji: string, on: boolean) => void;
 }) {
@@ -29,7 +31,11 @@ export function ReactionBar({
   const names = (people: readonly string[]) =>
     people
       .map((id) =>
-        id === memberId ? t('comments.you') : (members.get(id)?.name ?? t('comments.formerMember')),
+        id === memberId
+          ? t('comments.you')
+          : nameOf
+            ? nameOf(id)
+            : (members.get(id)?.name ?? t('comments.workspaceMember')),
       )
       .join(', ');
 

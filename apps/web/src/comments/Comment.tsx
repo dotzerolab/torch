@@ -17,6 +17,7 @@ export function Comment({
   comment,
   workspaceId,
   members,
+  nameOf,
   mentions,
   memberId,
   readOnly,
@@ -31,6 +32,8 @@ export function Comment({
   comment: CommentView;
   workspaceId: string;
   members: ReadonlyMap<string, SyncedMember>;
+  /** The name to show for a person id, including the label for one the page does not hold (see `useMembers`). */
+  nameOf?: (id: string) => string;
   mentions: ReadonlySet<string>;
   memberId: string;
   readOnly: boolean;
@@ -50,7 +53,7 @@ export function Comment({
   const [history, setHistory] = useState(false);
 
   const author = members.get(comment.author_id);
-  const name = author?.name ?? t('comments.formerMember');
+  const name = nameOf ? nameOf(comment.author_id) : (author?.name ?? t('comments.workspaceMember'));
   const deleted = comment.deleted_at !== null;
   const unsent = comment.id.startsWith('pending:');
   const locked = readOnly || unsent;
@@ -188,6 +191,7 @@ export function Comment({
           reactions={comment.reactions}
           memberId={memberId}
           members={members}
+          nameOf={nameOf}
           readOnly={readOnly}
           onToggle={onReaction}
         />
@@ -201,6 +205,7 @@ export function Comment({
           commentId={comment.id}
           current={comment.body}
           members={members}
+          nameOf={nameOf}
         />
       ) : null}
     </article>

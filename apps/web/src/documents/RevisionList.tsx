@@ -17,6 +17,7 @@ export function RevisionList({
   workspaceId,
   documentId,
   members,
+  nameOf,
   canRestore,
   onRestore,
 }: {
@@ -25,6 +26,7 @@ export function RevisionList({
   workspaceId: string;
   documentId: string;
   members: ReadonlyMap<string, SyncedMember>;
+  nameOf?: (id: string) => string;
   canRestore: boolean;
   onRestore: (revision: { title: string; body: string }) => void;
 }) {
@@ -62,7 +64,9 @@ export function RevisionList({
             {state.revisions.map((revision) => (
               <li key={revision.id} className="revisions__item">
                 <p className="revisions__meta">
-                  {members.get(revision.editedBy)?.name ?? t('comments.formerMember')}
+                  {nameOf
+                    ? nameOf(revision.editedBy)
+                    : (members.get(revision.editedBy)?.name ?? t('comments.workspaceMember'))}
                   {' · '}
                   <time dateTime={revision.createdAt}>
                     {formatMoment(locale, revision.createdAt)}

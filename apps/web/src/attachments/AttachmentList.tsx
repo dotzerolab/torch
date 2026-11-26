@@ -49,7 +49,7 @@ export function AttachmentList({
   const online = useOnline();
   const { actor, team } = useActor(teamId);
   const { attachments, ready } = useIssueAttachments(workspaceId, teamId, issueId);
-  const { byId } = useMembers(workspaceId);
+  const { nameOf } = useMembers(workspaceId);
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [removed, setRemoved] = useState<ReadonlySet<string>>(new Set());
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -163,7 +163,7 @@ export function AttachmentList({
         <ul className="files__list">
           {visible.map((file) => {
             const inline = ATTACHMENT_TYPES[file.content_type]?.inline === true;
-            const uploader = byId.get(file.uploader_id)?.name ?? t('comments.formerMember');
+            const uploader = nameOf(file.uploader_id);
             const mayRemove =
               allowed &&
               team !== null &&

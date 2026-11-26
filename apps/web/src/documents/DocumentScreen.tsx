@@ -32,7 +32,7 @@ export function DocumentScreen({
   const t = useT();
   const locale = useLocale();
   const { actor, team: access } = useActor(team.id);
-  const { byId } = useMembers(workspaceId);
+  const { byId, nameOf } = useMembers(workspaceId);
   const { documents, ready: titlesReady } = useTeamDocuments(workspaceId, team.id);
   const { body, ready: bodyReady } = useDocumentContent(workspaceId, team.id, documentId);
   const [history, setHistory] = useState(false);
@@ -111,6 +111,7 @@ export function DocumentScreen({
               workspaceId={workspaceId}
               documentId={documentId}
               members={byId}
+              nameOf={nameOf}
               canRestore={!archived}
               onRestore={(revision) => setRestored({ ...revision, at: Date.now() })}
             />

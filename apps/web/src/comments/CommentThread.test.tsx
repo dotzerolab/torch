@@ -162,6 +162,12 @@ describe('CommentThread: reading', () => {
     expect(screen.getByText('Former member')).toBeInTheDocument();
   });
 
+  it('a guest sees an author their members shape does not hold as a workspace member, not as a former one', async () => {
+    await setup([comment(C1, { author_id: GONE })], { role: 'guest' });
+    expect(screen.getByText('A workspace member')).toBeInTheDocument();
+    expect(screen.queryByText('Former member')).toBeNull();
+  });
+
   it('shows a removed comment as a tombstone and keeps its replies', async () => {
     await setup([
       comment(C1, { body: '', deleted_at: '2026-11-26T12:00:00Z' }),

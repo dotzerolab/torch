@@ -138,6 +138,17 @@ describe('AttachmentList: reading', () => {
     expect(screen.getByText(/Added by Former member/)).toBeInTheDocument();
   });
 
+  it('a guest, who is not given every member, sees such a person as a workspace member, never as a former one', async () => {
+    await setup([file(F1, { uploader_id: GONE })], { role: 'guest', memberId: ME });
+    expect(screen.getByText(/Added by A workspace member/)).toBeInTheDocument();
+    expect(screen.queryByText(/Former member/)).toBeNull();
+  });
+
+  it('a deactivated person who is in the members shape keeps their name', async () => {
+    await setup([file(F1, { uploader_id: OTHER })], { role: 'guest', memberId: ME });
+    expect(screen.getByText(/Added by Olivia/)).toBeInTheDocument();
+  });
+
   it('says so when the issue has no files', async () => {
     await setup([]);
     expect(screen.getByText('No files yet.')).toBeInTheDocument();
