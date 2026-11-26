@@ -6,8 +6,9 @@ import { LoginPage } from './auth/LoginPage.tsx';
 import { useSession } from './auth/useSession.ts';
 import { VerifyPage } from './auth/VerifyPage.tsx';
 import { AcceptInvitePage } from './invite/AcceptInvitePage.tsx';
+import { IssuesScreen } from './issues/IssuesScreen.tsx';
 import { navigate, usePathname } from './navigation.ts';
-import { Workspace } from './screens/Workspace.tsx';
+import { parseRoute } from './routes.ts';
 import { SettingsScreen } from './settings/SettingsScreen.tsx';
 import { AppShell } from './shell/AppShell.tsx';
 
@@ -53,10 +54,10 @@ function Home({ brand, locale }: { brand: Brand; locale: Locale }) {
   }
   return (
     <AppShell brand={brand} workspaces={session.workspaces} locale={locale}>
-      {pathname === '/settings' || pathname.startsWith('/settings/') ? (
+      {parseRoute(pathname).name === 'settings' ? (
         <SettingsScreen />
       ) : (
-        <Workspace locale={locale} />
+        <IssuesScreen locale={locale} />
       )}
     </AppShell>
   );

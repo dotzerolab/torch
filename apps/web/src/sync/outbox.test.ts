@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../api.ts';
 import { bindTestSession, resetIdentityForTests } from './identity.ts';
 import {
-  createOutbox,
+  createOutbox as createOutboxOnPlatform,
   memoryStorage,
   OUTBOX_BACKOFF,
   type OutboxStorage,
@@ -12,6 +12,13 @@ import {
 } from './outbox.ts';
 import { LOCAL_SCHEMA_VERSION } from './persistence.ts';
 import { runSignOut } from './sign-out.ts';
+import type { TabPlatform } from './tabs.ts';
+
+/** The tests that are not about several tabs run on a browser without Web Locks and channels. */
+const noChannel = () =>
+  ({ postMessage() {}, close() {}, onmessage: null }) as unknown as BroadcastChannel;
+const createOutbox = (options: Parameters<typeof createOutboxOnPlatform>[0]) =>
+  createOutboxOnPlatform({ platform: { locks: undefined, channel: noChannel }, ...options });
 
 const WS = '11111111-1111-4111-8111-111111111111';
 const TEAM = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -304,6 +311,9 @@ describe('outbox', () => {
         throw new Error('no indexedDB');
       },
       clear: async () => {},
+      claim: async () => {
+        throw new Error('no indexedDB');
+      },
     };
     const net = network();
     const box = createOutbox({ storage: broken, send: net.send, sleep: net.sleep });
@@ -462,5 +472,203 @@ describe('sign-out', () => {
       }),
     ).rejects.toThrow('offline');
     expect(calls).toEqual(['wipe:a', 'navigate']);
+  });
+});
+
+// ---- several tabs of one browser -----------------------------------------------------------------------------------
+
+/** The browser the tabs share: Web Locks that go to one holder at a time, and broadcast channels. */
+function fakeBrowser() {
+  const holders = new Set<string>();
+  const queues = new Map<string, Array<() => void>>();
+  const take = (name: string, callback: (lock: unknown) => unknown) => {
+    holders.add(name);
+    return Promise.resolve(callback({ name })).finally(() => {
+      holders.delete(name);
+      queues.get(name)?.shift()?.();
+    });
+  };
+  const locks = {
+    request: (async (name: string, a: unknown, b?: unknown) => {
+      const options = (typeof a === 'function' ? {} : a) as { ifAvailable?: boolean };
+      const callback = (typeof a === 'function' ? a : b) as (lock: unknown) => unknown;
+      if (!holders.has(name)) return take(name, callback);
+      if (options.ifAvailable) return callback(null);
+      return new Promise((resolve, reject) => {
+        queues.set(name, [
+          ...(queues.get(name) ?? []),
+          () => take(name, callback).then(resolve, reject),
+        ]);
+      });
+    }) as unknown as LockManager['request'],
+    query: async () => ({ held: [...holders].map((name) => ({ name })), pending: [] }),
+  };
+  const channels = new Map<string, Set<{ onmessage: ((event: MessageEvent) => void) | null }>>();
+  const channel = (name: string) => {
+    const mine: { onmessage: ((event: MessageEvent) => void) | null } = { onmessage: null };
+    channels.set(name, (channels.get(name) ?? new Set()).add(mine));
+    return {
+      postMessage: (data: unknown) => {
+        for (const other of channels.get(name) ?? []) {
+          if (other !== mine) queueMicrotask(() => other.onmessage?.({ data } as MessageEvent));
+        }
+      },
+      set onmessage(listener: ((event: MessageEvent) => void) | null) {
+        mine.onmessage = listener;
+      },
+      close: () => channels.get(name)?.delete(mine),
+    } as unknown as BroadcastChannel;
+  };
+  const platform: TabPlatform = { locks, channel };
+  return { platform, holders };
+}
+
+/** One shared device: a store, one browser, and a network the tabs send through. */
+function device() {
+  const browser = fakeBrowser();
+  const storage = memoryStorage();
+  const sent: Array<{ by: string; key: string }> = [];
+  const naps: Array<() => void> = [];
+  let online = false;
+  const tab = (tabId: string) =>
+    createOutboxOnPlatform({
+      storage,
+      tabId,
+      platform: browser.platform,
+      send: async (w) => {
+        if (!online) throw new ApiError(0, 'network', 'The server could not be reached.');
+        sent.push({ by: tabId, key: w.idempotencyKey });
+        return { txid: sent.length };
+      },
+      sleep: () => new Promise<void>((resolve) => naps.push(resolve)),
+    });
+  return {
+    storage,
+    sent,
+    tab,
+    goOnline() {
+      online = true;
+      for (const wake of naps.splice(0)) wake();
+    },
+  };
+}
+
+const settle = async () => {
+  for (let i = 0; i < 8; i += 1) await flush();
+};
+
+describe('outbox across tabs', () => {
+  it('two tabs hydrate the same record, one send', async () => {
+    const d = device();
+    // A record of a tab that is gone: no lock is held for its id.
+    await d.storage.add(WS, write(1), 'closed-tab');
+    const a = d.tab('A');
+    const b = d.tab('B');
+    await Promise.all([a.resume(WS), b.resume(WS)]);
+    d.goOnline();
+    await settle();
+    expect(d.sent.map((entry) => entry.key)).toEqual(['key-1']);
+    expect(d.storage.records.get(WS)).toEqual([]);
+  });
+
+  it('a record whose tab is still open is left to that tab', async () => {
+    const d = device();
+    const a = d.tab('A');
+    void a.enqueueWrite(write(1)).catch(() => {});
+    await settle();
+    const b = d.tab('B');
+    await b.resume(WS);
+    d.goOnline();
+    await settle();
+    expect(d.sent).toEqual([{ by: 'A', key: 'key-1' }]);
+  });
+
+  it('owner closes, survivor sends the rest in order', async () => {
+    const d = device();
+    const a = d.tab('A');
+    for (const n of [1, 2, 3]) void a.enqueueWrite(write(n)).catch(() => {});
+    await settle();
+    const b = d.tab('B');
+    await b.resume(WS);
+    // B sees A's three writes and waits: nothing of A is B's while A is open.
+    expect(d.storage.records.get(WS)?.length).toBe(3);
+
+    a.close();
+    d.goOnline();
+    await settle();
+    expect(d.sent).toEqual([
+      { by: 'B', key: 'key-1' },
+      { by: 'B', key: 'key-2' },
+      { by: 'B', key: 'key-3' },
+    ]);
+    expect(d.storage.records.get(WS)).toEqual([]);
+    expect(b.pendingCount(WS)).toBe(0);
+  });
+
+  it('count is device-wide', async () => {
+    const d = device();
+    const a = d.tab('A');
+    const b = d.tab('B');
+    await Promise.all([a.resume(WS), b.resume(WS)]);
+    const heard = vi.fn();
+    b.subscribe(heard);
+    void a.enqueueWrite(write(1)).catch(() => {});
+    void a.enqueueWrite(write(2)).catch(() => {});
+    await settle();
+    expect(a.pendingCount(WS)).toBe(2);
+    expect(b.pendingCount(WS)).toBe(2);
+    expect(heard).toHaveBeenCalled();
+
+    d.goOnline();
+    await settle();
+    expect(a.pendingCount(WS)).toBe(0);
+    expect(b.pendingCount(WS)).toBe(0);
+  });
+
+  it("pendingWrites lists the other tab's create, with what the temporary row shows", async () => {
+    const d = device();
+    const a = d.tab('A');
+    const b = d.tab('B');
+    await b.resume(WS);
+    const draft = { title: 'Offline issue', teamId: TEAM } as never;
+    void a
+      .enqueueWrite(write(1, { meta: { kind: 'issue.create', teamId: TEAM, draft } }))
+      .catch(() => {});
+    void a.enqueueWrite(write(2)).catch(() => {});
+    await settle();
+    const pending = await b.pendingWrites(WS);
+    expect(pending.map((w) => w.idempotencyKey)).toEqual(['key-1', 'key-2']);
+    expect(pending[0]?.meta).toEqual({ kind: 'issue.create', teamId: TEAM, draft });
+    // The owner is the outbox's business, not the screens'.
+    expect(pending[0]).not.toHaveProperty('owner');
+  });
+
+  it('a claim by the tab that does not own the record fails', async () => {
+    const storage = memoryStorage();
+    await storage.add(WS, write(1), 'A');
+    await expect(storage.claim(WS, 'key-1', 'B', 'someone-else')).resolves.toBe(false);
+    await expect(storage.claim(WS, 'key-1', 'B', 'A')).resolves.toBe(true);
+    await expect(storage.claim(WS, 'key-1', 'C', 'A')).resolves.toBe(false);
+    await expect(storage.claim(WS, 'missing', 'C', 'A')).resolves.toBe(false);
+  });
+
+  it('without Web Locks a tab sends what it finds on the device, as before', async () => {
+    const storage = memoryStorage();
+    const offline = network();
+    const before = createOutbox({ storage, tabId: 'A', send: offline.send, sleep: offline.sleep });
+    void before.enqueueWrite(write(1)).catch(() => {});
+    await flush();
+    const net = network();
+    const after = createOutbox({
+      storage,
+      tabId: 'B',
+      platform: { locks: undefined, channel: () => new BroadcastChannel('x') },
+      send: net.send,
+      sleep: net.sleep,
+    });
+    await after.resume(WS);
+    net.goOnline();
+    await settle();
+    expect(net.sent.map((w) => w.idempotencyKey)).toEqual(['key-1']);
   });
 });

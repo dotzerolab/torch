@@ -18,8 +18,9 @@ import { TEAM_KINDS } from './registry.ts';
  * Bump when the layout of what is stored changes: stores of other versions are deleted on open.
  * 2: the stored issue row carries the estimate, due date, parent, sort order and state timestamps.
  * 3: comments, files and documents are stored kinds (per-issue comments and files, team documents, document bodies).
+ * 4: My Issues is a stored collection (one copy of the person's issues across teams); a v3 store has no such copy.
  */
-export const LOCAL_SCHEMA_VERSION = 3;
+export const LOCAL_SCHEMA_VERSION = 4;
 
 /** Names carry no product name: the same origin may host other apps. */
 export const storeName = (workspaceId: string, version = LOCAL_SCHEMA_VERSION) =>
@@ -406,9 +407,35 @@ export async function deleteTeamRows(workspaceId: string, teamId: string): Promi
   const open = stores.get(workspaceId);
   if (!open) return;
   const { database } = await open;
-  for (const kind of TEAM_KINDS) {
-    await removeCollections(database, `${kind}-${workspaceId}-${teamId}%`);
+  const remove = async () => {
+    for (const kind of TEAM_KINDS) {
+      await removeCollections(database, `${kind}-${workspaceId}-${teamId}%`);
+    }
+    await readStored(workspaceId, database);
+  };
+  await remove();
+  // A copy job that was running when the team went (its instance is cancelled, but a write in flight lands) can put a
+  // collection back after the delete above. Once the jobs of the workspace have ended, delete once more. The first
+  // delete does not wait: the rows of a lost team leave the device at once.
+  const jobs = copyQueues.get(workspaceId);
+  if (jobs) {
+    void jobs
+      .catch(() => {})
+      .then(remove)
+      .catch(() => {});
   }
+}
+
+/**
+ * The device copy of My Issues: one shape of the workspace that holds rows of every team the person could see, so it
+ * cannot be removed with one team's prefix. Every instance of it goes (its ids are `myIssues-<workspaceId>` plus a restart
+ * suffix); it is read from the server again the next time the screen opens.
+ */
+export async function deleteMyIssuesRows(workspaceId: string): Promise<void> {
+  const open = stores.get(workspaceId);
+  if (!open) return;
+  const { database } = await open;
+  await removeCollections(database, `myIssues-${workspaceId}%`);
   await readStored(workspaceId, database);
 }
 
@@ -434,6 +461,8 @@ export async function deleteTeamsExcept(workspaceId: string, keep: Set<string>):
     }
   }
   for (const teamId of gone) await deleteTeamRows(workspaceId, teamId);
+  // My Issues holds rows of the teams that are gone too, and no team prefix reaches it.
+  if (gone.size > 0) await deleteMyIssuesRows(workspaceId);
 }
 
 /**

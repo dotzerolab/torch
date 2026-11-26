@@ -1017,7 +1017,12 @@ export function createDocumentContentCollection(
 export async function sendIssueMutations(
   workspaceId: string,
   teamId: string,
-  mutations: ReadonlyArray<{ key: string | number; changes: Record<string, unknown> }>,
+  /** `teamId` says which team an issue belongs to when the list spans teams (My Issues); else `teamId` above applies. */
+  mutations: ReadonlyArray<{
+    key: string | number;
+    changes: Record<string, unknown>;
+    teamId?: string;
+  }>,
   awaitTxId: (txid: number) => Promise<unknown>,
   enqueue: (write: OutboxWrite) => Promise<{ txid: number }> = enqueueWrite,
 ): Promise<void> {
@@ -1025,7 +1030,7 @@ export async function sendIssueMutations(
   for (const mutation of mutations) {
     const { txid } = await enqueue({
       workspaceId,
-      teamId,
+      teamId: mutation.teamId ?? teamId,
       method: 'PATCH',
       path: `/api/w/${workspaceId}/issues/${mutation.key}`,
       body: toIssueUpdate(mutation.changes),
@@ -1062,12 +1067,45 @@ export function createIssuesCollection(
   return createCollection(shaped({ kind: 'issues', workspaceId, teamId }, build, context));
 }
 
+/**
+ * My Issues: the issues the person holds or created, across the teams they can see. One live shape of the workspace; the
+ * server decides which teams it covers on every request, so a team the person leaves drops out of it at once (the shape
+ * starts over). A change is a PATCH of the issue, queued for the team the row belongs to.
+ */
+export function createMyIssuesCollection(
+  workspaceId: string,
+  id = `myIssues-${workspaceId}`,
+  context = NO_CONTEXT,
+) {
+  const build = () =>
+    electricCollectionOptions<SyncedIssue>({
+      id,
+      getKey: (issue) => issue.id,
+      shapeOptions: shapeOptions(`/api/sync/w/${workspaceId}/my-issues`, { workspaceId }, context),
+      onUpdate: async ({ transaction, collection }) => {
+        await sendIssueMutations(
+          workspaceId,
+          // Every mutation names its own team (the row's), so this one is never used.
+          '',
+          transaction.mutations.map((mutation) => ({
+            key: mutation.key,
+            changes: mutation.changes,
+            teamId: (mutation.original as SyncedIssue).team_id,
+          })),
+          (txid) => collection.utils.awaitTxId(txid, TXID_TIMEOUT_MS),
+        );
+      },
+    });
+  return createCollection(shaped({ kind: 'myIssues', workspaceId }, build, context));
+}
+
 /** How each shape kind is built. The registry owns the instances, the ids and the restarts. */
 export const collectionFactories = {
   teams: (key, id, context) => createTeamsCollection(key.workspaceId, id, context),
   members: (key, id, context) => createMembersCollection(key.workspaceId, id, context),
   ownMemberships: (key, id, context) =>
     createOwnMembershipsCollection(key.workspaceId, id, context),
+  myIssues: (key, id, context) => createMyIssuesCollection(key.workspaceId, id, context),
   issues: (key, id, context) => createIssuesCollection(key.workspaceId, key.teamId, id, context),
   workflowStates: (key, id, context) =>
     createWorkflowStatesCollection(key.workspaceId, key.teamId, id, context),

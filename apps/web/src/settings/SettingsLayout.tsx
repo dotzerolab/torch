@@ -4,7 +4,7 @@ import type { SessionWorkspace } from '../auth/useSession.ts';
 import { cx } from '../design/cx.ts';
 import { useT } from '../design/locale.tsx';
 import { navigate, usePathname } from '../navigation.ts';
-import { actorOf } from './access.ts';
+import { actorOf, canSeeLabelSettings, canSeeWorkflowSettings } from './access.ts';
 
 const isPlainClick = (event: MouseEvent) =>
   event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
@@ -22,6 +22,12 @@ export function SettingsLayout({
   const tabs = [
     { id: 'profile', path: '/settings/profile', label: t('settings.nav.profile') },
     { id: 'teams', path: '/settings/teams', label: t('settings.nav.teams') },
+    ...(canSeeWorkflowSettings(workspace)
+      ? [{ id: 'workflow', path: '/settings/workflow', label: t('settings.nav.workflow') }]
+      : []),
+    ...(canSeeLabelSettings(workspace)
+      ? [{ id: 'labels', path: '/settings/labels', label: t('settings.nav.labels') }]
+      : []),
     ...(canManageMembers(actorOf(workspace))
       ? [{ id: 'members', path: '/settings/members', label: t('settings.nav.members') }]
       : []),

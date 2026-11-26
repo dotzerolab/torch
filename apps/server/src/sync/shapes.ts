@@ -357,6 +357,27 @@ export function documentContentShape(documentId: string): ShapeDefinition {
 }
 
 /**
+ * My Issues, the one shape that reaches across teams: the issues of the teams the actor can see that are assigned to
+ * them or were created by them. `visibleTeamIds` comes from `loadVisibleTeamIds` (stored teams and memberships, read
+ * per request, never the URL), so a guest gets their own teams only and a person who left a private team gets none of
+ * its rows on the next request. The person is `actor.memberId`, the workspace `actor.workspaceId`; both conditions of
+ * the OR read the same parameter. The list is sorted and de-duplicated so one visible set always yields one URL, and
+ * it is never empty in SQL (the nil uuid matches no row). Same columns as a team's issues, never `description`.
+ */
+export function myIssuesShape(actor: Actor, visibleTeamIds: readonly string[]): ShapeDefinition {
+  const unique = [...new Set(visibleTeamIds)].sort();
+  const ids = unique.length > 0 ? unique : [NIL_UUID];
+  const list = ids.map((_, index) => `$${index + 2}`).join(', ');
+  const me = `$${ids.length + 2}`;
+  return {
+    table: 'issue',
+    where: `workspace_id = $1 AND team_id IN (${list}) AND (assignee_id = ${me} OR creator_id = ${me})`,
+    params: [actor.workspaceId, ...ids, actor.memberId],
+    columns: [...ISSUE_COLUMNS],
+  };
+}
+
+/**
  * The actor's own team memberships, workspace-wide. Everything the client needs to notice that its own access
  * changed (a join or removal of a private team) arrives here as one small shape. Both values come from the
  * authenticated actor, never from the request.

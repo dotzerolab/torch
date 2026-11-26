@@ -21,6 +21,7 @@ import {
   createIssueSubscribersCollection,
   createIssuesCollection,
   createLabelsCollection,
+  createMyIssuesCollection,
   createTeamsCollection,
   createWorkflowStatesCollection,
   createWorkspaceLabelsCollection,
@@ -144,6 +145,22 @@ describe('sendIssueMutations (M9)', () => {
     const keys = enqueue.mock.calls.map(([w]) => w.idempotencyKey);
     expect(new Set(keys).size).toBe(2);
     expect(awaitTxId.mock.calls.map(([txid]) => txid)).toEqual([11, 12]);
+  });
+
+  it('a mutation may name its own team: the write is queued for the team of that issue', async () => {
+    const enqueue = queued();
+    await sendIssueMutations(
+      'w1',
+      't1',
+      [
+        { key: 'i1', changes: { title: 'One' }, teamId: 'tA' },
+        { key: 'i2', changes: { priority: 2 }, teamId: 'tB' },
+        { key: 'i3', changes: { priority: 3 } },
+      ],
+      vi.fn().mockResolvedValue(true),
+      enqueue,
+    );
+    expect(enqueue.mock.calls.map(([w]) => w.teamId)).toEqual(['tA', 'tB', 't1']);
   });
 
   it('stops at the first refused write and awaits nothing', async () => {
@@ -525,6 +542,29 @@ describe('snapshot shapes', () => {
     await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(6));
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(quiet).not.toHaveBeenCalled();
+  });
+
+  it('my issues reads the workspace shape and keeps the rows of every team it is given', async () => {
+    const urls = serve(
+      [TEAM, 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'].map((team, index) => ({
+        id: `i${index}`,
+        workspace_id: WS,
+        team_id: team,
+        number: index + 1,
+        title: `Row ${index}`,
+        state_id: 's1',
+        priority: 0,
+        assignee_id: 'm1',
+        creator_id: 'm1',
+        created_at: '2026-11-25T10:00:00Z',
+        updated_at: '2026-11-25T10:00:00Z',
+        archived_at: null,
+      })),
+    );
+    const mine = await open(createMyIssuesCollection(WS, 'myIssues-w1', shapeContext()));
+    expect(new URL(urls[0] as string).pathname).toBe(`/api/sync/w/${WS}/my-issues`);
+    expect(mine.get('i0')?.team_id).toBe(TEAM);
+    expect(mine.get('i1')?.team_id).toBe('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
   });
 
   it('issue row keeps the new columns', async () => {

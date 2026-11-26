@@ -6,6 +6,7 @@ import {
   type Page,
   test,
 } from '@playwright/test';
+import { issueTitle, issueTitleInput } from './helpers/issues.ts';
 import { signInAs } from './helpers/sign-in.ts';
 
 declare global {
@@ -132,15 +133,17 @@ test('keyboard: ? opens the shortcut list and Escape closes it; a ? typed in a t
   // Focus is back on the page, not lost inside a removed dialog.
   await expect.poll(() => page.evaluate(() => document.activeElement === document.body)).toBe(true);
 
-  const title = page.getByTestId('issue-title-1');
-  await title.click();
-  await page.keyboard.press('End');
+  await issueTitle(page, 1).dblclick();
+  const field = issueTitleInput(page, 1);
+  // Renaming selects the whole title and focuses the field: the right arrow puts the caret after it.
+  await expect(field).toBeFocused();
+  await field.press('ArrowRight');
   await page.keyboard.type('?');
-  await expect(title).toHaveValue('ENG issue 1?');
+  await expect(field).toHaveValue('ENG issue 1?');
   await expect(page.getByRole('dialog')).toHaveCount(0);
   // Leave the title as it was: Escape puts the synced title back.
   await page.keyboard.press('Escape');
-  await expect(title).toHaveValue('ENG issue 1');
+  await expect(issueTitle(page, 1)).toHaveText('ENG issue 1');
   await page.locator('body').click({ position: { x: 1, y: 1 } });
 
   const sidebar = page.getByRole('navigation', { name: 'Sidebar' });

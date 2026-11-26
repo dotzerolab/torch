@@ -14,7 +14,6 @@ import { DocumentScreen, DocumentsScreen } from '../../src/documents/index.ts';
 import '../../src/design/tokens.css';
 import '../../src/design/base.css';
 import '../../src/design/components/components.css';
-import '../../src/screens/workspace.css';
 import '../../src/settings/settings.css';
 import '../../src/shell/shell.css';
 import { applyTheme } from '../../src/design/theme.ts';
@@ -23,10 +22,14 @@ import { useShell } from '../../src/shell/ShellContext.ts';
 
 applyTheme();
 
-const query = () => new URLSearchParams(window.location.search);
+// The shell replaces an address it does not know with the first team's, which drops the query: the harness takes what
+// it was asked for once, at load, and keeps it itself.
+let params = new URLSearchParams(window.location.search);
+const query = () => params;
 
-function go(params: Record<string, string>) {
-  window.history.pushState({}, '', `?${new URLSearchParams(params)}`);
+function go(next: Record<string, string>) {
+  params = new URLSearchParams(next);
+  window.history.pushState({}, '', `?${params}`);
   window.dispatchEvent(new PopStateEvent('popstate'));
 }
 

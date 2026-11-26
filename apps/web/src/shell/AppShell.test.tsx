@@ -93,19 +93,57 @@ describe('AppShell on a desktop', () => {
     expect(main).toHaveTextContent('Page content');
   });
 
-  it('lists the synced teams as links and the placeholders as disabled', () => {
+  it('lists My issues and the synced teams as links, and the Inbox placeholder as disabled', () => {
     renderShell();
     const eng = screen.getByRole('link', { name: /Engineering/ });
     expect(eng).toHaveAttribute('href', '/teams/ENG');
     expect(screen.getByRole('link', { name: /Operations/ })).toHaveAttribute('href', '/teams/OPS');
-    expect(screen.getByText('My issues').closest('[aria-disabled]')).toHaveAttribute(
-      'aria-disabled',
-      'true',
-    );
+    expect(screen.getByTestId('nav-my-issues')).toHaveAttribute('href', '/my-issues');
     expect(screen.getByText('Inbox').closest('[aria-disabled]')).toHaveAttribute(
       'aria-disabled',
       'true',
     );
+  });
+
+  it('My issues navigates and is the current page, with no team marked', async () => {
+    renderShell();
+    await userEvent.click(screen.getByTestId('nav-my-issues'));
+    expect(window.location.pathname).toBe('/my-issues');
+    expect(screen.getByTestId('nav-my-issues')).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('link', { name: /Engineering/ })).not.toHaveAttribute('aria-current');
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('My issues');
+  });
+
+  it('an issue address makes the team of its identifier the shell team', () => {
+    window.history.replaceState({}, '', '/issues/OPS-12');
+    renderShell();
+    expect(screen.getByRole('link', { name: /Operations/ })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Operations');
+  });
+
+  it('keeps the query of a team address and still finds the team', () => {
+    window.history.replaceState({}, '', '/teams/OPS?group=assignee');
+    renderShell();
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Operations');
+    expect(window.location.search).toBe('?group=assignee');
+  });
+
+  it('the home address replaces itself with the first team', () => {
+    window.history.replaceState({}, '', '/');
+    const length = window.history.length;
+    renderShell();
+    expect(window.location.pathname).toBe('/teams/ENG');
+    expect(window.history.length).toBe(length);
+  });
+
+  it('an address of a team nobody can see shows the first team without leaving the address', () => {
+    window.history.replaceState({}, '', '/teams/NOPE');
+    renderShell();
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Engineering');
+    expect(window.location.pathname).toBe('/teams/NOPE');
   });
 
   it('marks the team of the current address and names it in the header', () => {

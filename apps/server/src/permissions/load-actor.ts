@@ -1,6 +1,6 @@
 // Turns a (workspace, member) pair into the `Actor` the shared permission module decides on.
 import { type ActivityClient, member, team, teamMember } from '@torch/shared/db/schema';
-import { type Actor, canSeeMember, type TeamAccess } from '@torch/shared/permissions';
+import { type Actor, canSeeMember, canSeeTeam, type TeamAccess } from '@torch/shared/permissions';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import type { Orm } from '../db.ts';
 import { isUuid } from '../util/uuid.ts';
@@ -119,4 +119,33 @@ export async function loadVisibleMemberIds(
     }
   }
   return [...visible].sort();
+}
+
+/**
+ * The ids of the teams the actor can see, sorted: the guest's own teams, or for everybody else the public teams of the
+ * workspace plus the private teams they are in. Read per request from the stored teams and the actor's stored
+ * memberships (not from `actor.teamIds`, which may be older than this call), and decided by `canSeeTeam`; only the
+ * actor's workspace and the actor's own membership rows are read, whatever else the actor object might hold. This
+ * feeds the My Issues shape, the one shape that spans teams, so it must never list a team the actor cannot see.
+ */
+export async function loadVisibleTeamIds(orm: Orm, actor: Actor): Promise<string[]> {
+  if (!isUuid(actor.workspaceId) || !isUuid(actor.memberId)) return [];
+
+  const [teams, memberships] = await Promise.all([
+    orm
+      .select({ id: team.id, workspaceId: team.workspaceId, private: team.private })
+      .from(team)
+      .where(eq(team.workspaceId, actor.workspaceId)),
+    orm
+      .select({ teamId: teamMember.teamId })
+      .from(teamMember)
+      .where(
+        and(eq(teamMember.workspaceId, actor.workspaceId), eq(teamMember.memberId, actor.memberId)),
+      ),
+  ]);
+  const stored: Actor = { ...actor, teamIds: new Set(memberships.map((row) => row.teamId)) };
+  return teams
+    .filter((row) => canSeeTeam(stored, row))
+    .map((row) => row.id)
+    .sort();
 }

@@ -18,17 +18,21 @@ test('warm start renders before network', async ({ browser, baseURL }) => {
   await openSessionAs(context, baseURL, 'owner');
   const page = await context.newPage();
   await page.goto('/');
-  await expect(page.getByTestId('issue-title-3')).toHaveValue('ENG issue 3');
+  await expect(page.getByTestId('issue-title-3')).toHaveText('ENG issue 3');
   // The device copy is written in the background: wait until the whole team list is on it.
   await expect
     .poll(() => persistedRowCount(page, workspaceId(), 'issues-'), { timeout: 10_000 })
     .toBeGreaterThanOrEqual(SEEDED_ISSUES);
+  // The list groups by the team's workflow states: they are on the device too before the network goes.
+  await expect
+    .poll(() => persistedRowCount(page, workspaceId(), 'workflowStates-'), { timeout: 10_000 })
+    .toBeGreaterThan(0);
 
   // The network answers nothing from now on: the next visit has only the device copy.
   await context.route('**/api/sync/**', (route) => route.abort('connectionfailed'));
   await page.reload();
 
-  await expect(page.getByTestId('issue-title-3')).toHaveValue('ENG issue 3', { timeout: 3000 });
+  await expect(page.getByTestId('issue-title-3')).toHaveText('ENG issue 3', { timeout: 3000 });
   await expect(page.getByTestId('team-ENG')).toBeVisible();
   await context.close();
 });
@@ -41,7 +45,7 @@ test('sign-out wipes the signed-out workspace from OPFS and IndexedDB, and leave
   await openSessionAs(context, baseURL, 'owner');
   const page = await context.newPage();
   await page.goto('/');
-  await expect(page.getByTestId('issue-title-3')).toHaveValue('ENG issue 3');
+  await expect(page.getByTestId('issue-title-3')).toHaveText('ENG issue 3');
   await expect
     .poll(() => persistedRowCount(page, workspaceId(), 'issues-'), { timeout: 10_000 })
     .toBeGreaterThanOrEqual(SEEDED_ISSUES);
@@ -84,9 +88,9 @@ test('losing a team deletes its rows from the real store and keeps the other tea
   await openSessionAs(context, baseURL, 'owner');
   const page = await context.newPage();
   await page.goto('/');
-  await expect(page.getByTestId('issue-title-3')).toHaveValue('ENG issue 3');
+  await expect(page.getByTestId('issue-title-3')).toHaveText('ENG issue 3');
   await page.getByTestId('team-OPS').click();
-  await expect(page.getByTestId('issue-title-3')).toHaveValue('OPS issue 3');
+  await expect(page.getByTestId('issue-title-3')).toHaveText('OPS issue 3');
   await expect
     .poll(() => persistedRowCount(page, workspaceId(), `issues-${workspaceId()}-${opsTeamId()}`), {
       timeout: 10_000,

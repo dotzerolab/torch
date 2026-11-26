@@ -1,6 +1,6 @@
 import type { Brand } from '@torch/shared/brand';
 import type { Locale } from '@torch/shared/i18n';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import type { SessionWorkspace } from '../auth/useSession.ts';
 import { Dialog } from '../design/components/Dialog.tsx';
 import { ToastProvider } from '../design/components/Toast.tsx';
@@ -9,10 +9,11 @@ import { useTheme } from '../design/theme.ts';
 import { useMediaQuery } from '../design/useMediaQuery.ts';
 import { ShortcutHelp } from '../keys/ShortcutHelp.tsx';
 import { useShortcut } from '../keys/useShortcut.ts';
-import { usePathname } from '../navigation.ts';
+import { navigate, useLocation } from '../navigation.ts';
+import { parseRoute, routeTeamKey } from '../routes.ts';
 import { Header } from './Header.tsx';
 import { OfflineBanner } from './OfflineBanner.tsx';
-import { ShellContext, type ShellState, teamKeyFromPath } from './ShellContext.ts';
+import { ShellContext, type ShellState } from './ShellContext.ts';
 import { Sidebar } from './Sidebar.tsx';
 import { StatusBar } from './StatusBar.tsx';
 import { useDeviceSession } from './useDeviceSession.ts';
@@ -41,18 +42,28 @@ function ShellFrame({
   const t = useT();
   const { resolved } = useTheme();
   const phone = useMediaQuery(PHONE_QUERY);
-  const pathname = usePathname();
+  const { pathname } = useLocation();
+  const route = parseRoute(pathname);
   const { teams, ready } = useTeams(workspace.id);
   useMembershipWatcher(workspace.id, workspace.memberId);
   useOutboxEvents(workspace.id);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
-  const onSettings = pathname === '/settings' || pathname.startsWith('/settings/');
-  const requestedKey = teamKeyFromPath(pathname);
+  const onSettings = route.name === 'settings';
+  const onMyIssues = route.name === 'myIssues';
+  const requestedKey = routeTeamKey(route);
   // An address that names no visible team (a private team of someone else, a typo) shows the first team instead.
   const team = teams.find((candidate) => candidate.key === requestedKey) ?? teams[0] ?? null;
   const state: ShellState = { workspace, teams, teamsReady: ready, team };
+
+  // The bare address (and one that names no screen) goes to the first team, replacing itself in the history.
+  const firstTeamKey = teams[0]?.key;
+  useEffect(() => {
+    if (route.name === 'home' && ready && firstTeamKey) {
+      navigate(`/teams/${encodeURIComponent(firstTeamKey)}`, { replace: true });
+    }
+  }, [route.name, ready, firstTeamKey]);
 
   const toggleSidebar = () => (phone ? setDrawerOpen((open) => !open) : setCollapsed((c) => !c));
   useShortcut(
@@ -68,7 +79,7 @@ function ShellFrame({
       workspace={workspace}
       onSelectWorkspace={onSelectWorkspace}
       teams={teams}
-      activeTeamKey={onSettings ? null : (team?.key ?? null)}
+      activeTeamKey={onSettings || onMyIssues ? null : (team?.key ?? null)}
       onNavigate={onNavigate}
     />
   );
@@ -85,7 +96,9 @@ function ShellFrame({
           <Header
             workspace={workspace}
             team={team}
-            section={onSettings ? t('shell.settings') : undefined}
+            section={
+              onSettings ? t('shell.settings') : onMyIssues ? t('shell.myIssues') : undefined
+            }
             showSidebarButton={phone || collapsed}
             onOpenSidebar={toggleSidebar}
           />

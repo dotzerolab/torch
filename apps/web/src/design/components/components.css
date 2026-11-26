@@ -288,6 +288,12 @@
 }
 
 /* tooltip and key caps */
+/* A tooltip only says a name: it must not catch the click meant for what lies under it (the tooltip of a focused
+   header button stays open over the toolbar below it on a phone). Radix puts it in a wrapper of its own. */
+[data-radix-popper-content-wrapper]:has(> .tooltip),
+.tooltip {
+  pointer-events: none;
+}
 .tooltip {
   z-index: 60;
   padding: var(--space-1) var(--space-2);

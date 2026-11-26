@@ -61,11 +61,16 @@ async function countMembers(tx: Tx, teamId: string): Promise<number> {
   return row?.members ?? 0;
 }
 
-/** Creates a team with the six default workflow states; the creator is its first member. Owners and admins only. */
+/**
+ * Creates a team with the six default workflow states; the creator is its first member. Owners and admins only.
+ * After the commit the access bus hears about it: a public team joins every member's visible teams (everybody), a
+ * private one only the creator's, so an open "my issues" stream restarts with the new team list.
+ */
 export async function createTeam(
   orm: Orm,
   actor: Actor,
   input: TeamCreateInput,
+  accessBus?: AccessNotifier,
 ): Promise<ServiceResult<{ teamId: string; txid: number }>> {
   // The type says "validated", the function does not rely on it.
   const parsed = teamCreateInput.safeParse(input);
@@ -74,7 +79,7 @@ export async function createTeam(
   const { key, name, private: isPrivate = false } = parsed.data;
 
   try {
-    return await orm.transaction(async (tx) => {
+    const result = await orm.transaction(async (tx) => {
       const now = await currentActor(tx, actor);
       if (!now || !canManageTeams(now)) return refuse('forbidden', 403);
 
@@ -104,6 +109,9 @@ export async function createTeam(
       });
       return succeed({ teamId: created.id, txid: await currentTxid(tx) });
     });
+    if (result.ok)
+      accessBus?.accessChanged(actor.workspaceId, isPrivate ? [actor.memberId] : 'all');
+    return result;
   } catch (error) {
     if (isUniqueViolation(error, 'team_workspace_key_unique')) {
       return refuse('team_key_taken', 409);

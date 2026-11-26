@@ -4,6 +4,7 @@ import {
   type Actor,
   canChangeMemberRole,
   canGrantRole,
+  canManageLabels,
   type MemberAccess,
   type Role,
 } from '@torch/shared/permissions';
@@ -39,4 +40,26 @@ export function roleChoices(
     (role) => role !== target.role && canChangeMemberRole(actor, target, role),
   );
   return { roles: editable ? roles : [target.role], editable };
+}
+
+/** The workflow screen is for owners and admins (`canManageWorkflow` decides per team on the server). */
+export function canSeeWorkflowSettings(workspace: SessionWorkspace): boolean {
+  return workspace.role === 'owner' || workspace.role === 'admin';
+}
+
+/** The labels screen is for everybody but guests, who read labels and do not define them. */
+export function canSeeLabelSettings(workspace: SessionWorkspace): boolean {
+  return workspace.role !== 'guest';
+}
+
+/**
+ * May this person edit the labels of a scope: `team` null is the workspace's own labels (owners and admins), a team
+ * is one the person can see (the list they pick from only holds those).
+ */
+export function canEditLabels(workspace: SessionWorkspace, team: { id: string } | null): boolean {
+  const actor = { ...actorOf(workspace), teamIds: new Set(team ? [team.id] : []) };
+  return canManageLabels(
+    actor,
+    team ? { id: team.id, workspaceId: workspace.id, private: false } : null,
+  );
 }

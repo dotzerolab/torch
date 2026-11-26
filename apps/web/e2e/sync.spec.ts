@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { issueTitle, renameIssue } from './helpers/issues.ts';
 import { signInAs } from './helpers/sign-in.ts';
 
 test("an owner's title edit reaches a member's open page within 5 s and survives reload", async ({
@@ -8,16 +9,14 @@ test("an owner's title edit reaches a member's open page within 5 s and survives
   const member = await (await browser.newContext()).newPage();
   await signInAs(owner, 'owner');
   await signInAs(member, 'member');
-  await expect(member.getByTestId('issue-title-3')).toHaveValue('ENG issue 3');
+  await expect(issueTitle(member, 3)).toHaveText('ENG issue 3');
 
   const title = `Synced ${crypto.randomUUID().slice(0, 8)}`;
-  const field = owner.getByTestId('issue-title-3');
-  await field.fill(title);
-  await field.press('Enter');
+  await renameIssue(owner, 3, title);
 
-  await expect(member.getByTestId('issue-title-3')).toHaveValue(title, { timeout: 5000 });
+  await expect(issueTitle(member, 3)).toHaveText(title, { timeout: 5000 });
   await owner.reload();
-  await expect(owner.getByTestId('issue-title-3')).toHaveValue(title);
+  await expect(issueTitle(owner, 3)).toHaveText(title);
   await member.context().close();
   await owner.context().close();
 });
@@ -34,13 +33,11 @@ test('a rejected write rolls back the title and shows a translated message', asy
     }),
   );
 
-  const field = owner.getByTestId('issue-title-4');
-  await field.fill('Will be rejected');
-  await field.press('Enter');
+  await renameIssue(owner, 4, 'Will be rejected');
 
   await expect(owner.getByTestId('mutation-error')).toHaveText(
     "The state does not belong to the issue's team.",
   );
-  await expect(field).toHaveValue('ENG issue 4');
+  await expect(issueTitle(owner, 4)).toHaveText('ENG issue 4');
   await owner.context().close();
 });

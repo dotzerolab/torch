@@ -39,7 +39,11 @@ export function createTeamRoutes(deps: TeamRouteDeps): Hono {
     if (!json) return adminFailure('invalid_input', 400);
     const input = teamCreateInput.safeParse(json.body);
     if (!input.success) return invalidInput(input.error.issues);
-    return respond(await createTeam(deps.orm, actor, input.data), (value) => value, 201);
+    return respond(
+      await createTeam(deps.orm, actor, input.data, deps.accessBus),
+      (value) => value,
+      201,
+    );
   });
 
   routes.patch('/w/:workspaceId/teams/:teamId', async (c) => {
