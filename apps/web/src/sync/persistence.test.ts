@@ -46,6 +46,10 @@ function idOf(kind: (typeof TEAM_KINDS)[number], workspaceId: string, teamId: st
     issueSubscribers: remember,
     issueDetail: remember,
     issueActivity: remember,
+    issueComments: remember,
+    issueAttachments: remember,
+    documents: remember,
+    documentContent: remember,
   });
   registry.get({ kind, workspaceId, teamId, issueId: ISSUE_1 } as ShapeKey);
   return id;
@@ -137,21 +141,24 @@ describe('persistence', () => {
     expect(files.has(storeName(WS_A))).toBe(true);
   });
 
-  it('v1 store is rebuilt: the stored issue row changed, so the first layout is deleted on open and the second kept', async () => {
+  it('older stores are rebuilt: comments, files and documents are stored kinds now, so the earlier layouts are deleted on open and the current one kept', async () => {
     const { platform, files } = fakePlatform();
     const scope = deviceScope(WS_A);
     files.add(`${scope}-v1`);
     files.add(`${scope}-v1-journal`);
-    // A store of the layout the page writes now (a second tab opened it earlier) stays.
     files.add(`${scope}-v2`);
+    files.add(`${scope}-v2-journal`);
+    // A store of the layout the page writes now (a second tab opened it earlier) stays.
+    files.add(`${scope}-v3`);
 
     const store = await openWorkspaceStore(WS_A, platform);
 
-    expect(LOCAL_SCHEMA_VERSION).toBe(2);
-    expect(store.name).toBe(`${scope}-v2`);
-    expect(files.has(`${scope}-v1`)).toBe(false);
-    expect(files.has(`${scope}-v1-journal`)).toBe(false);
-    expect(files.has(`${scope}-v2`)).toBe(true);
+    expect(LOCAL_SCHEMA_VERSION).toBe(3);
+    expect(store.name).toBe(`${scope}-v3`);
+    for (const old of ['v1', 'v1-journal', 'v2', 'v2-journal']) {
+      expect(files.has(`${scope}-${old}`)).toBe(false);
+    }
+    expect(files.has(`${scope}-v3`)).toBe(true);
   });
 
   it('does not take a version that merely starts with the current one for the current store', async () => {
@@ -240,6 +247,10 @@ describe('persistence', () => {
     expect(idOf('issueDetail', WS_A, TEAM_1)).toBe(`issueDetail-${WS_A}-${TEAM_1}-${ISSUE_1}`);
     expect(idOf('issueActivity', WS_A, TEAM_1)).toBe(`issueActivity-${WS_A}-${TEAM_1}-${ISSUE_1}`);
     expect(idOf('labels', WS_A, TEAM_1)).toBe(`labels-${WS_A}-${TEAM_1}`);
+    expect(idOf('issueComments', WS_A, TEAM_1)).toBe(`issueComments-${WS_A}-${TEAM_1}-${ISSUE_1}`);
+    expect(idOf('issueAttachments', WS_A, TEAM_1)).toBe(
+      `issueAttachments-${WS_A}-${TEAM_1}-${ISSUE_1}`,
+    );
   });
 
   it("dropTeam deletes the team's persisted rows", async () => {
@@ -289,6 +300,10 @@ describe('persistence', () => {
       'workflowStates',
       'issueDetail',
       'issueActivity',
+      'issueComments',
+      'issueAttachments',
+      'documents',
+      'documentContent',
     ] as const) {
       expect(TEAM_KINDS).toContain(kind);
       expect(tables).not.toContain(`c_${kind}1`);

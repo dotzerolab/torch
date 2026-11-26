@@ -1,7 +1,7 @@
 // Which team an issue belongs to, for the per-issue shape routes: the stored issue decides, never the URL.
-import { issue, team } from '@torch/shared/db/schema';
+import { comment, issue, team } from '@torch/shared/db/schema';
 import type { TeamAccess } from '@torch/shared/permissions';
-import { and, eq } from 'drizzle-orm';
+import { and, count, eq, isNotNull } from 'drizzle-orm';
 import type { Orm } from '../db.ts';
 import { isUuid } from '../util/uuid.ts';
 
@@ -23,4 +23,27 @@ export async function loadIssueTeamAccess(
     .limit(1);
   if (!row) return null;
   return { issueId: row.issueId, access: { id: row.teamId, workspaceId, private: row.private } };
+}
+
+/**
+ * The generation of an issue's comments shape: how many of its comments were deleted. A delete is a tombstone (the
+ * row stays, `deleted_at` is set), so the number only grows, and it grows in the transaction of the delete itself:
+ * no request that starts after the delete commits can name the previous generation. See `issueCommentsShape`.
+ */
+export async function loadCommentGeneration(
+  orm: Orm,
+  workspaceId: string,
+  issueId: string,
+): Promise<number> {
+  const [row] = await orm
+    .select({ deleted: count() })
+    .from(comment)
+    .where(
+      and(
+        eq(comment.workspaceId, workspaceId),
+        eq(comment.issueId, issueId),
+        isNotNull(comment.deletedAt),
+      ),
+    );
+  return row?.deleted ?? 0;
 }

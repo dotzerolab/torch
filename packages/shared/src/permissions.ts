@@ -22,6 +22,9 @@ export const OBJECT_TYPES = [
   'issue',
   'label',
   'workflow_state',
+  'comment',
+  'attachment',
+  'document',
 ] as const;
 export type ObjectType = (typeof OBJECT_TYPES)[number];
 
@@ -195,4 +198,53 @@ export function canManageLabels(actor: Actor, team: TeamAccess | null): boolean 
 /** Create, edit and archive the workflow states of a team: owners and admins, for the teams they can see. */
 export function canManageWorkflow(actor: Actor, team: TeamAccess): boolean {
   return isOwnerOrAdmin(actor) && canSeeTeam(actor, team);
+}
+
+// ---- Comments, attachments and documents (P1e) ----
+
+/** Comment, react and resolve a thread: whoever can see the issue's team (a guest too). */
+export function canComment(actor: Actor, team: TeamAccess): boolean {
+  return canSeeTeam(actor, team);
+}
+
+/** Edit a comment: only its author, and only while they can still see the team. Nobody edits another person's. */
+export function canEditComment(
+  actor: Actor,
+  team: TeamAccess,
+  comment: { authorId: string },
+): boolean {
+  return canSeeTeam(actor, team) && comment.authorId === actor.memberId;
+}
+
+/** Delete a comment: its author, or an owner or admin, for a team the actor can see. */
+export function canDeleteComment(
+  actor: Actor,
+  team: TeamAccess,
+  comment: { authorId: string },
+): boolean {
+  return canSeeTeam(actor, team) && (comment.authorId === actor.memberId || isOwnerOrAdmin(actor));
+}
+
+/** Attach a file to an issue: whoever can see the issue's team (a guest too). */
+export function canAttach(actor: Actor, team: TeamAccess): boolean {
+  return canSeeTeam(actor, team);
+}
+
+/** Remove a file: its uploader, or anybody but a guest, for a team the actor can see. */
+export function canRemoveAttachment(
+  actor: Actor,
+  team: TeamAccess,
+  file: { uploaderId: string },
+): boolean {
+  return canSeeTeam(actor, team) && (file.uploaderId === actor.memberId || actor.role !== 'guest');
+}
+
+/** Read the documents of a team: whoever can see the team. */
+export function canReadDocuments(actor: Actor, team: TeamAccess): boolean {
+  return canSeeTeam(actor, team);
+}
+
+/** Create, edit and archive documents: anybody but a guest who can see the team. Guests read. */
+export function canEditDocuments(actor: Actor, team: TeamAccess): boolean {
+  return canSeeTeam(actor, team) && actor.role !== 'guest';
 }

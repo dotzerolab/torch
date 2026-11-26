@@ -31,6 +31,15 @@ Three rules hold for every role:
 | --------------------------------------------------------------- | :---: | :---: | :----: | :---: |
 | See and edit issues of the teams they can see                   |  yes  |  yes  |  yes   |  yes  |
 | Create issues; add or remove relations and links; subscribe     |  yes  |  yes  |  yes   |  yes  |
+| Comment, react and resolve threads on an issue they can see     |  yes  |  yes  |  yes   |  yes  |
+| Edit their own comment                                          |  yes  |  yes  |  yes   |  yes  |
+| Delete their own comment                                        |  yes  |  yes  |  yes   |  yes  |
+| Delete another person's comment                                 |  yes  |  yes  |   no   |  no   |
+| Attach files to an issue they can see, and read its files       |  yes  |  yes  |  yes   |  yes  |
+| Remove a file they uploaded                                     |  yes  |  yes  |  yes   |  yes  |
+| Remove a file somebody else uploaded                            |  yes  |  yes  |  yes   |  no   |
+| Read the documents of a team they can see                       |  yes  |  yes  |  yes   |  yes  |
+| Create, edit and archive the documents of a team they can see   |  yes  |  yes  |  yes   |  no   |
 | Add or remove another person as a subscriber                    |  yes  |  yes  |  yes   |  yes  |
 | Read the labels and workflow states of the teams they can see   |  yes  |  yes  |  yes   |  yes  |
 | Create, edit and archive labels of a team they can see          |  yes  |  yes  |  yes   |  no   |
@@ -62,6 +71,15 @@ Issue rules in short, all inside the teams a person can see (a team they cannot 
   team ids of either end. The related id of an issue in a hidden team is still visible, as an id alone.
 - Labels of a team: anybody but a guest who can see the team defines, edits and archives them. Labels of the workspace
   and the workflow states of a team: owners and admins. Guests read all of them.
+- Comments follow the issue's team, guests included. Only the author edits a comment; the author, an owner or an admin
+  deletes it (the thread keeps a tombstone). Comments are read-only on an archived issue; see the
+  [comment API](api/comments.md).
+- Files follow the issue's team, guests included. The uploader, or anybody but a guest, removes a file. A file is read
+  through a link that is minted per request after the permission check and lasts 60 seconds, so losing access to the
+  team ends access to its files at once. Uploads are read-only on an archived issue; see the
+  [attachment API](api/attachments.md).
+- Documents belong to a team. Everybody who sees the team reads them (a list never carries the text); everybody but a
+  guest writes them. An archived document is read-only until unarchived; see the [document API](api/documents.md).
 - Nothing is deleted. Issues, labels and workflow states are archived; see the [issue API](api/issues.md).
 
 ## Teams: public and private

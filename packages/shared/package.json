@@ -15,7 +15,10 @@
     "./db/workflow-defaults": "./src/db/workflow-defaults.ts",
     "./mutations/issue": "./src/mutations/issue.ts",
     "./mutations/admin": "./src/mutations/admin.ts",
-    "./mutations/workflow": "./src/mutations/workflow.ts"
+    "./mutations/workflow": "./src/mutations/workflow.ts",
+    "./mutations/comment": "./src/mutations/comment.ts",
+    "./mutations/attachment": "./src/mutations/attachment.ts",
+    "./mutations/document": "./src/mutations/document.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p ."

@@ -62,4 +62,25 @@ describe('server startup', () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('TRUST_PROXY');
   });
+
+  it('stops with a clear message that names the missing variable when S3_ENDPOINT is set without a bucket', () => {
+    const result = spawnSync(process.execPath, [mainPath], {
+      env: {
+        ...process.env,
+        PORT: '43904',
+        BRAND_CONFIG_PATH: '',
+        DATABASE_URL: '',
+        S3_ENDPOINT: 'http://127.0.0.1:1',
+        S3_BUCKET: '',
+        S3_ACCESS_KEY_ID: 'id-for-the-test',
+        S3_SECRET_ACCESS_KEY: 'secret-for-the-test',
+      },
+      encoding: 'utf8',
+      timeout: 15_000,
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('S3_BUCKET');
+    expect(result.stderr).not.toContain('secret-for-the-test');
+  });
 });

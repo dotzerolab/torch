@@ -17,8 +17,9 @@ import { TEAM_KINDS } from './registry.ts';
 /**
  * Bump when the layout of what is stored changes: stores of other versions are deleted on open.
  * 2: the stored issue row carries the estimate, due date, parent, sort order and state timestamps.
+ * 3: comments, files and documents are stored kinds (per-issue comments and files, team documents, document bodies).
  */
-export const LOCAL_SCHEMA_VERSION = 2;
+export const LOCAL_SCHEMA_VERSION = 3;
 
 /** Names carry no product name: the same origin may host other apps. */
 export const storeName = (workspaceId: string, version = LOCAL_SCHEMA_VERSION) =>

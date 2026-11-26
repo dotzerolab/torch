@@ -32,7 +32,7 @@ export type IssueChange =
   | { kind: 'updated'; before: IssueRow; after: IssueRow }
   | { kind: 'labels'; issueId: string; added: string[]; removed: string[] }
   | {
-      kind: 'relation' | 'subscriber' | 'link';
+      kind: 'relation' | 'subscriber' | 'link' | 'attachment';
       issueId: string;
       op: 'added' | 'removed';
       data: Record<string, unknown>;
@@ -62,7 +62,12 @@ type ActivityInsert = PgInsertValue<typeof issueActivity>;
 type EventInsert = PgInsertValue<typeof event>;
 type Changes = Record<string, Record<string, unknown>>;
 
-const JOIN_KIND = { relation: 'relations', subscriber: 'subscribers', link: 'links' } as const;
+const JOIN_KIND = {
+  relation: 'relations',
+  subscriber: 'subscribers',
+  link: 'links',
+  attachment: 'attachments',
+} as const;
 
 const issueIdOf = (change: IssueChange): string => {
   switch (change.kind) {
@@ -174,7 +179,8 @@ export async function recordIssueChange(
     }
     case 'relation':
     case 'subscriber':
-    case 'link': {
+    case 'link':
+    case 'attachment': {
       const key = JOIN_KIND[change.kind];
       const type = `issue.${change.kind}_${change.op}`;
       activity.push(

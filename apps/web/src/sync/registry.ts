@@ -15,15 +15,20 @@ type TeamKind =
   | 'issueLabels'
   | 'issueRelations'
   | 'issueLinks'
-  | 'issueSubscribers';
-/** Shapes of one opened issue (its description, its history): a team's, and keyed by the issue too. */
-type IssueKind = 'issueDetail' | 'issueActivity';
-export type ShapeKind = WorkspaceKind | TeamKind | IssueKind;
+  | 'issueSubscribers'
+  | 'documents';
+/** Shapes of one opened issue (its description, its history, its comments, its files): a team's, keyed by the issue too. */
+type IssueKind = 'issueDetail' | 'issueActivity' | 'issueComments' | 'issueAttachments';
+/** Shapes of one opened document (its body): a team's, keyed by the document too. */
+type DocumentKind = 'documentContent';
+export type ShapeKind = WorkspaceKind | TeamKind | IssueKind | DocumentKind;
 type KeyOf<K extends ShapeKind> = K extends WorkspaceKind
   ? { kind: K; workspaceId: string }
   : K extends IssueKind
     ? { kind: K; workspaceId: string; teamId: string; issueId: string }
-    : { kind: K; workspaceId: string; teamId: string };
+    : K extends DocumentKind
+      ? { kind: K; workspaceId: string; teamId: string; documentId: string }
+      : { kind: K; workspaceId: string; teamId: string };
 export type ShapeKey = KeyOf<ShapeKind>;
 
 /** What the registry needs of a collection. */
@@ -55,9 +60,10 @@ export type CollectionFor<F extends Factories, K extends ShapeKey> = ReturnType<
 
 /**
  * The kinds of shape a team owns; collection ids on the device are `<kind>-<workspaceId>-<teamId>`, and for the shapes of
- * one issue `<kind>-<workspaceId>-<teamId>-<issueId>`: losing the team ends every one of them with a single prefix.
+ * one issue or one document `<kind>-<workspaceId>-<teamId>-<objectId>`: losing the team ends every one of them with a
+ * single prefix.
  */
-export const TEAM_KINDS: readonly (TeamKind | IssueKind)[] = [
+export const TEAM_KINDS: readonly (TeamKind | IssueKind | DocumentKind)[] = [
   'issues',
   'workflowStates',
   'teamMembers',
@@ -68,14 +74,17 @@ export const TEAM_KINDS: readonly (TeamKind | IssueKind)[] = [
   'issueSubscribers',
   'issueDetail',
   'issueActivity',
+  'issueComments',
+  'issueAttachments',
+  'documents',
+  'documentContent',
 ];
-
-const ISSUE_KINDS: readonly IssueKind[] = ['issueDetail', 'issueActivity'];
 
 /**
  * Snapshot shapes: read to `up-to-date` and then closed, so they hold no connection and are not counted against
  * `MAX_LIVE_SHAPES`. They are refreshed (`refresh`) when a screen needs them current. Kinds that read small tables or
- * one object (labels, relations, links, subscribers, workflow states, an issue's description and history) belong here;
+ * one object (labels, relations, links, subscribers, workflow states, an issue's description, history, comments and
+ * files, a document's body) belong here;
  * a new snapshot kind is an entry in this list and a factory in `collections.ts`.
  */
 export const SNAPSHOT_KINDS: readonly ShapeKind[] = [
@@ -88,6 +97,9 @@ export const SNAPSHOT_KINDS: readonly ShapeKind[] = [
   'workspaceLabels',
   'issueDetail',
   'issueActivity',
+  'issueComments',
+  'issueAttachments',
+  'documentContent',
 ];
 
 export function isSnapshotKind(kind: string): boolean {
@@ -98,15 +110,28 @@ export function isTeamKey(key: ShapeKey): key is Extract<ShapeKey, { teamId: str
   return (TEAM_KINDS as readonly string[]).includes(key.kind);
 }
 
-function isIssueKey(key: ShapeKey): key is Extract<ShapeKey, { issueId: string }> {
-  return (ISSUE_KINDS as readonly string[]).includes(key.kind);
+const ISSUE_KINDS: readonly IssueKind[] = [
+  'issueDetail',
+  'issueActivity',
+  'issueComments',
+  'issueAttachments',
+];
+
+/** The issue or document a shape is about, for the kinds that name one (decided by the kind, not by the fields). */
+function objectIdOf(key: ShapeKey): string | undefined {
+  if ((ISSUE_KINDS as readonly string[]).includes(key.kind)) {
+    return (key as Extract<ShapeKey, { issueId: string }>).issueId;
+  }
+  if (key.kind === 'documentContent') return key.documentId;
+  return undefined;
 }
 
 function keyOf(key: ShapeKey): string {
-  if (isIssueKey(key)) return `${key.kind}:${key.workspaceId}:${key.teamId}:${key.issueId}`;
-  return isTeamKey(key)
-    ? `${key.kind}:${key.workspaceId}:${key.teamId}`
-    : `${key.kind}:${key.workspaceId}`;
+  if (!isTeamKey(key)) return `${key.kind}:${key.workspaceId}`;
+  const object = objectIdOf(key);
+  return object !== undefined
+    ? `${key.kind}:${key.workspaceId}:${key.teamId}:${object}`
+    : `${key.kind}:${key.workspaceId}:${key.teamId}`;
 }
 
 /** The name of a shape between tabs; the same in every tab. Ids are UUIDs, so `:` never occurs inside one. */
@@ -119,6 +144,7 @@ const SHARED_KINDS: readonly ShapeKind[] = [
   'ownMemberships',
   'issues',
   'teamMembers',
+  'documents',
 ];
 
 /**
@@ -132,17 +158,20 @@ export function isShapeId(id: string): boolean {
   return (TEAM_KINDS as readonly string[]).includes(kind) ? Boolean(teamId) : teamId === undefined;
 }
 
-/** The key a shape id names (any kind, the id of a shape of one issue included). */
+/** The key a shape id names (any kind, the id of a shape of one issue or document included). */
 export function parseShapeId(id: string): ShapeKey {
-  const [kind, workspaceId, teamId, issueId] = id.split(':') as [
+  const [kind, workspaceId, teamId, object] = id.split(':') as [
     ShapeKind,
     string,
     string | undefined,
     string | undefined,
   ];
   if (teamId === undefined) return { kind, workspaceId } as ShapeKey;
+  if (object === undefined) return { kind, workspaceId, teamId } as ShapeKey;
   return (
-    issueId === undefined ? { kind, workspaceId, teamId } : { kind, workspaceId, teamId, issueId }
+    kind === 'documentContent'
+      ? { kind, workspaceId, teamId, documentId: object }
+      : { kind, workspaceId, teamId, issueId: object }
   ) as ShapeKey;
 }
 
@@ -225,10 +254,11 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
   }
 
   function baseId(key: ShapeKey): string {
-    if (isIssueKey(key)) return `${key.kind}-${key.workspaceId}-${key.teamId}-${key.issueId}`;
-    return isTeamKey(key)
-      ? `${key.kind}-${key.workspaceId}-${key.teamId}`
-      : `${key.kind}-${key.workspaceId}`;
+    if (!isTeamKey(key)) return `${key.kind}-${key.workspaceId}`;
+    const object = objectIdOf(key);
+    return object !== undefined
+      ? `${key.kind}-${key.workspaceId}-${key.teamId}-${object}`
+      : `${key.kind}-${key.workspaceId}-${key.teamId}`;
   }
 
   // Snapshots that were refreshed and whose next instance has not settled yet: the older device copies of such a shape go
@@ -303,7 +333,7 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     notify();
   }
 
-  /** Every open shape of a team: its own and those of its issues. */
+  /** Every open shape of a team: its own and those of its issues and documents. */
   function teamEntries(workspaceId: string, teamId: string): Entry[] {
     return [...entries.values()].filter(
       (entry) =>

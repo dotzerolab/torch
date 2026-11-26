@@ -12,9 +12,14 @@
 import {
   type Actor,
   canAddSelfToTeam,
+  canAttach,
   canChangeMemberRole,
+  canComment,
   canCreateIssue,
   canDeactivateMember,
+  canDeleteComment,
+  canEditComment,
+  canEditDocuments,
   canEditIssues,
   canGrantRole,
   canInvite,
@@ -25,6 +30,8 @@ import {
   canManageTeamMembership,
   canManageTeams,
   canManageWorkflow,
+  canReadDocuments,
+  canRemoveAttachment,
   canSeeMember,
   canSeeMemberEmail,
   canSeeTeam,
@@ -189,6 +196,63 @@ export const MATRIX: Record<ObjectType, MatrixRow[]> = {
     NOBODY('manage', 'not in team, private'),
     NOBODY('manage', 'other workspace'),
   ],
+  comment: [
+    // Comments follow the issue's team, for every role (a guest comments in the teams they belong to).
+    row('create', true, true, true, true, 'in team'),
+    row('create', true, true, true, false, 'not in team, public'),
+    NOBODY('create', 'not in team, private'),
+    NOBODY('create', 'other workspace'),
+    // Reacting and resolving a thread are open to whoever can comment.
+    row('react or resolve', true, true, true, true, 'in team'),
+    row('react or resolve', true, true, true, false, 'not in team, public'),
+    NOBODY('react or resolve', 'not in team, private'),
+    NOBODY('react or resolve', 'other workspace'),
+    // Only the author edits a comment; nobody edits another person's, an owner included.
+    row('edit own', true, true, true, true, 'in team'),
+    row('edit own', true, true, true, false, 'not in team, public'),
+    NOBODY('edit own', 'not in team, private'),
+    NOBODY('edit own', 'other workspace'),
+    NOBODY('edit other', 'in team'),
+    NOBODY('edit other', 'not in team, public'),
+    NOBODY('edit other', 'not in team, private'),
+    NOBODY('edit other', 'other workspace'),
+    // The author deletes their own comment; an owner or admin deletes anybody's, for a team they can see.
+    row('delete own', true, true, true, true, 'in team'),
+    row('delete own', true, true, true, false, 'not in team, public'),
+    NOBODY('delete own', 'not in team, private'),
+    NOBODY('delete own', 'other workspace'),
+    row('delete other', true, true, false, false, 'in team'),
+    row('delete other', true, true, false, false, 'not in team, public'),
+    NOBODY('delete other', 'not in team, private'),
+    NOBODY('delete other', 'other workspace'),
+  ],
+  attachment: [
+    // A guest attaches files in the teams they belong to, like everybody else who sees the team.
+    row('add', true, true, true, true, 'in team'),
+    row('add', true, true, true, false, 'not in team, public'),
+    NOBODY('add', 'not in team, private'),
+    NOBODY('add', 'other workspace'),
+    // The uploader removes their own file; anybody but a guest removes another person's.
+    row('remove own', true, true, true, true, 'in team'),
+    row('remove own', true, true, true, false, 'not in team, public'),
+    NOBODY('remove own', 'not in team, private'),
+    NOBODY('remove own', 'other workspace'),
+    row('remove other', true, true, true, false, 'in team'),
+    row('remove other', true, true, true, false, 'not in team, public'),
+    NOBODY('remove other', 'not in team, private'),
+    NOBODY('remove other', 'other workspace'),
+  ],
+  document: [
+    // A team's documents: everybody who sees the team reads them; everybody but a guest edits them.
+    row('view', true, true, true, true, 'in team'),
+    row('view', true, true, true, false, 'not in team, public'),
+    NOBODY('view', 'not in team, private'),
+    NOBODY('view', 'other workspace'),
+    row('edit', true, true, true, false, 'in team'),
+    row('edit', true, true, true, false, 'not in team, public'),
+    NOBODY('edit', 'not in team, private'),
+    NOBODY('edit', 'other workspace'),
+  ],
 };
 
 // ---- fixtures, in memory ----
@@ -321,6 +385,23 @@ const EVALUATORS: Record<ObjectType, Record<string, Evaluate>> = {
   },
   workflow_state: {
     manage: (s) => canManageWorkflow(s.actor, s.team),
+  },
+  comment: {
+    create: (s) => canComment(s.actor, s.team),
+    'react or resolve': (s) => canComment(s.actor, s.team),
+    'edit own': (s) => canEditComment(s.actor, s.team, { authorId: SELF }),
+    'edit other': (s) => canEditComment(s.actor, s.team, { authorId: OTHER_MEMBER }),
+    'delete own': (s) => canDeleteComment(s.actor, s.team, { authorId: SELF }),
+    'delete other': (s) => canDeleteComment(s.actor, s.team, { authorId: OTHER_MEMBER }),
+  },
+  attachment: {
+    add: (s) => canAttach(s.actor, s.team),
+    'remove own': (s) => canRemoveAttachment(s.actor, s.team, { uploaderId: SELF }),
+    'remove other': (s) => canRemoveAttachment(s.actor, s.team, { uploaderId: OTHER_MEMBER }),
+  },
+  document: {
+    view: (s) => canReadDocuments(s.actor, s.team),
+    edit: (s) => canEditDocuments(s.actor, s.team),
   },
 };
 
@@ -532,6 +613,68 @@ const HTTP_ROWS: HttpRow[] = [
   http('issues: add link (public team with the owner only)', 201, 201, 201, 404),
   http('issues: remove link (public team with the owner only)', 200, 200, 200, 404),
 
+  // Comments follow the issue's team, for every role. The author edits their own comment (nobody edits another
+  // person's, the owner included: 403); the author deletes their own comment and an owner or admin anybody's.
+  http('comments: list (public team)', 200, 200, 200, 200),
+  http('comments: create (public team)', 201, 201, 201, 201),
+  http('comments: list (private team)', 200, 404, 200, 404),
+  http('comments: create (private team)', 201, 404, 201, 404),
+  http('comments: list (public team with the owner only)', 200, 200, 200, 404),
+  http('comments: create (public team with the owner only)', 201, 201, 201, 404),
+  http('comments: edit own (public team)', 200, 200, 200, 200),
+  http("comments: edit other's (public team)", 403, 403, 403, 403),
+  http('comments: delete own (public team)', 200, 200, 200, 200),
+  http("comments: delete other's (public team)", 200, 200, 403, 403),
+  http('comments: resolve (public team)', 200, 200, 200, 200),
+  http('comments: unresolve (public team)', 200, 200, 200, 200),
+  http('comments: react (public team)', 200, 200, 200, 200),
+  http('comments: unreact (public team)', 200, 200, 200, 200),
+  http('comments: history (public team)', 200, 200, 200, 200),
+
+  // Attachments follow the issue's team, for every role (a guest attaches in the teams they belong to). The uploader
+  // removes their own file; anybody but a guest removes another person's. A file is read through a redirect (302) to a
+  // signed URL, minted only for somebody who sees the team.
+  http('attachments: init (public team)', 201, 201, 201, 201),
+  http('attachments: list (public team)', 200, 200, 200, 200),
+  http('attachments: complete (public team)', 200, 200, 200, 200),
+  http('attachments: read (public team)', 302, 302, 302, 302),
+  http('attachments: remove (public team)', 200, 200, 200, 200),
+  http('attachments: init (private team)', 201, 404, 201, 404),
+  http('attachments: list (private team)', 200, 404, 200, 404),
+  http('attachments: complete (private team)', 200, 404, 200, 404),
+  http('attachments: read (private team)', 302, 404, 302, 404),
+  http('attachments: remove (private team)', 200, 404, 200, 404),
+  http('attachments: init (public team with the owner only)', 201, 201, 201, 404),
+  http('attachments: list (public team with the owner only)', 200, 200, 200, 404),
+  http('attachments: complete (public team with the owner only)', 200, 200, 200, 404),
+  http('attachments: read (public team with the owner only)', 302, 302, 302, 404),
+  http('attachments: remove (public team with the owner only)', 200, 200, 200, 404),
+  http("attachments: remove other's (public team)", 200, 200, 200, 403),
+
+  // Team documents follow the team: everybody who sees it reads them; anybody but a guest creates, edits and archives
+  // them (a guest in the team gets 403).
+  http('documents: list (public team)', 200, 200, 200, 200),
+  http('documents: create (public team)', 201, 201, 201, 403),
+  http('documents: get (public team)', 200, 200, 200, 200),
+  http('documents: update (public team)', 200, 200, 200, 403),
+  http('documents: archive (public team)', 200, 200, 200, 403),
+  http('documents: unarchive (public team)', 200, 200, 200, 403),
+  http('documents: revisions (public team)', 200, 200, 200, 200),
+  http('documents: list (private team)', 200, 404, 200, 404),
+  http('documents: create (private team)', 201, 404, 201, 404),
+  http('documents: get (private team)', 200, 404, 200, 404),
+  http('documents: update (private team)', 200, 404, 200, 404),
+  http('documents: archive (private team)', 200, 404, 200, 404),
+  http('documents: unarchive (private team)', 200, 404, 200, 404),
+  http('documents: revisions (private team)', 200, 404, 200, 404),
+  http('documents: list (public team with the owner only)', 200, 200, 200, 404),
+  http('documents: create (public team with the owner only)', 201, 201, 201, 404),
+  http('documents: get (public team with the owner only)', 200, 200, 200, 404),
+  http('documents: update (public team with the owner only)', 200, 200, 200, 404),
+  http('documents: archive (public team with the owner only)', 200, 200, 200, 404),
+  http('documents: unarchive (public team with the owner only)', 200, 200, 200, 404),
+  http('documents: revisions (public team with the owner only)', 200, 200, 200, 404),
+
   // Sync shapes: every role reads the team list and the member list (filtered by the server); a team's own shapes
   // follow the visibility of the team.
   // Labels: the workspace's are for owners and admins; a team's for anybody but a guest who sees the team. Everybody
@@ -584,6 +727,10 @@ const HTTP_ROWS: HttpRow[] = [
   http('sync: issue relations (public team)', 200, 200, 200, 200),
   http('sync: issue detail (public team)', 200, 200, 200, 200),
   http('sync: issue activity (public team)', 200, 200, 200, 200),
+  http('sync: issue comments (public team)', 200, 200, 200, 200),
+  http('sync: issue attachments (public team)', 200, 200, 200, 200),
+  http('sync: team documents (public team)', 200, 200, 200, 200),
+  http('sync: document content (public team)', 200, 200, 200, 200),
   http('sync: labels (private team)', 200, 404, 200, 404),
   http('sync: issue labels (private team)', 200, 404, 200, 404),
   http('sync: issue subscribers (private team)', 200, 404, 200, 404),
@@ -591,6 +738,10 @@ const HTTP_ROWS: HttpRow[] = [
   http('sync: issue relations (private team)', 200, 404, 200, 404),
   http('sync: issue detail (private team)', 200, 404, 200, 404),
   http('sync: issue activity (private team)', 200, 404, 200, 404),
+  http('sync: issue comments (private team)', 200, 404, 200, 404),
+  http('sync: issue attachments (private team)', 200, 404, 200, 404),
+  http('sync: team documents (private team)', 200, 404, 200, 404),
+  http('sync: document content (private team)', 200, 404, 200, 404),
   http('sync: labels (public team with the owner only)', 200, 200, 200, 404),
   http('sync: issue labels (public team with the owner only)', 200, 200, 200, 404),
   http('sync: issue subscribers (public team with the owner only)', 200, 200, 200, 404),
@@ -598,6 +749,10 @@ const HTTP_ROWS: HttpRow[] = [
   http('sync: issue relations (public team with the owner only)', 200, 200, 200, 404),
   http('sync: issue detail (public team with the owner only)', 200, 200, 200, 404),
   http('sync: issue activity (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue comments (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: issue attachments (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: team documents (public team with the owner only)', 200, 200, 200, 404),
+  http('sync: document content (public team with the owner only)', 200, 200, 200, 404),
 ];
 
 describe('permission matrix over HTTP: completeness', () => {
@@ -619,7 +774,9 @@ describe('permission matrix over HTTP: completeness', () => {
     for (const r of HTTP_ROWS) {
       expect(Object.keys(r.status).sort(), r.endpoint).toEqual([...ROLES].sort());
       for (const role of ROLES) {
-        expect([200, 201, 202, 403, 404], `${r.endpoint} as ${role}`).toContain(r.status[role]);
+        expect([200, 201, 202, 302, 403, 404], `${r.endpoint} as ${role}`).toContain(
+          r.status[role],
+        );
       }
     }
   });

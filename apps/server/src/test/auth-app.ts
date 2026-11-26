@@ -4,6 +4,7 @@ import { vi } from 'vitest';
 import { createApp } from '../app.ts';
 import { createSessionActorResolver } from '../auth/resolver.ts';
 import type { Db } from '../db.ts';
+import type { FileStorage } from '../files/storage.ts';
 import { createMemoryMailer } from '../mail/mailer.ts';
 import type { AccessBus } from '../sync/access-bus.ts';
 
@@ -33,6 +34,7 @@ export function createAuthTestApp(
     trustProxy?: boolean;
     mailerFails?: boolean;
     accessBus?: AccessBus;
+    files?: FileStorage;
   } = {},
 ) {
   const appUrl = opts.appUrl ?? 'http://app.example.test';
@@ -55,6 +57,7 @@ export function createAuthTestApp(
     auth,
     now,
     accessBus: opts.accessBus,
+    files: opts.files,
   });
   const origin = new URL(appUrl).origin;
 

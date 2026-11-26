@@ -9,15 +9,20 @@ import { loadTeamAccess, loadVisibleMemberIds } from '../permissions/load-actor.
 import { isUuid } from '../util/uuid.ts';
 import { type AccessBus, createAccessBus } from './access-bus.ts';
 import type { ElectricConfig } from './config.ts';
-import { loadIssueTeamAccess } from './issue-access.ts';
+import { loadDocumentTeamAccess } from './document-access.ts';
+import { loadCommentGeneration, loadIssueTeamAccess } from './issue-access.ts';
 import {
+  documentContentShape,
   issueActivityShape,
+  issueAttachmentsShape,
+  issueCommentsShape,
   issueDetailShape,
   membersShape,
   ownMembershipShape,
   type ShapeDefinition,
   type TeamDataKind,
   teamDataShape,
+  teamDocumentsShape,
   teamMembersShape,
   teamScopedShape,
   teamsShape,
@@ -336,7 +341,10 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
 
   // Per opened issue. The issue is looked up first and its team decides visibility: an issue of a team the actor cannot
   // see answers the same 404 as an unknown id. The shape is built from the stored issue id.
-  const issueRoute = (path: string, build: (issueId: string) => ShapeDefinition) =>
+  const issueRoute = (
+    path: string,
+    build: (issueId: string, workspaceId: string) => ShapeDefinition | Promise<ShapeDefinition>,
+  ) =>
     routes.get(`/w/:workspaceId/issues/:issueId/${path}`, async (c) => {
       const workspaceId = c.req.param('workspaceId');
       if (!isUuid(workspaceId)) return notFound();
@@ -346,10 +354,43 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
 
       const found = await loadIssueTeamAccess(orm, workspaceId, c.req.param('issueId'));
       if (!found || !canSeeTeam(actor, found.access)) return notFound();
-      return proxy(c.req.raw, build(found.issueId), actor, since);
+      return proxy(c.req.raw, await build(found.issueId, workspaceId), actor, since);
     });
   issueRoute('detail', issueDetailShape);
   issueRoute('activity', issueActivityShape);
+  // The comments shape is named after the number of comments deleted so far: a deleted comment's text stays in the log
+  // of the shape that saw it, and no reader may be sent that log again (see `issueCommentsShape`).
+  issueRoute('comments', async (issueId, workspaceId) =>
+    issueCommentsShape(issueId, await loadCommentGeneration(orm, workspaceId, issueId)),
+  );
+  issueRoute('attachments', issueAttachmentsShape);
+
+  // The documents of a team (titles) and the body of one opened document. The stored parent decides visibility and the
+  // shape is built from its stored id, exactly like the issue routes above.
+  routes.get('/w/:workspaceId/teams/:teamId/documents', async (c) => {
+    const workspaceId = c.req.param('workspaceId');
+    if (!isUuid(workspaceId)) return notFound();
+    const since = accessBus.seq();
+    const actor = await authenticate(c.req.raw, workspaceId);
+    if (!actor) return unauthenticated();
+
+    const teamId = c.req.param('teamId');
+    if (!isUuid(teamId)) return notFound();
+    const access = await loadTeamAccess(orm, workspaceId, teamId);
+    if (!access || !canSeeTeam(actor, access)) return notFound();
+    return proxy(c.req.raw, teamDocumentsShape(access.id), actor, since);
+  });
+  routes.get('/w/:workspaceId/documents/:documentId/content', async (c) => {
+    const workspaceId = c.req.param('workspaceId');
+    if (!isUuid(workspaceId)) return notFound();
+    const since = accessBus.seq();
+    const actor = await authenticate(c.req.raw, workspaceId);
+    if (!actor) return unauthenticated();
+
+    const found = await loadDocumentTeamAccess(orm, workspaceId, c.req.param('documentId'));
+    if (!found || !canSeeTeam(actor, found.access)) return notFound();
+    return proxy(c.req.raw, documentContentShape(found.documentId), actor, since);
+  });
 
   return routes;
 }

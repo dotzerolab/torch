@@ -124,7 +124,8 @@ flowchart LR
 - **Server:** Node and Hono. One endpoint per mutation, shared by the web app, the REST API, the MCP server and the
   assistant, with permission checks in one shared module. Who may do what, and how the server answers a refusal:
   [docs/permissions.md](docs/permissions.md). The issue, label and workflow state endpoints for scripts and
-  integrations: [docs/api/issues.md](docs/api/issues.md).
+  integrations: [docs/api/issues.md](docs/api/issues.md). Comments, attached files and team documents:
+  [docs/api/comments-files.md](docs/api/comments-files.md).
 - **Sync:** ElectricSQL streams data from Postgres, and TanStack DB keeps it in the browser. The browser only talks to
   Torch's own server, which adds the permission filter. Why this pair and not Zero:
   [ADR 0001](docs/adr/0001-sync-engine.md).
@@ -152,12 +153,12 @@ pnpm dev                                               # server on PORT (3000), 
 
 The dev services (`docker-compose.dev.yml`):
 
-| Service    | What it is                                                 | Host port (set in `.env`)                            |
-| ---------- | ---------------------------------------------------------- | ---------------------------------------------------- |
-| `postgres` | Postgres 17 with logical replication, which Electric reads | `POSTGRES_PORT` (5432)                               |
-| `electric` | ElectricSQL sync service; only the server talks to it      | `ELECTRIC_PORT` (3010)                               |
-| `mail`     | Mailpit mail catcher: the sign-in emails land here         | `MAILPIT_SMTP_PORT` (1025), `MAILPIT_UI_PORT` (8025) |
-| `s3`       | S3-compatible storage for attachments (not used yet)       | `S3_PORT` (9000), `S3_CONSOLE_PORT` (9001)           |
+| Service    | What it is                                                   | Host port (set in `.env`)                            |
+| ---------- | ------------------------------------------------------------ | ---------------------------------------------------- |
+| `postgres` | Postgres 17 with logical replication, which Electric reads   | `POSTGRES_PORT` (5432)                               |
+| `electric` | ElectricSQL sync service; only the server talks to it        | `ELECTRIC_PORT` (3010)                               |
+| `mail`     | Mailpit mail catcher: the sign-in emails land here           | `MAILPIT_SMTP_PORT` (1025), `MAILPIT_UI_PORT` (8025) |
+| `s3`       | S3-compatible storage for attachments (`storage:setup` once) | `S3_PORT` (9000), `S3_CONSOLE_PORT` (9001)           |
 
 Host ports are bound to localhost. Change them in `.env` when one is taken, and keep `DATABASE_URL`, `ELECTRIC_URL`,
 `SMTP_URL`, `MAILPIT_API_URL` and `S3_ENDPOINT` in step. Start only what you need by naming services

@@ -1,5 +1,10 @@
 import {
+  attachment,
   auditLog,
+  comment,
+  commentEdit,
+  document,
+  documentRevision,
   event,
   externalRef,
   idempotencyKey,
@@ -43,6 +48,11 @@ if (!databaseUrl) {
 }
 
 const TABLES = [
+  'attachment',
+  'comment',
+  'comment_edit',
+  'document',
+  'document_revision',
   'event',
   'external_ref',
   'idempotency_key',
@@ -1133,6 +1143,333 @@ describe.skipIf(!databaseUrl)('schema (Postgres)', () => {
         expect(stored?.shared).toBe(false);
         const [tpl] = await db.orm.select().from(issueTemplate).limit(1);
         expect(tpl?.fields).toEqual({});
+      });
+    });
+  });
+
+  describe('comments, attachments and documents', () => {
+    const outcome = (insertion: PromiseLike<unknown>) =>
+      Promise.resolve(insertion)
+        .then(() => 'inserted')
+        .catch((error) => pgErrorCode(error) ?? 'unknown error');
+    const firstIssue = (f: WorkspaceFixture) => {
+      const row = f.issues.eng[0];
+      if (!row) throw new Error('fixture has no ENG issue');
+      return row;
+    };
+    const commentOn = (f: WorkspaceFixture, over: Partial<typeof comment.$inferInsert> = {}) => ({
+      workspaceId: f.workspaceId,
+      teamId: f.teams.eng.id,
+      issueId: firstIssue(f).id,
+      authorId: f.members.member.id,
+      body: 'Looks right to me.',
+      ...over,
+    });
+    const fileOn = (f: WorkspaceFixture, over: Partial<typeof attachment.$inferInsert> = {}) => ({
+      workspaceId: f.workspaceId,
+      teamId: f.teams.eng.id,
+      issueId: firstIssue(f).id,
+      uploaderId: f.members.member.id,
+      fileName: 'shot.png',
+      contentType: 'image/png',
+      sizeBytes: 1000,
+      storageKey: `w/${crypto.randomUUID()}`,
+      status: 'pending' as 'pending' | 'ready',
+      ...over,
+    });
+    const docIn = (f: WorkspaceFixture, over: Partial<typeof document.$inferInsert> = {}) => ({
+      workspaceId: f.workspaceId,
+      teamId: f.teams.eng.id,
+      title: 'Runbook',
+      createdBy: f.members.member.id,
+      updatedBy: f.members.member.id,
+      ...over,
+    });
+    const insertComment = async (
+      db: { orm: Parameters<typeof createWorkspaceFixture>[0] },
+      values: typeof comment.$inferInsert,
+    ) => {
+      const [row] = await db.orm.insert(comment).values(values).returning();
+      if (!row) throw new Error('comment insert returned no row');
+      return row;
+    };
+
+    it('a comment cannot point at an issue, a team or an author of another workspace', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+
+        await expect(
+          outcome(
+            db.orm.insert(comment).values(
+              commentOn(a, {
+                issueId: firstIssue(b).id,
+              }),
+            ),
+          ),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(comment).values(commentOn(a, { teamId: a.teams.ops.id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(comment).values(commentOn(a, { authorId: b.members.member.id }))),
+        ).resolves.toBe('23503');
+        await expect(outcome(db.orm.insert(comment).values(commentOn(a)))).resolves.toBe(
+          'inserted',
+        );
+      });
+    });
+
+    it('a reply whose parent belongs to another issue is refused', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const other = a.issues.eng[1];
+        if (!other) throw new Error('fixture has no second ENG issue');
+        const root = await insertComment(db, commentOn(a));
+
+        await expect(
+          outcome(
+            db.orm.insert(comment).values(commentOn(a, { issueId: other.id, parentId: root.id })),
+          ),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(comment).values(commentOn(a, { parentId: root.id }))),
+        ).resolves.toBe('inserted');
+      });
+    });
+
+    it('a comment is never its own parent and its body is at most 20,000 characters', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const ownId = '00000000-0000-4000-8000-0000000000c1';
+
+        await expect(
+          outcome(db.orm.insert(comment).values(commentOn(a, { id: ownId, parentId: ownId }))),
+        ).resolves.toBe('23514');
+        await expect(
+          outcome(db.orm.insert(comment).values(commentOn(a, { body: 'a'.repeat(20_001) }))),
+        ).resolves.toBe('23514');
+        await expect(
+          outcome(db.orm.insert(comment).values(commentOn(a, { body: 'a'.repeat(20_000) }))),
+        ).resolves.toBe('inserted');
+      });
+    });
+
+    it('reactions must be a JSON object and default to an empty one', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const stored = await insertComment(db, commentOn(a));
+        expect(stored.reactions).toEqual({});
+
+        const setTo = (value: string) =>
+          outcome(
+            db.pool.query('update comment set reactions = $1::jsonb where id = $2', [
+              value,
+              stored.id,
+            ]),
+          );
+        await expect(setTo('[]')).resolves.toBe('23514');
+        await expect(setTo('"x"')).resolves.toBe('23514');
+        await expect(setTo('null')).resolves.toBe('23514');
+        await expect(setTo('{"👍":["m1"]}')).resolves.toBe('inserted');
+      });
+    });
+
+    it('only a thread root can be resolved', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const root = await insertComment(db, commentOn(a));
+        const reply = await insertComment(db, commentOn(a, { parentId: root.id }));
+        const resolve = (id: string) =>
+          outcome(
+            db.pool.query(
+              'update comment set resolved_at = now(), resolved_by = $1 where id = $2',
+              [a.members.admin.id, id],
+            ),
+          );
+
+        await expect(resolve(reply.id)).resolves.toBe('23514');
+        await expect(resolve(root.id)).resolves.toBe('inserted');
+        await expect(
+          outcome(
+            db.pool.query('update comment set resolved_by = $1 where id = $2', [
+              (await createWorkspaceFixture(db.orm)).members.admin.id,
+              root.id,
+            ]),
+          ),
+        ).resolves.toBe('23503');
+      });
+    });
+
+    it('comment_edit follows its comment and cannot cross workspaces', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const stored = await insertComment(db, commentOn(a));
+        const edit = (over: Partial<typeof commentEdit.$inferInsert> = {}) => ({
+          workspaceId: a.workspaceId,
+          teamId: a.teams.eng.id,
+          issueId: stored.issueId,
+          commentId: stored.id,
+          body: 'First draft',
+          editedBy: a.members.member.id,
+          ...over,
+        });
+
+        await expect(
+          outcome(db.orm.insert(commentEdit).values(edit({ editedBy: b.members.member.id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(commentEdit).values(edit({ commentId: crypto.randomUUID() }))),
+        ).resolves.toBe('23503');
+        await expect(outcome(db.orm.insert(commentEdit).values(edit()))).resolves.toBe('inserted');
+
+        await db.orm.delete(comment).where(eq(comment.id, stored.id));
+        const left = await db.orm.select().from(commentEdit);
+        expect(left).toHaveLength(0);
+      });
+    });
+
+    it('an attachment size stays within 1 byte and 25 MiB, and its name within 1..200 characters', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const size = (sizeBytes: number) =>
+          outcome(db.orm.insert(attachment).values(fileOn(a, { sizeBytes })));
+
+        await expect(size(0)).resolves.toBe('23514');
+        await expect(size(26_214_401)).resolves.toBe('23514');
+        await expect(size(1)).resolves.toBe('inserted');
+        await expect(size(26_214_400)).resolves.toBe('inserted');
+        await expect(
+          outcome(db.orm.insert(attachment).values(fileOn(a, { fileName: '' }))),
+        ).resolves.toBe('23514');
+        await expect(
+          outcome(db.orm.insert(attachment).values(fileOn(a, { fileName: 'n'.repeat(201) }))),
+        ).resolves.toBe('23514');
+      });
+    });
+
+    it('an attachment has a unique storage key, a known status and cannot cross workspaces', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+        const first = fileOn(a);
+
+        await expect(outcome(db.orm.insert(attachment).values(first))).resolves.toBe('inserted');
+        await expect(
+          outcome(db.orm.insert(attachment).values(fileOn(a, { storageKey: first.storageKey }))),
+        ).resolves.toBe('23505');
+        await expect(
+          outcome(db.orm.insert(attachment).values(fileOn(a, { status: 'uploaded' as 'ready' }))),
+        ).resolves.toBe('23514');
+        await expect(
+          outcome(db.orm.insert(attachment).values(fileOn(a, { issueId: firstIssue(b).id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(attachment).values(fileOn(a, { uploaderId: b.members.member.id }))),
+        ).resolves.toBe('23503');
+      });
+    });
+
+    it('a ready attachment has a ready_at and a pending one has none', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+
+        await expect(
+          outcome(db.orm.insert(attachment).values(fileOn(a, { status: 'ready' }))),
+        ).resolves.toBe('23514');
+        await expect(
+          outcome(db.orm.insert(attachment).values(fileOn(a, { readyAt: new Date() }))),
+        ).resolves.toBe('23514');
+        await expect(
+          outcome(
+            db.orm.insert(attachment).values(fileOn(a, { status: 'ready', readyAt: new Date() })),
+          ),
+        ).resolves.toBe('inserted');
+      });
+    });
+
+    it('a document cannot use a team of another workspace and keeps its revisions', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const b = await createWorkspaceFixture(db.orm);
+
+        await expect(
+          outcome(db.orm.insert(document).values(docIn(a, { teamId: b.teams.eng.id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(document).values(docIn(a, { createdBy: b.members.member.id }))),
+        ).resolves.toBe('23503');
+        await expect(
+          outcome(db.orm.insert(document).values(docIn(a, { title: '' }))),
+        ).resolves.toBe('23514');
+        await expect(
+          outcome(db.orm.insert(document).values(docIn(a, { title: 't'.repeat(256) }))),
+        ).resolves.toBe('23514');
+        const [doc] = await db.orm.insert(document).values(docIn(a)).returning();
+        if (!doc) throw new Error('document insert returned no row');
+        expect(doc.body).toBe('');
+        expect(doc.archivedAt).toBeNull();
+
+        const revision = (over: Partial<typeof documentRevision.$inferInsert> = {}) => ({
+          workspaceId: a.workspaceId,
+          teamId: a.teams.eng.id,
+          documentId: doc.id,
+          title: 'Old title',
+          body: 'Old body',
+          editedBy: a.members.member.id,
+          ...over,
+        });
+        await expect(
+          outcome(db.orm.insert(documentRevision).values(revision({ teamId: a.teams.ops.id }))),
+        ).resolves.toBe('23503');
+        await expect(outcome(db.orm.insert(documentRevision).values(revision()))).resolves.toBe(
+          'inserted',
+        );
+        await db.orm.delete(document).where(eq(document.id, doc.id));
+        expect(await db.orm.select().from(documentRevision)).toHaveLength(0);
+      });
+    });
+
+    it('deleting an issue row cascades its comments, edits and attachments', async () => {
+      await withTempDatabase(async (db) => {
+        const a = await createWorkspaceFixture(db.orm);
+        const target = firstIssue(a);
+        const root = await insertComment(db, commentOn(a));
+        await insertComment(db, commentOn(a, { parentId: root.id }));
+        await db.orm.insert(commentEdit).values({
+          workspaceId: a.workspaceId,
+          teamId: a.teams.eng.id,
+          issueId: target.id,
+          commentId: root.id,
+          body: 'Earlier text',
+          editedBy: a.members.member.id,
+        });
+        await db.orm.insert(attachment).values(fileOn(a));
+
+        await db.orm.delete(issue).where(eq(issue.id, target.id));
+
+        expect(await db.orm.select().from(comment)).toHaveLength(0);
+        expect(await db.orm.select().from(commentEdit)).toHaveLength(0);
+        expect(await db.orm.select().from(attachment)).toHaveLength(0);
+      });
+    });
+
+    it('has the indexes the per-issue reads walk', async () => {
+      await withTempDatabase(async (db) => {
+        const names = async (table: string) =>
+          (
+            await db.pool.query<{ indexname: string }>(
+              'select indexname from pg_indexes where tablename = $1',
+              [table],
+            )
+          ).rows.map((row) => row.indexname);
+
+        expect(await names('comment')).toContain('comment_issue_created_idx');
+        expect(await names('attachment')).toEqual(
+          expect.arrayContaining(['attachment_issue_idx', 'attachment_status_created_idx']),
+        );
+        expect(await names('document')).toContain('document_team_updated_idx');
       });
     });
   });

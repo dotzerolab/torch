@@ -4,6 +4,8 @@ import { createApp } from './app.ts';
 import { createSessionActorResolver } from './auth/resolver.ts';
 import { startCleanupSchedule } from './db/cleanup.ts';
 import { createDb } from './db.ts';
+import { readStorageConfig, StorageConfigError } from './files/config.ts';
+import { createS3Storage } from './files/storage.ts';
 import { createSmtpMailer } from './mail/mailer.ts';
 import { ElectricConfigError, readElectricConfig } from './sync/config.ts';
 
@@ -46,6 +48,18 @@ try {
   process.exit(1);
 }
 
+// Attachments need object storage. Without S3_ENDPOINT the server runs without them and says so.
+let storageConfig: ReturnType<typeof readStorageConfig>;
+try {
+  storageConfig = readStorageConfig(process.env);
+} catch (error) {
+  if (!(error instanceof StorageConfigError)) throw error;
+  console.error(error.message);
+  process.exit(1);
+}
+const files = storageConfig ? createS3Storage(storageConfig) : undefined;
+if (!files) console.warn('S3_ENDPOINT is not set: attachments are off');
+
 const db = process.env.DATABASE_URL ? createDb(process.env.DATABASE_URL) : undefined;
 const mailer = process.env.SMTP_URL
   ? createSmtpMailer(process.env.SMTP_URL, {
@@ -58,13 +72,13 @@ if (db && !mailer)
 const auth =
   db && config ? createSessionActorResolver({ orm: db.orm, appUrl: config.appUrl }) : undefined;
 // The same resolver feeds the sync proxy and the mutation routes: one session decides what a request may see and change.
-const app = createApp({ brand, db, config, mailer, auth, electric });
+const app = createApp({ brand, db, config, mailer, auth, electric, files });
 const server = serve({ fetch: app.fetch, port });
 
 console.info(`server listening on port ${port}`);
 
 // Expired sign-in tokens, old sessions and dead invitations: once at startup, then every 6 hours (counts are logged).
-const stopCleanup = db ? startCleanupSchedule(db.orm) : undefined;
+const stopCleanup = db ? startCleanupSchedule(db.orm, { storage: files }) : undefined;
 
 function shutdown() {
   stopCleanup?.();

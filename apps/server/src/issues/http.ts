@@ -1,5 +1,6 @@
 // What every route of the issue API does the same way: find the actor of the workspace in the URL, read a JSON body and
 // turn a service answer into a response. Refusals are `{ error, message, details? }` (see errors.ts).
+import { createRateLimiter } from '../auth/rate-limit.ts';
 import type { ActorResolver, ClientActor } from '../permissions/load-actor.ts';
 import { isUuid } from '../util/uuid.ts';
 import { errorResponse } from './errors.ts';
@@ -64,3 +65,40 @@ export async function readBody<S extends { safeParse(value: unknown): { success:
   }
   return { data: parsed.data as never };
 }
+
+/**
+ * A limit on how often one member writes through a group of routes: `limit` writes in `windowMs`, counted per member
+ * (never per address), in this process like every other limit. Every comment write moves its issue's `updated_at`, which
+ * makes every open viewer of that issue read its snapshots again, so a loop of reactions would fan out to all of them.
+ * Call the result right after the actor is known and before the body is read: it answers the 429 `rate_limited` to send
+ * (with `Retry-After`), or null. Only writes call it; reads are never counted.
+ */
+export function createMemberWriteLimit(opts: {
+  limit: number;
+  windowMs: number;
+  now?: () => Date;
+}): (actor: ClientActor) => Response | null {
+  const limiter = createRateLimiter({
+    limit: opts.limit,
+    windowMs: opts.windowMs,
+    ...(opts.now ? { now: () => (opts.now as () => Date)().getTime() } : {}),
+  });
+  return (actor) => {
+    const verdict = limiter.hit(`${actor.workspaceId}:${actor.memberId}`);
+    if (verdict.allowed) return null;
+    return Response.json(
+      {
+        error: 'rate_limited',
+        message: 'Too many changes in a short time. Try again in a moment.',
+      },
+      {
+        status: 429,
+        headers: { ...NO_STORE, 'Retry-After': String(verdict.retryAfterSeconds) },
+      },
+    );
+  };
+}
+
+/** Writes one member may make in a minute to the comments (reactions included) or to the documents. */
+export const WRITES_PER_MINUTE = 60;
+export const WRITE_WINDOW_MS = 60_000;
