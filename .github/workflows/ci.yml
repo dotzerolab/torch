@@ -71,6 +71,16 @@ jobs:
         run: pnpm --filter @torch/web exec playwright install --with-deps chromium
       - name: end-to-end tests
         run: pnpm e2e
+      # Playwright keeps the trace and the error context of every failed attempt here; without them a failure that
+      # only happens on a runner leaves nothing but its message.
+      - name: end-to-end results (on failure)
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-results
+          path: apps/web/test-results
+          retention-days: 7
+          if-no-files-found: ignore
       - name: service logs (on failure)
         if: failure()
         run: docker compose -f docker-compose.dev.yml logs --no-color --tail=200 postgres electric s3 mail
