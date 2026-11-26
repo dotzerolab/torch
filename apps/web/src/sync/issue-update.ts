@@ -10,6 +10,10 @@ export function toIssueUpdate(changes: Record<string, unknown>): IssueUpdateInpu
   if ('priority' in changes) body.priority = changes.priority;
   if ('state_id' in changes) body.stateId = changes.state_id;
   if ('assignee_id' in changes) body.assigneeId = changes.assignee_id;
+  if ('estimate' in changes) body.estimate = changes.estimate;
+  if ('due_date' in changes) body.dueDate = changes.due_date;
+  if ('parent_id' in changes) body.parentId = changes.parent_id;
+  if ('sort_order' in changes) body.sortOrder = changes.sort_order;
 
   const parsed = issueUpdateInput.safeParse(body);
   if (!parsed.success) {

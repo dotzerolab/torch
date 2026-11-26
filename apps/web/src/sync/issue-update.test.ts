@@ -31,4 +31,28 @@ describe('toIssueUpdate', () => {
   it('refuses a change with nothing to send', () => {
     expect(() => toIssueUpdate({ number: 99 })).toThrowError(ApiError);
   });
+
+  it('maps the new columns: estimate, due_date, parent_id and sort_order', () => {
+    expect(
+      toIssueUpdate({
+        estimate: 5,
+        due_date: '2026-12-01',
+        parent_id: STATE,
+        sort_order: 1.5,
+      }),
+    ).toEqual({ estimate: 5, dueDate: '2026-12-01', parentId: STATE, sortOrder: 1.5 });
+  });
+
+  it('clears an estimate, a due date and a parent with null', () => {
+    expect(toIssueUpdate({ estimate: null, due_date: null, parent_id: null })).toEqual({
+      estimate: null,
+      dueDate: null,
+      parentId: null,
+    });
+  });
+
+  it('refuses a due date that is not a day, and an estimate out of range', () => {
+    expect(() => toIssueUpdate({ due_date: '2026-13-40' })).toThrowError(ApiError);
+    expect(() => toIssueUpdate({ estimate: 65 })).toThrowError(ApiError);
+  });
 });

@@ -3,6 +3,7 @@
 // runs the same for a list, a board and My Issues. 10,000 rows build in well under 150 ms.
 import { VIEW_STATE_TYPES, type ViewDisplay, type ViewFilter } from '@torch/shared/views';
 import type { SyncedIssue, SyncedWorkflowState } from '../../sync/collections.ts';
+import { addDays } from './day.ts';
 
 export type IssueRow = {
   id: string;
@@ -35,12 +36,6 @@ export type Section = {
 
 const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
 
-/** Seven days from today, today included, as the last day that still counts as "this week". */
-function lastDayOfWeek(today: string): string {
-  const [year, month, day] = today.split('-').map(Number) as [number, number, number];
-  return new Date(Date.UTC(year, month - 1, day + 6)).toISOString().slice(0, 10);
-}
-
 const DONE_TYPES = new Set(['completed', 'canceled']);
 
 /** The test of a filter, made once for a whole list. */
@@ -54,7 +49,8 @@ function compile(filter: ViewFilter, ctx: ViewContext): (row: IssueRow) => boole
   const labels = set(filter.label);
   const due = set(filter.due);
   const text = filter.text?.trim().toLowerCase() || null;
-  const weekEnd = lastDayOfWeek(ctx.today);
+  // "This week" is the seven days from today, today included.
+  const weekEnd = addDays(ctx.today, 6);
   // `none` is its own word in the filter, but an assignee id cannot be it: a row with no assignee is looked up as `none`.
   const wantsUnassigned = filter.assignee?.includes('none') ?? false;
 
