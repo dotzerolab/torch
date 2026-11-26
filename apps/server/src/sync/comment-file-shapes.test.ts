@@ -1,11 +1,14 @@
 // The shapes of comments, attachments and documents: what each is allowed to contain, and the proxy routes that serve
 // them (a fake Electric, the real database): every route authorises on the STORED parent and answers one 404 for a
 // parent that is unknown, malformed, of another workspace or invisible.
+
+import { Shape, ShapeStream } from '@electric-sql/client';
 import type { Brand } from '@torch/shared/brand';
 import { attachment, comment, document, teamMember } from '@torch/shared/db/schema';
 import { and, eq } from 'drizzle-orm';
 import { describe, expect, it, vi } from 'vitest';
 import { createApp } from '../app.ts';
+import { createComment, deleteComment, editComment } from '../comments/service.ts';
 import { createDb, type Db } from '../db.ts';
 import {
   createWorkspaceFixture,
@@ -18,6 +21,7 @@ import {
   TEST_MEMBER_HEADER,
   TEST_ORIGIN,
 } from '../test/header-actor-resolver.ts';
+import { actorOf } from '../test/issue-helpers.ts';
 import { type AccessBus, createAccessBus } from './access-bus.ts';
 import {
   documentContentShape,
@@ -38,11 +42,12 @@ if (!databaseUrl) {
 const ID = '3f2b8c1e-9d4a-4e6b-8a7c-1b2d3e4f5a6b';
 
 describe('shape definitions', () => {
-  it('comments: one issue, every column of the row that is safe to sync, the text included', () => {
-    expect(issueCommentsShape(ID)).toEqual({
+  it('comments: one issue and its generation, every column of the row that is safe to sync, the text included', () => {
+    expect(issueCommentsShape(ID, 3)).toEqual({
       table: 'comment',
-      where: 'issue_id = $1',
-      params: [ID],
+      // The second parameter is the generation: always true, but it is part of what Electric calls the shape.
+      where: 'issue_id = $1 AND $2::int4 >= 0',
+      params: [ID, '3'],
       columns: [
         'id',
         'workspace_id',
@@ -59,6 +64,12 @@ describe('shape definitions', () => {
         'deleted_at',
       ],
     });
+  });
+
+  it('comments: another generation is another shape, the same one is the same shape', () => {
+    expect(issueCommentsShape(ID, 0)).toEqual(issueCommentsShape(ID, 0));
+    expect(issueCommentsShape(ID, 0).params).not.toEqual(issueCommentsShape(ID, 1).params);
+    expect(issueCommentsShape(ID, 0).where).toBe(issueCommentsShape(ID, 1).where);
   });
 
   it('attachments: ready files of one issue, never the storage key or the status', () => {
@@ -118,13 +129,13 @@ describe('shape definitions', () => {
   it('every where is a constant template: values travel as parameters only', () => {
     const hostile = `1' OR '1'='1`;
     for (const shape of [
-      issueCommentsShape(hostile),
+      issueCommentsShape(hostile, 0),
       issueAttachmentsShape(hostile),
       teamDocumentsShape(hostile),
       documentContentShape(hostile),
     ]) {
       expect(shape.where).not.toContain('OR');
-      expect(shape.params).toEqual([hostile]);
+      expect(shape.params[0]).toEqual(hostile);
     }
   });
 });
@@ -207,6 +218,8 @@ type Route = {
   name: string;
   table: string;
   where: string;
+  /** Parameters after the parent id (the comments shape adds its generation). */
+  extra?: string[];
   columns: string;
   path: (f: WorkspaceFixture, parent: string) => string;
   parent: (f: WorkspaceFixture, docs: Docs, team: 'eng' | 'ops') => string;
@@ -216,8 +229,9 @@ const ROUTES: Route[] = [
   {
     name: 'issue comments',
     table: 'comment',
-    where: 'issue_id = $1',
-    columns: issueCommentsShape(ID).columns.join(','),
+    where: 'issue_id = $1 AND $2::int4 >= 0',
+    extra: ['0'],
+    columns: issueCommentsShape(ID, 0).columns.join(','),
     path: (f, id) => `${base(f)}/issues/${id}/comments`,
     parent: (f, _docs, team) => f.issues[team][0]?.id as string,
   },
@@ -272,12 +286,54 @@ describe.skipIf(!databaseUrl)(
             const q = upstream.calls[0]?.url.searchParams;
             expect(q?.get('table')).toBe(route.table);
             expect(q?.get('where')).toBe(route.where);
-            expect(sentParams(upstream.calls[0])).toEqual([parent]);
+            expect(sentParams(upstream.calls[0])).toEqual([parent, ...(route.extra ?? [])]);
             expect(q?.get('columns')).toBe(route.columns);
             expect(q?.get('secret')).toBe('TOPSECRET-server-side-value');
             expect(res.headers.get('cache-control')).toBe('private, no-cache');
           }
         }
+      });
+    });
+
+    it('the comments shape carries the number of deleted comments of the issue as its generation', async () => {
+      await withTempDatabase(async (db) => {
+        const f = await createWorkspaceFixture(db.orm);
+        const target = f.issues.eng[0];
+        if (!target) throw new Error('fixture issue missing');
+        const other = f.issues.eng[1] ?? f.issues.ops[0];
+        if (!other) throw new Error('fixture has no second issue');
+        const upstream = fakeUpstream(emptyShape);
+        const app = buildApp(db, upstream.fetchUpstream);
+        const author = await actorOf(db, f, 'member');
+        const make = async (issueId: string) => {
+          const created = await createComment(db.orm, author, issueId, { body: 'text' });
+          if (!created.ok) throw new Error(`refused ${created.code}`);
+          return created.value.id;
+        };
+        const generation = async () => {
+          upstream.calls.length = 0;
+          await get(
+            app,
+            `${base(f)}/issues/${target.id}/comments?offset=-1`,
+            as(f.members.owner.id),
+          );
+          return sentParams(upstream.calls[0]).slice(1);
+        };
+        const first = await make(target.id);
+        const second = await make(target.id);
+        const elsewhere = await make(other.id);
+
+        const none = await generation();
+        await deleteComment(db.orm, author, first);
+        const one = await generation();
+        await deleteComment(db.orm, author, first);
+        const stillOne = await generation();
+        await deleteComment(db.orm, author, second);
+        const two = await generation();
+        await deleteComment(db.orm, author, elsewhere);
+        const unmoved = await generation();
+
+        expect([none, one, stillOne, two, unmoved]).toEqual([['0'], ['1'], ['1'], ['2'], ['2']]);
       });
     });
 
@@ -390,7 +446,10 @@ describe.skipIf(!databaseUrl)(
           expect(q?.get('offset')).toBe('5_1');
           expect(q?.get('handle')).toBe('h-1');
           expect(q?.has('subset__where')).toBe(false);
-          expect(sentParams(upstream.calls[0])).toEqual([route.parent(f, docs, 'eng')]);
+          expect(sentParams(upstream.calls[0])).toEqual([
+            route.parent(f, docs, 'eng'),
+            ...(route.extra ?? []),
+          ]);
         }
       });
     });
@@ -472,6 +531,7 @@ describe.skipIf(!databaseUrl || !electricUrl)(
       } finally {
         const where = 'where workspace_id = $1';
         for (const table of [
+          'event',
           'comment',
           'attachment',
           'document',
@@ -493,6 +553,149 @@ describe.skipIf(!databaseUrl || !electricUrl)(
       const messages = (await res.json()) as Message[];
       return messages.filter((m) => m.value).map((m) => m.value as Record<string, unknown>);
     }
+
+    /** Everything a reader that starts from nothing is sent: the pages up to the first up-to-date, as raw text. */
+    async function readFromNothing(app: ReturnType<typeof createApp>, path: string, who: string) {
+      let offset = '-1';
+      let handle: string | null = null;
+      let text = '';
+      for (let page = 0; page < 20; page++) {
+        const query = new URLSearchParams({ offset });
+        if (handle) query.set('handle', handle);
+        const res = await get(app, `${path}?${query}`, as(who));
+        expect(res.status, await res.clone().text()).toBe(200);
+        text += await res.text();
+        handle = res.headers.get('electric-handle');
+        offset = res.headers.get('electric-offset') ?? offset;
+        if (res.headers.has('electric-up-to-date')) return { text, handle, offset };
+      }
+      throw new Error('the shape never reached up-to-date');
+    }
+
+    it('after a comment is deleted no reader that starts from nothing is ever sent its text or its earlier versions', async () => {
+      await withDevWorkspace(async (db, f) => {
+        const app = createApp({
+          brand,
+          db,
+          electric: { url: electricUrl as string, secret: electricSecret },
+          auth: headerActorResolver(db.orm),
+          config: TEST_APP_CONFIG,
+        });
+        const target = f.issues.eng[0];
+        if (!target) throw new Error('fixture issue missing');
+        const author = await actorOf(db, f, 'member');
+        const original = `original-text-${crypto.randomUUID()}`;
+        const revised = `revised-text-${crypto.randomUUID()}`;
+        const kept = `kept-text-${crypto.randomUUID()}`;
+        const made = await createComment(db.orm, author, target.id, { body: original });
+        const other = await createComment(db.orm, author, target.id, { body: kept });
+        if (!made.ok || !other.ok) throw new Error('comment create refused');
+        const path = `${base(f)}/issues/${target.id}/comments`;
+        const guest = f.members.guest.id;
+
+        // A reader asks while the comment lives: Electric takes its snapshot of this shape now and keeps its log.
+        const early = await readFromNothing(app, path, guest);
+        await editComment(db.orm, author, made.value.id, { body: revised });
+        const midway = await readFromNothing(app, path, guest);
+        expect(early.text).toContain(original);
+        expect(midway.text).toContain(revised);
+
+        const deleted = await deleteComment(db.orm, author, made.value.id);
+        expect(deleted.ok).toBe(true);
+
+        for (const reader of [guest, f.members.member.id, f.members.owner.id]) {
+          const late = await readFromNothing(app, path, reader);
+          expect(late.text).not.toContain(original);
+          expect(late.text).not.toContain(revised);
+          expect(late.text).toContain(made.value.id);
+          expect(late.text).toContain(kept);
+          expect(late.handle).not.toBe(early.handle);
+        }
+      });
+    }, 30_000);
+
+    it('a reader that holds the handle of the old shape is told to start over, not served from it', async () => {
+      await withDevWorkspace(async (db, f) => {
+        const app = createApp({
+          brand,
+          db,
+          electric: { url: electricUrl as string, secret: electricSecret },
+          auth: headerActorResolver(db.orm),
+          config: TEST_APP_CONFIG,
+        });
+        const target = f.issues.eng[0];
+        if (!target) throw new Error('fixture issue missing');
+        const author = await actorOf(db, f, 'member');
+        const text = `soon-deleted-${crypto.randomUUID()}`;
+        const made = await createComment(db.orm, author, target.id, { body: text });
+        if (!made.ok) throw new Error('comment create refused');
+        const path = `${base(f)}/issues/${target.id}/comments`;
+        const who = f.members.guest.id;
+        const early = await readFromNothing(app, path, who);
+        await deleteComment(db.orm, author, made.value.id);
+
+        const stale = await get(
+          app,
+          `${path}?offset=${early.offset}&handle=${early.handle}`,
+          as(who),
+        );
+
+        expect(stale.status).toBe(409);
+        expect(await stale.text()).not.toContain(text);
+        expect(stale.headers.get('electric-handle')).not.toBe(early.handle);
+      });
+    }, 30_000);
+
+    it('the real client that read the comments before the delete ends up with the tombstone and no text', async () => {
+      await withDevWorkspace(async (db, f) => {
+        const app = createApp({
+          brand,
+          db,
+          electric: { url: electricUrl as string, secret: electricSecret },
+          auth: headerActorResolver(db.orm),
+          config: TEST_APP_CONFIG,
+        });
+        const target = f.issues.eng[0];
+        if (!target) throw new Error('fixture issue missing');
+        const author = await actorOf(db, f, 'member');
+        const text = `client-text-${crypto.randomUUID()}`;
+        const made = await createComment(db.orm, author, target.id, { body: text });
+        if (!made.ok) throw new Error('comment create refused');
+        const stop = new AbortController();
+        const statuses: number[] = [];
+        const stream = new ShapeStream({
+          url: `http://localhost${base(f)}/issues/${target.id}/comments`,
+          signal: stop.signal,
+          fetchClient: async (input, init) => {
+            const headers = new Headers(init?.headers);
+            headers.set(TEST_MEMBER_HEADER, f.members.guest.id);
+            const res = await app.fetch(new Request(input, { ...init, headers }));
+            statuses.push(res.status);
+            return res;
+          },
+        });
+        const shape = new Shape(stream);
+        try {
+          expect((await shape.rows).map((row) => row.body)).toEqual([text]);
+          const firstHandle = stream.shapeHandle;
+
+          await deleteComment(db.orm, author, made.value.id);
+
+          const deadline = Date.now() + 10_000;
+          while (
+            !shape.currentRows.some((row) => row.deleted_at) ||
+            stream.shapeHandle === firstHandle
+          ) {
+            if (Date.now() > deadline) throw new Error('the client never moved to the new shape');
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          expect(shape.currentRows.map((row) => row.body)).toEqual(['']);
+          expect(statuses).toContain(409);
+        } finally {
+          stop.abort();
+        }
+      });
+    }, 30_000);
 
     it('serves the rows of each shape with exactly its columns: no storage key, no pending file, no body in the list', async () => {
       await withDevWorkspace(async (db, f) => {
@@ -567,7 +770,7 @@ describe.skipIf(!databaseUrl || !electricUrl)(
         expect(comments).toHaveLength(1);
         expect(comments[0]?.body).toBe('A comment for the shape');
         expect(Object.keys(comments[0] ?? {}).sort()).toEqual(
-          [...issueCommentsShape(ID).columns].sort(),
+          [...issueCommentsShape(ID, 0).columns].sort(),
         );
         expect(attachments).toHaveLength(1);
         expect(attachments[0]?.file_name).toBe('shot.png');

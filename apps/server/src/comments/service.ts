@@ -293,7 +293,9 @@ export async function editComment(
 /**
  * Deletes a comment: its author, or an owner or admin. The comment stays as a tombstone so the replies keep their
  * thread: `deleted_at` set, text blanked, reactions cleared and its edit history removed in the same transaction, so
- * no deleted text survives anywhere (events and activity never held it). Deleting twice is a no-op.
+ * the database keeps no deleted text (events and activity never held it). The same write raises the generation of the
+ * issue's comments shape (the number of tombstones, see sync/shapes.ts), so the sync log that saw the text is never
+ * served again. Deleting twice is a no-op.
  */
 export async function deleteComment(
   orm: Orm,

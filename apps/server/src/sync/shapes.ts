@@ -267,12 +267,20 @@ export function issueActivityShape(issueId: string): ShapeDefinition {
  * The comments of one opened issue. Comment text syncs per opened issue, never in a list (ADR 0001 section 4); a
  * deleted comment's text is blank in the row itself. The caller has already checked that the actor can see the issue's
  * team.
+ *
+ * `generation` is how many comments of the issue were deleted so far (see `loadCommentGeneration`). Electric keeps the
+ * log of a shape (the snapshot it took when the shape was first asked for, then every change), and sends that whole log
+ * to anybody who starts from nothing, so a comment's deleted text and its earlier versions stay in the log of the shape
+ * that saw them. Deleting a comment raises the generation, which makes this another shape for Electric (the second
+ * parameter is part of the shape's identity; the condition on it is always true): readers that start from nothing are
+ * served a new snapshot taken after the delete, and a reader that holds the handle of the old shape is told to start
+ * over (`409 must-refetch`).
  */
-export function issueCommentsShape(issueId: string): ShapeDefinition {
+export function issueCommentsShape(issueId: string, generation: number): ShapeDefinition {
   return {
     table: 'comment',
-    where: 'issue_id = $1',
-    params: [issueId],
+    where: 'issue_id = $1 AND $2::int4 >= 0',
+    params: [issueId, String(generation)],
     columns: [
       'id',
       'workspace_id',

@@ -12,8 +12,12 @@ Everything is checked against the caller's permissions, see [permissions](../per
   with 422 `invalid_reference` (`details.field` is `parentId`). Only a top-level comment can be resolved.
 - Only the **author** edits a comment (an owner or admin included: 403). The previous text goes to the history.
 - The **author, an owner or an admin** deletes a comment. A deleted comment stays in its thread as a tombstone
-  (`deleted: true`, empty text, no reactions, no history), so no deleted text is kept anywhere. Deleting twice changes
-  nothing.
+  (`deleted: true`, empty text, no reactions, no history): the database keeps no deleted text and no earlier version of
+  it. Nobody is sent it after the delete either: the live comment stream of the issue starts a new snapshot at every
+  delete, so a reader that starts from nothing never receives the text or its earlier versions, and a reader that holds
+  the old stream is told to start over (`409 must-refetch`, which the sync client handles by itself). The sync service
+  keeps the log of the retired stream on its own disk until it drops unused shapes; nothing can read it through this
+  server. Deleting twice changes nothing.
 - **An archived issue is read-only**: every write answers 409 `issue_archived`. Reading stays open.
 - Every write moves the `updated_at` of the issue, in the same transaction.
 - A comment is at most 20,000 characters, trimmed, never empty.
