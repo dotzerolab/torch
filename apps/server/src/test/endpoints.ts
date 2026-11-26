@@ -25,6 +25,7 @@ import { createSessionActorResolver } from '../auth/resolver.ts';
 import { generateToken, hashToken } from '../auth/tokens.ts';
 import type { Db, Orm } from '../db.ts';
 import { createFakeStorage, type FakeStorage } from '../files/fake-storage.ts';
+import { stagingKeyOf } from '../files/keys.ts';
 import { createIssue } from '../issues/create-issue.ts';
 import { createMemoryMailer } from '../mail/mailer.ts';
 import { loadClientActor } from '../permissions/load-actor.ts';
@@ -1161,7 +1162,12 @@ export async function newAttempt(
     const storageKey = `workspaces/${workspaceId}/attachments/${id}`;
     const bytes = new Uint8Array(64);
     bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    files.put(storageKey, bytes, 'image/png');
+    // A pending upload sits at its staging key (what complete copies from); a ready file at its own key.
+    files.put(
+      status === 'pending' ? stagingKeyOf(workspaceId, id) : storageKey,
+      bytes,
+      'image/png',
+    );
     await orm.insert(attachment).values({
       id,
       workspaceId,
