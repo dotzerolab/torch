@@ -1,0 +1,119 @@
+/* The files of an issue and the place to add more. Tokens only. */
+.files {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.files__title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+.files__empty {
+  margin: 0;
+  color: var(--fg-subtle);
+  font-size: var(--text-md);
+}
+.files__error {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-md);
+  color: var(--danger);
+  font-size: var(--text-md);
+}
+.files__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+.file__thumb,
+.file__icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  color: var(--fg-subtle);
+}
+.file__thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.file__info {
+  display: flex;
+  flex: 1 1 160px;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.file__name {
+  overflow: hidden;
+  font-size: var(--text-md);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file__meta {
+  color: var(--fg-subtle);
+  font-size: var(--text-sm);
+}
+.file__problem {
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+.file__progress {
+  width: 100%;
+  height: 6px;
+  accent-color: var(--accent);
+}
+.file__confirm {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-md);
+}
+.file__confirm p {
+  flex: 1 1 100%;
+  margin: 0;
+}
+.upload {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+}
+.upload--over {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+.upload--disabled {
+  color: var(--fg-subtle);
+}
+.upload__hint {
+  min-width: 0;
+}
