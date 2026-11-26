@@ -572,6 +572,35 @@ describe.skipIf(!databaseUrl || !electricUrl)(
       throw new Error('the shape never reached up-to-date');
     }
 
+    /**
+     * Electric replicates a write from the WAL a moment after it commits, so a shape read right after an edit can
+     * still be the snapshot without it. Reads from nothing again, at a short interval, until the shape holds
+     * `needle`; fails with what it last held once `timeoutMs` is over. Never a fixed sleep.
+     */
+    async function readFromNothingContaining(
+      app: ReturnType<typeof createApp>,
+      path: string,
+      who: string,
+      needle: string,
+      timeoutMs = 15_000,
+      intervalMs = 100,
+    ) {
+      const deadline = Date.now() + timeoutMs;
+      let attempts = 0;
+      for (;;) {
+        const read = await readFromNothing(app, path, who);
+        attempts++;
+        if (read.text.includes(needle)) return read;
+        if (Date.now() >= deadline) {
+          throw new Error(
+            `Electric did not replicate the edit within ${timeoutMs} ms (${attempts} reads): ` +
+              `the shape still lacks "${needle}" and holds ${read.text.slice(0, 500)}`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      }
+    }
+
     it('after a comment is deleted no reader that starts from nothing is ever sent its text or its earlier versions', async () => {
       await withDevWorkspace(async (db, f) => {
         const app = createApp({
@@ -596,7 +625,9 @@ describe.skipIf(!databaseUrl || !electricUrl)(
         // A reader asks while the comment lives: Electric takes its snapshot of this shape now and keeps its log.
         const early = await readFromNothing(app, path, guest);
         await editComment(db.orm, author, made.value.id, { body: revised });
-        const midway = await readFromNothing(app, path, guest);
+        // The precondition: the old shape really holds the edited text before the delete (it may need a moment to
+        // replicate), or the assertions after the delete would prove nothing.
+        const midway = await readFromNothingContaining(app, path, guest, revised);
         expect(early.text).toContain(original);
         expect(midway.text).toContain(revised);
 
