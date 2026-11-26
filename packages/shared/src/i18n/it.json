@@ -416,5 +416,6 @@
   "issues.noMatch": "Nessuna issue corrisponde al filtro.",
   "issues.total": "{shown} di {total} issue",
   "shortcuts.filter.open": "Apri il menu dei filtri",
-  "shortcuts.filter.search": "Cerca nelle issue"
+  "shortcuts.filter.search": "Cerca nelle issue",
+  "issues.board.label": "Bacheca"
 }

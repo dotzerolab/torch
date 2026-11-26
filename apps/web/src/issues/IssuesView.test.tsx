@@ -113,4 +113,24 @@ describe('IssuesView', () => {
     render(<Screen all={[]} />);
     expect(screen.getByText('No issues in this team.')).toBeInTheDocument();
   });
+
+  it('layout switch keeps the filter', async () => {
+    const user = userEvent.setup();
+    window.history.replaceState({}, '', '/teams/ENG?priority=1&layout=board');
+    render(<Screen />);
+    expect(screen.getAllByTestId(/^column-/).length).toBeGreaterThan(0);
+    expect(titles()).toEqual(['Issue 1', 'Issue 3']);
+    await user.click(screen.getByRole('button', { name: 'Display' }));
+    await user.click(screen.getByRole('radio', { name: 'List' }));
+    expect(screen.queryAllByTestId(/^column-/)).toHaveLength(0);
+    expect(titles()).toEqual(['Issue 1', 'Issue 3']);
+    expect(screen.getByText('Priority: Urgent')).toBeInTheDocument();
+    expect(new URLSearchParams(window.location.search).get('priority')).toBe('1');
+  });
+
+  it('a grouping the board cannot show falls back to columns by state', () => {
+    window.history.replaceState({}, '', '/teams/ENG?layout=board&group=stateType');
+    render(<Screen />);
+    expect(screen.getByTestId('column-state:s1')).toBeInTheDocument();
+  });
 });

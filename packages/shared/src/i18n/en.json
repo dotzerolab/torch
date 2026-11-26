@@ -416,5 +416,6 @@
   "issues.noMatch": "No issues match this filter.",
   "issues.total": "{shown} of {total} issues",
   "shortcuts.filter.open": "Open the filter menu",
-  "shortcuts.filter.search": "Search issues"
+  "shortcuts.filter.search": "Search issues",
+  "issues.board.label": "Board"
 }

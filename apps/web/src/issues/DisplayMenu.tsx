@@ -78,7 +78,7 @@ export function DisplayMenu({
           <span>{t('display.group')}</span>
           <select
             className="field"
-            value={display.group}
+            value={groups.includes(display.group) ? display.group : groups[0]}
             onChange={(event) => set('group', event.target.value as ViewDisplay['group'])}
           >
             {groups.map((group) => (

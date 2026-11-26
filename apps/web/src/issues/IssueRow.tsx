@@ -31,7 +31,7 @@ export type RowHandlers = {
 };
 
 /** A day as "Dec 2": a date has no time zone, so it is read as UTC and shown as UTC. */
-function shortDay(locale: string, day: string): string {
+export function shortDay(locale: string, day: string): string {
   return new Intl.DateTimeFormat(locale, {
     month: 'short',
     day: 'numeric',
@@ -39,7 +39,7 @@ function shortDay(locale: string, day: string): string {
   }).format(new Date(`${day}T00:00:00Z`));
 }
 
-function Cell({
+export function Cell({
   label,
   className,
   onPick,
@@ -65,7 +65,7 @@ function Cell({
   );
 }
 
-function TitleCell({
+export function TitleCell({
   row,
   renaming,
   testKey,
@@ -125,7 +125,7 @@ function TitleCell({
   );
 }
 
-function PickerBody({
+export function PickerBody({
   kind,
   row,
   data,

@@ -18,6 +18,7 @@ import { IssueRow, type RowHandlers } from './IssueRow.tsx';
 import { StateDot } from './icons.tsx';
 import type { IssueRow as Row, Section } from './model/engine.ts';
 import { useSelection } from './SelectionContext.tsx';
+import { sectionTitle } from './sections.ts';
 import { type PickerKind, useListKeys } from './useListKeys.ts';
 
 const ROW_HEIGHT = 36;
@@ -212,31 +213,6 @@ export function IssueList({
     keysFree,
   );
 
-  const sectionTitle = (section: Section): { text: string; color?: string } => {
-    switch (section.group) {
-      case 'state': {
-        const state = section.id ? data.statesById.get(section.id) : undefined;
-        return { text: state?.name ?? t('issues.section.otherState'), color: state?.color };
-      }
-      case 'stateType':
-        return {
-          text: section.id ? t(`issue.stateType.${section.id}`) : t('issues.section.otherState'),
-        };
-      case 'assignee':
-        return {
-          text: section.id
-            ? (data.membersById.get(section.id)?.name ?? '')
-            : t('picker.assignee.none'),
-        };
-      case 'priority':
-        return { text: t(`issue.priority.${section.id}`) };
-      case 'team':
-        return { text: (section.id && names?.get(section.id)) || '' };
-      default:
-        return { text: '' };
-    }
-  };
-
   const onListKeyDown = (event: React.KeyboardEvent) => {
     // Arrow keys and Enter work with a row focused; the letters are shortcuts (`useListKeys`).
     if (renamingId !== null || picker !== null) return;
@@ -272,7 +248,7 @@ export function IssueList({
             const { section } = item;
             const ids = section.rows.map((row) => row.id);
             const selectedCount = ids.filter((id) => selection.ids.has(id)).length;
-            const title = sectionTitle(section);
+            const title = sectionTitle(section, data, names, t);
             return (
               <div
                 key={item.key}
