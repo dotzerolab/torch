@@ -9,11 +9,25 @@ vi.mock('../api.ts', async (importOriginal) => ({
 
 import {
   BACKOFF_OPTIONS,
+  createIssueActivityCollection,
+  createIssueDetailCollection,
+  createIssueLabelsCollection,
+  createIssueLinksCollection,
+  createIssueRelationsCollection,
+  createIssueSubscribersCollection,
+  createIssuesCollection,
+  createLabelsCollection,
+  createTeamsCollection,
+  createWorkflowStatesCollection,
+  createWorkspaceLabelsCollection,
   handleShapeError,
   observeSync,
+  type SyncedIssue,
   sendIssueMutations,
 } from './collections.ts';
+import { bindTestSession, resetIdentityForTests } from './identity.ts';
 import type { OutboxWrite } from './outbox.ts';
+import type { ShapeContext } from './registry.ts';
 import { markSigningOut, resetSigningOut } from './signing-out.ts';
 
 const actions = () => ({ signIn: vi.fn(), dropTeam: vi.fn() });
@@ -235,5 +249,275 @@ describe('observeSync', () => {
     const h2 = hooks();
     (run(observeSync(fakeSync(undefined).build(), h2)) as { cleanup: () => void }).cleanup();
     expect(h2.cleanup).toHaveBeenCalledOnce();
+  });
+});
+
+// ---- snapshot shapes: read to `up-to-date`, then closed ----
+
+const WS = '11111111-1111-4111-8111-111111111111';
+const TEAM = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const ISSUE = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+
+const shapeContext = (over: Partial<ShapeContext> = {}): ShapeContext => ({
+  dropTeam: vi.fn(),
+  inert: false,
+  settled: vi.fn(),
+  paused: () => false,
+  role: 'leader',
+  ...over,
+});
+
+/** What the server answers for a shape that holds `rows`: the rows, then `up-to-date`. */
+function shapeAnswer(rows: ReadonlyArray<Record<string, unknown>>, handle = 'h1') {
+  const messages = [
+    ...rows.map((value, index) => ({
+      key: `"public"."row"/"${index}"`,
+      value,
+      headers: { operation: 'insert' },
+    })),
+    { headers: { control: 'up-to-date' } },
+  ];
+  return new Response(JSON.stringify(messages), {
+    status: 200,
+    headers: {
+      'electric-handle': handle,
+      'electric-offset': '0_0',
+      'electric-schema': '{}',
+      // What the server sends with the last chunk: the client knows it is caught up, and waits for changes after it unless
+      // it was asked not to.
+      'electric-up-to-date': '',
+      'content-type': 'application/json',
+    },
+  });
+}
+
+/** A fetch that answers the first request with `rows` and leaves any later one hanging, remembering every URL. */
+function serve(rows: ReadonlyArray<Record<string, unknown>>) {
+  const urls: string[] = [];
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    urls.push(input instanceof Request ? input.url : String(input));
+    if (urls.length === 1) return shapeAnswer(rows);
+    return new Promise<Response>(() => {});
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return urls;
+}
+
+type Preloadable = { preload(): Promise<void>; cleanup(): Promise<void> | void };
+const opened: Preloadable[] = [];
+const open = async <T extends Preloadable>(collection: T): Promise<T> => {
+  opened.push(collection);
+  await collection.preload();
+  return collection;
+};
+
+describe('snapshot shapes', () => {
+  beforeEach(() => bindTestSession(WS));
+  afterEach(async () => {
+    for (const collection of opened.splice(0)) await collection.cleanup();
+    vi.unstubAllGlobals();
+    resetIdentityForTests();
+  });
+
+  const label = {
+    id: 'l1',
+    workspace_id: WS,
+    team_id: TEAM,
+    parent_id: null,
+    name: 'Bug',
+    color: '#ef4444',
+    is_group: false,
+    archived_at: null,
+    created_at: '2026-11-25T10:00:00Z',
+  };
+
+  it('snapshot kind passes subscribe false: after up-to-date no request asks to wait for changes', async () => {
+    const urls = serve([label]);
+    const labels = await open(createLabelsCollection(WS, TEAM, 'labels-t1', shapeContext()));
+    // A live shape asks again at once, with `live=true`; give it the time to.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(labels.size).toBe(1);
+    expect(urls).toHaveLength(1);
+    expect(urls.some((url) => url.includes('live=true'))).toBe(false);
+  });
+
+  it('a live kind does keep asking (control for the test above)', async () => {
+    const urls = serve([{ id: 't1', workspace_id: WS, key: 'ENG', name: 'Eng', private: false }]);
+    await open(createTeamsCollection(WS, 'teams-control', shapeContext()));
+    await vi.waitFor(() => expect(urls.length).toBeGreaterThanOrEqual(2));
+    expect(urls.some((url) => url.includes('live=true'))).toBe(true);
+  });
+
+  const paths: ReadonlyArray<[string, () => Preloadable, string]> = [
+    [
+      'labels',
+      () => createLabelsCollection(WS, TEAM, 'x', shapeContext()),
+      `/teams/${TEAM}/labels`,
+    ],
+    [
+      'issueLabels',
+      () => createIssueLabelsCollection(WS, TEAM, 'x', shapeContext()),
+      `/teams/${TEAM}/issue-labels`,
+    ],
+    [
+      'issueRelations',
+      () => createIssueRelationsCollection(WS, TEAM, 'x', shapeContext()),
+      `/teams/${TEAM}/issue-relations`,
+    ],
+    [
+      'issueLinks',
+      () => createIssueLinksCollection(WS, TEAM, 'x', shapeContext()),
+      `/teams/${TEAM}/issue-links`,
+    ],
+    [
+      'issueSubscribers',
+      () => createIssueSubscribersCollection(WS, TEAM, 'x', shapeContext()),
+      `/teams/${TEAM}/issue-subscribers`,
+    ],
+    [
+      'workflowStates',
+      () => createWorkflowStatesCollection(WS, TEAM, 'x', shapeContext()),
+      `/teams/${TEAM}/workflow-states`,
+    ],
+    [
+      'workspaceLabels',
+      () => createWorkspaceLabelsCollection(WS, 'x', shapeContext()),
+      '/workspace-labels',
+    ],
+    [
+      'issueDetail',
+      () => createIssueDetailCollection(WS, TEAM, ISSUE, 'x', shapeContext()),
+      `/issues/${ISSUE}/detail`,
+    ],
+    [
+      'issueActivity',
+      () => createIssueActivityCollection(WS, TEAM, ISSUE, 'x', shapeContext()),
+      `/issues/${ISSUE}/activity`,
+    ],
+  ];
+
+  it.each(paths)('%s reads the route the server serves, once', async (_kind, make, tail) => {
+    const urls = serve([]);
+    await open(make());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(urls).toHaveLength(1);
+    expect(new URL(urls[0] ?? '').pathname).toBe(`/api/sync/w/${WS}${tail}`);
+    expect(urls[0]).not.toContain('live=true');
+  });
+
+  it('keeps two rows of one issue apart: a join row is keyed by both of its ids', async () => {
+    serve([
+      { workspace_id: WS, team_id: TEAM, issue_id: ISSUE, label_id: 'l1' },
+      { workspace_id: WS, team_id: TEAM, issue_id: ISSUE, label_id: 'l2' },
+    ]);
+    const joins = await open(createIssueLabelsCollection(WS, TEAM, 'x', shapeContext()));
+    expect(joins.size).toBe(2);
+    expect(joins.get(`${ISSUE}:l2`)?.label_id).toBe('l2');
+
+    serve([
+      { workspace_id: WS, team_id: TEAM, issue_id: ISSUE, member_id: 'm1', created_at: 'x' },
+      { workspace_id: WS, team_id: TEAM, issue_id: ISSUE, member_id: 'm2', created_at: 'x' },
+    ]);
+    const subscribers = await open(createIssueSubscribersCollection(WS, TEAM, 'y', shapeContext()));
+    expect(subscribers.size).toBe(2);
+    expect(subscribers.get(`${ISSUE}:m1`)?.member_id).toBe('m1');
+  });
+
+  it('a follower tab reads a snapshot itself: its own request, nothing from the leader', async () => {
+    const urls = serve([label]);
+    const context = shapeContext({ role: 'follower' });
+    const labels = await open(createLabelsCollection(WS, TEAM, 'mirror-labels-t1', context));
+    expect(labels.size).toBe(1);
+    expect(urls).toHaveLength(1);
+    expect(context.settled).toHaveBeenCalled();
+  });
+
+  it('a snapshot of a team that is gone is empty and asks for nothing', async () => {
+    const urls = serve([label]);
+    const labels = await open(
+      createLabelsCollection(WS, TEAM, 'labels-t1', shapeContext({ inert: true })),
+    );
+    expect(labels.size).toBe(0);
+    expect(urls).toHaveLength(0);
+  });
+
+  it('a 404 of a team snapshot drops the team; a 404 of one issue or of the workspace labels does not', async () => {
+    const notFound = () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response('', { status: 404 })),
+      );
+    };
+    const dropTeam = vi.fn();
+    notFound();
+    const labels = createLabelsCollection(WS, TEAM, 'labels-t1', shapeContext({ dropTeam }));
+    opened.push(labels);
+    void labels.preload().catch(() => {});
+    await vi.waitFor(() => expect(dropTeam).toHaveBeenCalledWith(WS, TEAM));
+
+    // The issue is unknown or hidden: that says nothing about the team.
+    const quiet = vi.fn();
+    notFound();
+    const detail = createIssueDetailCollection(
+      WS,
+      TEAM,
+      ISSUE,
+      'd',
+      shapeContext({ dropTeam: quiet }),
+    );
+    const activity = createIssueActivityCollection(
+      WS,
+      TEAM,
+      ISSUE,
+      'a',
+      shapeContext({ dropTeam: quiet }),
+    );
+    const workspaceLabels = createWorkspaceLabelsCollection(
+      WS,
+      'w',
+      shapeContext({ dropTeam: quiet }),
+    );
+    for (const collection of [detail, activity, workspaceLabels]) {
+      opened.push(collection);
+      void collection.preload().catch(() => {});
+    }
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(quiet).not.toHaveBeenCalled();
+  });
+
+  it('issue row keeps the new columns', async () => {
+    serve([
+      {
+        id: ISSUE,
+        workspace_id: WS,
+        team_id: TEAM,
+        number: 7,
+        title: 'Seven',
+        state_id: 's1',
+        priority: 2,
+        assignee_id: null,
+        creator_id: 'm1',
+        created_at: '2026-11-25T10:00:00Z',
+        updated_at: '2026-11-25T10:00:00Z',
+        archived_at: null,
+        estimate: 3,
+        due_date: '2026-12-01',
+        parent_id: 'p1',
+        sort_order: 1.5,
+        started_at: '2026-11-25T11:00:00Z',
+        completed_at: null,
+        canceled_at: null,
+      },
+    ]);
+    const issues = await open(createIssuesCollection(WS, TEAM, 'issues-t1', shapeContext()));
+    const row: SyncedIssue | undefined = issues.get(ISSUE);
+    expect(row?.sort_order).toBe(1.5);
+    expect(row?.estimate).toBe(3);
+    expect(row?.due_date).toBe('2026-12-01');
+    expect(row?.parent_id).toBe('p1');
+    expect(row?.started_at).toBe('2026-11-25T11:00:00Z');
+    expect(row?.completed_at).toBeNull();
+    expect(row?.canceled_at).toBeNull();
   });
 });

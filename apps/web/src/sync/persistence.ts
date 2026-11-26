@@ -14,8 +14,11 @@ import {
 import { bindSession, deviceScope, type SessionIdentity, sessionScopes } from './identity.ts';
 import { TEAM_KINDS } from './registry.ts';
 
-/** Bump when the layout of what is stored changes: stores of other versions are deleted on open. */
-export const LOCAL_SCHEMA_VERSION = 1;
+/**
+ * Bump when the layout of what is stored changes: stores of other versions are deleted on open.
+ * 2: the stored issue row carries the estimate, due date, parent, sort order and state timestamps.
+ */
+export const LOCAL_SCHEMA_VERSION = 2;
 
 /** Names carry no product name: the same origin may host other apps. */
 export const storeName = (workspaceId: string, version = LOCAL_SCHEMA_VERSION) =>
@@ -393,9 +396,10 @@ async function removeCollections(
 }
 
 /**
- * The team is gone for this person: delete the persisted rows of its shapes (issues, workflow states, team members) while
- * the other teams of the workspace stay. Collection ids are `<kind>-<workspaceId>-<teamId>` plus a restart suffix;
- * workspace and team ids are fixed-length UUIDs, so a prefix match cannot reach another team.
+ * The team is gone for this person: delete the persisted rows of its shapes (issues, workflow states, team members, labels,
+ * relations and the other snapshots, the shapes of its issues) while the other teams of the workspace stay. Collection
+ * ids are `<kind>-<workspaceId>-<teamId>` (the shapes of one issue add `-<issueId>`) plus a restart suffix; workspace and
+ * team ids are fixed-length UUIDs, so a prefix match cannot reach another team.
  */
 export async function deleteTeamRows(workspaceId: string, teamId: string): Promise<void> {
   const open = stores.get(workspaceId);

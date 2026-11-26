@@ -11,7 +11,13 @@ import { toIssueUpdate } from './issue-update.ts';
 import { hubFor, type MirrorOp } from './mirror.ts';
 import { enqueueWrite, type OutboxWrite } from './outbox.ts';
 import { hasDeviceCopy, persistenceFor, queueDeviceCopy, waitUntilStored } from './persistence.ts';
-import { type Factories, type ShapeContext, type ShapeKey, shapeId } from './registry.ts';
+import {
+  type Factories,
+  isSnapshotKind,
+  type ShapeContext,
+  type ShapeKey,
+  shapeId,
+} from './registry.ts';
 import { isSigningOut } from './signing-out.ts';
 
 /** A `team` row as the shape delivers it (column names as in the database). */
@@ -47,6 +53,8 @@ export type SyncedWorkflowState = {
   type: string;
   position: number;
   color: string;
+  /** Set for an archived state: it keeps its issues but takes no new ones, so pickers hide it. */
+  archived_at: string | null;
 };
 
 /** A `team_member` row of one team's shape. */
@@ -57,7 +65,10 @@ export type SyncedTeamMember = {
   created_at: string;
 };
 
-/** An `issue` row of a list shape: never the description (ADR 0001 section 4). Timestamps arrive as ISO text. */
+/**
+ * An `issue` row of a list shape: never the description (ADR 0001 section 4). Timestamps arrive as ISO text, `due_date` as
+ * a date (`YYYY-MM-DD`), `sort_order` as a number (the manual order inside a group).
+ */
 export type SyncedIssue = {
   id: string;
   workspace_id: string;
@@ -71,6 +82,92 @@ export type SyncedIssue = {
   created_at: string;
   updated_at: string;
   archived_at: string | null;
+  estimate: number | null;
+  due_date: string | null;
+  parent_id: string | null;
+  sort_order: number;
+  started_at: string | null;
+  completed_at: string | null;
+  canceled_at: string | null;
+};
+
+/** A `label` row. `team_id` is null for a label of the whole workspace; a group (`is_group`) only holds other labels. */
+export type SyncedLabel = {
+  id: string;
+  workspace_id: string;
+  team_id: string | null;
+  parent_id: string | null;
+  name: string;
+  color: string;
+  is_group: boolean;
+  archived_at: string | null;
+  created_at: string;
+};
+
+/** An `issue_label` row: the label is on the issue. */
+export type SyncedIssueLabel = {
+  workspace_id: string;
+  team_id: string;
+  issue_id: string;
+  label_id: string;
+};
+
+/**
+ * An `issue_relation` row. Ids only: the issue at the other end may belong to a team the person cannot see, and the shape
+ * never sends a title, number or team for it.
+ */
+export type SyncedIssueRelation = {
+  id: string;
+  workspace_id: string;
+  issue_id: string;
+  related_issue_id: string;
+  type: string;
+  created_by: string;
+  created_at: string;
+};
+
+/** An `issue_link` row: a URL attached to an issue. */
+export type SyncedIssueLink = {
+  id: string;
+  workspace_id: string;
+  team_id: string;
+  issue_id: string;
+  url: string;
+  title: string | null;
+  created_by: string;
+  created_at: string;
+};
+
+/** An `issue_subscriber` row. */
+export type SyncedIssueSubscriber = {
+  workspace_id: string;
+  team_id: string;
+  issue_id: string;
+  member_id: string;
+  created_at: string;
+};
+
+/** What a shape of one opened issue holds of the issue itself: the description the list shape leaves out. */
+export type SyncedIssueDetail = {
+  id: string;
+  workspace_id: string;
+  team_id: string;
+  description: string;
+};
+
+/** An `issue_activity` row: one entry of the history of an issue. `from_value` and `to_value` are JSON. */
+export type SyncedActivity = {
+  id: string;
+  workspace_id: string;
+  team_id: string;
+  issue_id: string;
+  actor_id: string | null;
+  client: string;
+  type: string;
+  field: string | null;
+  from_value: unknown;
+  to_value: unknown;
+  created_at: string;
 };
 
 // How long a write waits for its txid to come back through Electric before the optimistic state is dropped.
@@ -340,6 +437,7 @@ function shaped<T extends PersistableOptions>(
   context: ShapeContext,
 ): T {
   if (context.inert) return { ...build(), sync: inertSync };
+  if (isSnapshotKind(key.kind)) return snapshot(key.workspaceId, build, context);
   if (context.role === 'follower') return followed(key, build() as T & Mirrorable, context) as T;
   const options = persisted(key.workspaceId, build, context);
   const hub = hubFor(key.workspaceId);
@@ -393,6 +491,24 @@ function shaped<T extends PersistableOptions>(
       },
     },
   };
+}
+
+/**
+ * A snapshot shape: one short request to `up-to-date`, then nothing, so it holds no connection and no tab mirrors it. The
+ * leader keeps it on the device like any other shape (an offline page still shows labels and states); a follower tab reads
+ * it for itself and keeps it in memory only, since the device store is the leader's.
+ */
+function snapshot<T extends PersistableOptions>(
+  workspaceId: string,
+  build: () => T,
+  context: ShapeContext,
+): T {
+  if (context.role === 'leader') return persisted(workspaceId, build, context);
+  return observeSync(build(), {
+    settled: () => context.settled(),
+    truncated: () => {},
+    cleanup: () => {},
+  });
 }
 
 function followed<T extends Mirrorable>(key: ShapeKey, base: T, context: ShapeContext): T {
@@ -454,10 +570,13 @@ function shapeOptions(
   path: string,
   scope: { workspaceId: string; teamId?: string },
   context: ShapeContext,
+  { snapshot = false }: { snapshot?: boolean } = {},
 ) {
   return {
     url: new URL(path, window.location.origin).href,
     backoffOptions: { ...BACKOFF_OPTIONS },
+    // A snapshot reads to `up-to-date` and stops: the client then never opens the long poll that holds a connection.
+    ...(snapshot ? { subscribe: false } : {}),
     onError: (error: Error) => {
       handleShapeError(error, scope, { signIn, dropTeam: context.dropTeam });
     },
@@ -542,6 +661,8 @@ export function createTeamMembersCollection(
   return createCollection(shaped({ kind: 'teamMembers', workspaceId, teamId }, build, context));
 }
 
+// ---- snapshot shapes (`SNAPSHOT_KINDS`): small tables and per-issue objects read to `up-to-date` and then closed ----
+
 export function createWorkflowStatesCollection(
   workspaceId: string,
   teamId: string,
@@ -556,9 +677,188 @@ export function createWorkflowStatesCollection(
         `/api/sync/w/${workspaceId}/teams/${teamId}/workflow-states`,
         { workspaceId, teamId },
         context,
+        { snapshot: true },
       ),
     });
   return createCollection(shaped({ kind: 'workflowStates', workspaceId, teamId }, build, context));
+}
+
+/** The labels of one team (a label of the whole workspace is in `createWorkspaceLabelsCollection`). */
+export function createLabelsCollection(
+  workspaceId: string,
+  teamId: string,
+  id = `labels-${workspaceId}-${teamId}`,
+  context = NO_CONTEXT,
+) {
+  const build = () =>
+    electricCollectionOptions<SyncedLabel>({
+      id,
+      getKey: (label) => label.id,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/teams/${teamId}/labels`,
+        { workspaceId, teamId },
+        context,
+        { snapshot: true },
+      ),
+    });
+  return createCollection(shaped({ kind: 'labels', workspaceId, teamId }, build, context));
+}
+
+/** Which labels are on which issue of the team. An issue has a label once: the pair is the key. */
+export function createIssueLabelsCollection(
+  workspaceId: string,
+  teamId: string,
+  id = `issueLabels-${workspaceId}-${teamId}`,
+  context = NO_CONTEXT,
+) {
+  const build = () =>
+    electricCollectionOptions<SyncedIssueLabel>({
+      id,
+      getKey: (row) => `${row.issue_id}:${row.label_id}`,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/teams/${teamId}/issue-labels`,
+        { workspaceId, teamId },
+        context,
+        { snapshot: true },
+      ),
+    });
+  return createCollection(shaped({ kind: 'issueLabels', workspaceId, teamId }, build, context));
+}
+
+/** The relations that start or end in an issue of the team. */
+export function createIssueRelationsCollection(
+  workspaceId: string,
+  teamId: string,
+  id = `issueRelations-${workspaceId}-${teamId}`,
+  context = NO_CONTEXT,
+) {
+  const build = () =>
+    electricCollectionOptions<SyncedIssueRelation>({
+      id,
+      getKey: (row) => row.id,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/teams/${teamId}/issue-relations`,
+        { workspaceId, teamId },
+        context,
+        { snapshot: true },
+      ),
+    });
+  return createCollection(shaped({ kind: 'issueRelations', workspaceId, teamId }, build, context));
+}
+
+export function createIssueLinksCollection(
+  workspaceId: string,
+  teamId: string,
+  id = `issueLinks-${workspaceId}-${teamId}`,
+  context = NO_CONTEXT,
+) {
+  const build = () =>
+    electricCollectionOptions<SyncedIssueLink>({
+      id,
+      getKey: (row) => row.id,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/teams/${teamId}/issue-links`,
+        { workspaceId, teamId },
+        context,
+        { snapshot: true },
+      ),
+    });
+  return createCollection(shaped({ kind: 'issueLinks', workspaceId, teamId }, build, context));
+}
+
+/** Who follows which issue of the team. A member follows an issue once: the pair is the key. */
+export function createIssueSubscribersCollection(
+  workspaceId: string,
+  teamId: string,
+  id = `issueSubscribers-${workspaceId}-${teamId}`,
+  context = NO_CONTEXT,
+) {
+  const build = () =>
+    electricCollectionOptions<SyncedIssueSubscriber>({
+      id,
+      getKey: (row) => `${row.issue_id}:${row.member_id}`,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/teams/${teamId}/issue-subscribers`,
+        { workspaceId, teamId },
+        context,
+        { snapshot: true },
+      ),
+    });
+  return createCollection(
+    shaped({ kind: 'issueSubscribers', workspaceId, teamId }, build, context),
+  );
+}
+
+/** The labels of no team: every member of the workspace reads them. */
+export function createWorkspaceLabelsCollection(
+  workspaceId: string,
+  id = `workspaceLabels-${workspaceId}`,
+  context = NO_CONTEXT,
+) {
+  const build = () =>
+    electricCollectionOptions<SyncedLabel>({
+      id,
+      getKey: (label) => label.id,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/workspace-labels`,
+        { workspaceId },
+        context,
+        { snapshot: true },
+      ),
+    });
+  return createCollection(shaped({ kind: 'workspaceLabels', workspaceId }, build, context));
+}
+
+// The shapes of ONE issue report errors with the workspace alone: a 404 there says the issue is unknown or hidden, not
+// that the team is gone, and the team must not be dropped for it. A team that really went is dropped through its own
+// shapes (the issue list, the labels), which answer 404 the same way.
+
+/** The description of one opened issue (the list shape leaves it out: ADR 0001 section 4). */
+export function createIssueDetailCollection(
+  workspaceId: string,
+  teamId: string,
+  issueId: string,
+  id = `issueDetail-${workspaceId}-${teamId}-${issueId}`,
+  context = NO_CONTEXT,
+) {
+  const build = () =>
+    electricCollectionOptions<SyncedIssueDetail>({
+      id,
+      getKey: (row) => row.id,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/issues/${issueId}/detail`,
+        { workspaceId },
+        context,
+        { snapshot: true },
+      ),
+    });
+  return createCollection(
+    shaped({ kind: 'issueDetail', workspaceId, teamId, issueId }, build, context),
+  );
+}
+
+/** The history of one opened issue. */
+export function createIssueActivityCollection(
+  workspaceId: string,
+  teamId: string,
+  issueId: string,
+  id = `issueActivity-${workspaceId}-${teamId}-${issueId}`,
+  context = NO_CONTEXT,
+) {
+  const build = () =>
+    electricCollectionOptions<SyncedActivity>({
+      id,
+      getKey: (row) => row.id,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/issues/${issueId}/activity`,
+        { workspaceId },
+        context,
+        { snapshot: true },
+      ),
+    });
+  return createCollection(
+    shaped({ kind: 'issueActivity', workspaceId, teamId, issueId }, build, context),
+  );
 }
 
 /**
@@ -627,6 +927,21 @@ export const collectionFactories = {
     createWorkflowStatesCollection(key.workspaceId, key.teamId, id, context),
   teamMembers: (key, id, context) =>
     createTeamMembersCollection(key.workspaceId, key.teamId, id, context),
+  labels: (key, id, context) => createLabelsCollection(key.workspaceId, key.teamId, id, context),
+  issueLabels: (key, id, context) =>
+    createIssueLabelsCollection(key.workspaceId, key.teamId, id, context),
+  issueRelations: (key, id, context) =>
+    createIssueRelationsCollection(key.workspaceId, key.teamId, id, context),
+  issueLinks: (key, id, context) =>
+    createIssueLinksCollection(key.workspaceId, key.teamId, id, context),
+  issueSubscribers: (key, id, context) =>
+    createIssueSubscribersCollection(key.workspaceId, key.teamId, id, context),
+  workspaceLabels: (key, id, context) =>
+    createWorkspaceLabelsCollection(key.workspaceId, id, context),
+  issueDetail: (key, id, context) =>
+    createIssueDetailCollection(key.workspaceId, key.teamId, key.issueId, id, context),
+  issueActivity: (key, id, context) =>
+    createIssueActivityCollection(key.workspaceId, key.teamId, key.issueId, id, context),
 } satisfies Factories;
 
 /**

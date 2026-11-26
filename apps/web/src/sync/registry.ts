@@ -1,15 +1,29 @@
-// One live collection per shape for the life of the page, so going back to a team does not restart its sync, plus the
+// One collection per shape for the life of the page, so going back to a team does not restart its sync, plus the
 // ways a shape ends: `restart` (access changed, start over), `dropTeam` (the team is gone for this person).
 // A restarted collection is a NEW instance with a NEW id: react-db derives a live query's identity from the ids of
 // its source collections, so a reused id would leave open queries bound to the instance that was cleaned up.
+// Most shapes are live (they keep a connection open and count against `MAX_LIVE_SHAPES`). A snapshot shape
+// (`SNAPSHOT_KINDS`) is read to its end and closed: it holds no connection, is not counted, and `refresh` reads it again.
 import { useEffect, useSyncExternalStore } from 'react';
 
-type WorkspaceKind = 'teams' | 'members' | 'ownMemberships';
-type TeamKind = 'issues' | 'workflowStates' | 'teamMembers';
-export type ShapeKind = WorkspaceKind | TeamKind;
+type WorkspaceKind = 'teams' | 'members' | 'ownMemberships' | 'workspaceLabels';
+type TeamKind =
+  | 'issues'
+  | 'workflowStates'
+  | 'teamMembers'
+  | 'labels'
+  | 'issueLabels'
+  | 'issueRelations'
+  | 'issueLinks'
+  | 'issueSubscribers';
+/** Shapes of one opened issue (its description, its history): a team's, and keyed by the issue too. */
+type IssueKind = 'issueDetail' | 'issueActivity';
+export type ShapeKind = WorkspaceKind | TeamKind | IssueKind;
 type KeyOf<K extends ShapeKind> = K extends WorkspaceKind
   ? { kind: K; workspaceId: string }
-  : { kind: K; workspaceId: string; teamId: string };
+  : K extends IssueKind
+    ? { kind: K; workspaceId: string; teamId: string; issueId: string }
+    : { kind: K; workspaceId: string; teamId: string };
 export type ShapeKey = KeyOf<ShapeKind>;
 
 /** What the registry needs of a collection. */
@@ -28,7 +42,8 @@ export type ShapeContext = {
   paused: () => boolean;
   /**
    * `leader`: this tab syncs the shape and keeps it on the device. `follower`: another tab does, and this instance
-   * reads what that tab mirrors (`mirror.ts`); it opens no request.
+   * reads what that tab mirrors (`mirror.ts`); it opens no request. A snapshot shape (`SNAPSHOT_KINDS`) is never
+   * mirrored: a follower reads it for itself, one short request, in memory only.
    */
   role: 'leader' | 'follower';
 };
@@ -38,14 +53,57 @@ export type Factories = {
 };
 export type CollectionFor<F extends Factories, K extends ShapeKey> = ReturnType<F[K['kind']]>;
 
-/** The kinds of shape a team owns; collection ids on the device are `<kind>-<workspaceId>-<teamId>`. */
-export const TEAM_KINDS: readonly TeamKind[] = ['issues', 'workflowStates', 'teamMembers'];
+/**
+ * The kinds of shape a team owns; collection ids on the device are `<kind>-<workspaceId>-<teamId>`, and for the shapes of
+ * one issue `<kind>-<workspaceId>-<teamId>-<issueId>`: losing the team ends every one of them with a single prefix.
+ */
+export const TEAM_KINDS: readonly (TeamKind | IssueKind)[] = [
+  'issues',
+  'workflowStates',
+  'teamMembers',
+  'labels',
+  'issueLabels',
+  'issueRelations',
+  'issueLinks',
+  'issueSubscribers',
+  'issueDetail',
+  'issueActivity',
+];
+
+const ISSUE_KINDS: readonly IssueKind[] = ['issueDetail', 'issueActivity'];
+
+/**
+ * Snapshot shapes: read to `up-to-date` and then closed, so they hold no connection and are not counted against
+ * `MAX_LIVE_SHAPES`. They are refreshed (`refresh`) when a screen needs them current. Kinds that read small tables or
+ * one object (labels, relations, links, subscribers, workflow states, an issue's description and history) belong here;
+ * a new snapshot kind is an entry in this list and a factory in `collections.ts`.
+ */
+export const SNAPSHOT_KINDS: readonly ShapeKind[] = [
+  'workflowStates',
+  'labels',
+  'issueLabels',
+  'issueRelations',
+  'issueLinks',
+  'issueSubscribers',
+  'workspaceLabels',
+  'issueDetail',
+  'issueActivity',
+];
+
+export function isSnapshotKind(kind: string): boolean {
+  return (SNAPSHOT_KINDS as readonly string[]).includes(kind);
+}
 
 export function isTeamKey(key: ShapeKey): key is Extract<ShapeKey, { teamId: string }> {
   return (TEAM_KINDS as readonly string[]).includes(key.kind);
 }
 
+function isIssueKey(key: ShapeKey): key is Extract<ShapeKey, { issueId: string }> {
+  return (ISSUE_KINDS as readonly string[]).includes(key.kind);
+}
+
 function keyOf(key: ShapeKey): string {
+  if (isIssueKey(key)) return `${key.kind}:${key.workspaceId}:${key.teamId}:${key.issueId}`;
   return isTeamKey(key)
     ? `${key.kind}:${key.workspaceId}:${key.teamId}`
     : `${key.kind}:${key.workspaceId}`;
@@ -54,27 +112,38 @@ function keyOf(key: ShapeKey): string {
 /** The name of a shape between tabs; the same in every tab. Ids are UUIDs, so `:` never occurs inside one. */
 export const shapeId = keyOf;
 
-const KINDS: readonly ShapeKind[] = [
+/** The live shapes: the ones a tab reads through the leader. A snapshot is read by every tab on its own. */
+const SHARED_KINDS: readonly ShapeKind[] = [
   'teams',
   'members',
   'ownMemberships',
   'issues',
-  'workflowStates',
   'teamMembers',
 ];
 
-/** Does the id name a shape of a known kind (a message from another tab is not trusted)? */
+/**
+ * Does the id name a shape the tabs share, of a known kind (a message from another tab is not trusted)? Snapshot kinds
+ * never travel between tabs, so a message naming one is refused.
+ */
 export function isShapeId(id: string): boolean {
   const [kind, workspaceId, teamId, extra] = id.split(':');
   if (!kind || !workspaceId || extra !== undefined) return false;
-  if (!(KINDS as readonly string[]).includes(kind)) return false;
+  if (!(SHARED_KINDS as readonly string[]).includes(kind)) return false;
   return (TEAM_KINDS as readonly string[]).includes(kind) ? Boolean(teamId) : teamId === undefined;
 }
 
-/** The key a shape id names. */
+/** The key a shape id names (any kind, the id of a shape of one issue included). */
 export function parseShapeId(id: string): ShapeKey {
-  const [kind, workspaceId, teamId] = id.split(':') as [ShapeKind, string, string | undefined];
-  return (teamId === undefined ? { kind, workspaceId } : { kind, workspaceId, teamId }) as ShapeKey;
+  const [kind, workspaceId, teamId, issueId] = id.split(':') as [
+    ShapeKind,
+    string,
+    string | undefined,
+    string | undefined,
+  ];
+  if (teamId === undefined) return { kind, workspaceId } as ShapeKey;
+  return (
+    issueId === undefined ? { kind, workspaceId, teamId } : { kind, workspaceId, teamId, issueId }
+  ) as ShapeKey;
 }
 
 function goneKey(workspaceId: string, teamId: string): string {
@@ -89,9 +158,10 @@ type Entry = {
 };
 
 /**
- * How many shapes a page keeps open at once. The browser allows about six connections per origin on HTTP/1.1 and a
+ * How many LIVE shapes a page keeps open at once. The browser allows about six connections per origin on HTTP/1.1 and a
  * live shape holds one for its long-poll, so the budget leaves room for a write and a page load: `teams`, `members`,
- * `ownMemberships` and the `issues` of the team in view.
+ * `ownMemberships` and the `issues` of the team in view. Snapshot shapes (`SNAPSHOT_KINDS`) end after their first answer
+ * and are not counted.
  */
 export const MAX_LIVE_SHAPES = 4;
 
@@ -155,10 +225,15 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
   }
 
   function baseId(key: ShapeKey): string {
+    if (isIssueKey(key)) return `${key.kind}-${key.workspaceId}-${key.teamId}-${key.issueId}`;
     return isTeamKey(key)
       ? `${key.kind}-${key.workspaceId}-${key.teamId}`
       : `${key.kind}-${key.workspaceId}`;
   }
+
+  // Snapshots that were refreshed and whose next instance has not settled yet: the older device copies of such a shape go
+  // once the new one holds the server's answer, so a refresh that cannot reach the server (offline) loses nothing.
+  const refreshing = new Set<string>();
 
   function create(key: ShapeKey): Entry {
     const k = keyOf(key);
@@ -178,9 +253,14 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
       id: string,
       context: ShapeContext,
     ) => Cleanable;
+    let supersedes = refreshing.delete(k);
     const settled = () => {
       // Only the current instance of the shape: a restart or a drop already replaced the one that calls.
       if (entries.get(k)?.generation !== generation) return;
+      if (supersedes) {
+        supersedes = false;
+        hooks.onShapeRestarted?.(key, baseId(key), storeId);
+      }
       for (const listener of [...(settledListeners.get(key.kind) ?? [])]) listener(key.workspaceId);
     };
     const state = { paused: false };
@@ -207,6 +287,7 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     const k = keyOf(key);
     clearTimeout(pauseTimers.get(k));
     pauseTimers.delete(k);
+    refreshing.delete(k);
     const old = entries.get(k);
     entries.delete(k);
     return old ? dispose(old.collection) : null;
@@ -222,10 +303,33 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     notify();
   }
 
+  /** Every open shape of a team: its own and those of its issues. */
+  function teamEntries(workspaceId: string, teamId: string): Entry[] {
+    return [...entries.values()].filter(
+      (entry) =>
+        isTeamKey(entry.key) &&
+        entry.key.workspaceId === workspaceId &&
+        entry.key.teamId === teamId,
+    );
+  }
+
+  /**
+   * Reads a snapshot shape again: the instance ends and the next read makes a new one, with a new id (see the note at the
+   * top of this file), so open readers re-bind. Only a snapshot is refreshed; a live shape is always current.
+   */
+  function refresh(key: ShapeKey) {
+    if (!isSnapshotKind(key.kind)) return;
+    const stopped = replace(key);
+    // A shape nobody read yet has nothing to refresh. It starts the first time it is read.
+    if (!stopped) return;
+    refreshing.add(keyOf(key));
+    notify();
+  }
+
   /** The team is no longer visible: end its shapes. Readers still on screen get empty collections. */
   function dropTeam(workspaceId: string, teamId: string) {
     gone.add(goneKey(workspaceId, teamId));
-    const stopped = TEAM_KINDS.map((kind) => replace({ kind, workspaceId, teamId } as ShapeKey));
+    const stopped = teamEntries(workspaceId, teamId).map((entry) => replace(entry.key));
     // The shapes are ended; once they have stopped writing, the device copy and the queued writes of the team go too.
     void Promise.all(stopped).then(() => hooks.onTeamDropped?.(workspaceId, teamId));
     notify();
@@ -234,7 +338,7 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
   /** The team id is back in the person's `teams` shape: shapes of it may sync again. */
   function reinstateTeam(workspaceId: string, teamId: string) {
     if (!gone.delete(goneKey(workspaceId, teamId))) return;
-    for (const kind of TEAM_KINDS) replace({ kind, workspaceId, teamId } as ShapeKey);
+    for (const entry of teamEntries(workspaceId, teamId)) replace(entry.key);
     notify();
   }
 
@@ -288,7 +392,7 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     holds.set(k, (holds.get(k) ?? 0) + 1);
     clearTimeout(pauseTimers.get(k));
     pauseTimers.delete(k);
-    if (entries.size > MAX_LIVE_SHAPES) hooks.overBudget?.();
+    if (liveCount() > MAX_LIVE_SHAPES) hooks.overBudget?.();
     let released = false;
     return () => {
       if (released) return;
@@ -301,7 +405,8 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
       holds.delete(k);
       // A restart or a drop already replaced the instance this reader held: nothing of it is left to pause.
       if (entries.get(k) !== held) return;
-      if (entries.size > MAX_LIVE_SHAPES) {
+      // A snapshot holds no connection after its answer, so being over budget is no reason to close it at once.
+      if (liveCount() > MAX_LIVE_SHAPES && !isSnapshotKind(key.kind)) {
         // At once, but not before the end of the tick: a reader that ends and starts again in it (a development render
         // does this to every effect) must find the open instance, which a live query may be bound to.
         queueMicrotask(() => {
@@ -319,9 +424,11 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     };
   }
 
-  /** How many shapes the page has open. */
+  /** How many live shapes the page has open: a snapshot is read to its end and closed, so it is not counted. */
   function liveCount(): number {
-    return entries.size;
+    let live = 0;
+    for (const entry of entries.values()) if (!isSnapshotKind(entry.key.kind)) live += 1;
+    return live;
   }
 
   /** Is the shape running on this page (an instance exists)? */
@@ -366,6 +473,7 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     holds.clear();
     generations.clear();
     gone.clear();
+    refreshing.clear();
     notify();
   }
 
@@ -377,6 +485,7 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     holdCount,
     pauseNow,
     restart,
+    refresh,
     dropTeam,
     reinstateTeam,
     promote,
@@ -396,7 +505,7 @@ export function useShapeFrom<F extends Factories, K extends ShapeKey>(
   key: K,
 ): CollectionFor<F, K> {
   const collection = useSyncExternalStore(registry.subscribe, () => registry.get(key));
-  const id = isTeamKey(key) ? `${key.kind}:${key.workspaceId}:${key.teamId}` : null;
+  const id = isTeamKey(key) ? shapeId(key) : null;
   // biome-ignore lint/correctness/useExhaustiveDependencies: `id` is the key; the object is new every render
   useEffect(() => registry.hold(key), [registry, id, collection]);
   return collection;

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { bindSession, bindTestSession, deviceScope, resetIdentityForTests } from './identity.ts';
 import {
   deleteTeamRows,
+  deleteTeamsExcept,
   LOCAL_SCHEMA_VERSION,
   openWorkspaceStore,
   queueDeviceCopy,
@@ -14,29 +15,39 @@ import {
   waitUntilStored,
   wipeWorkspaceStore,
 } from './persistence.ts';
-import { createRegistry, TEAM_KINDS } from './registry.ts';
+import { createRegistry, type ShapeKey, TEAM_KINDS } from './registry.ts';
 
 const WS_A = '11111111-1111-4111-8111-111111111111';
 const WS_B = '22222222-2222-4222-8222-222222222222';
 const TEAM_1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const TEAM_2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const ISSUE_1 = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 
-/** The id the registry gives the device copy of a team shape. */
+/** The id the registry gives the device copy of a team shape (for the shapes of one issue, of ISSUE_1). */
 function idOf(kind: (typeof TEAM_KINDS)[number], workspaceId: string, teamId: string): string {
   let id = '';
-  const remember = (made: string) => {
+  const remember = (_key: ShapeKey, made: string) => {
     id = made;
     return { cleanup() {} };
   };
+  const none = () => ({ cleanup() {} });
   const registry = createRegistry({
-    teams: () => ({ cleanup() {} }),
-    members: () => ({ cleanup() {} }),
-    ownMemberships: () => ({ cleanup() {} }),
-    issues: (_key, made) => remember(made),
-    workflowStates: (_key, made) => remember(made),
-    teamMembers: (_key, made) => remember(made),
+    teams: none,
+    members: none,
+    ownMemberships: none,
+    workspaceLabels: none,
+    issues: remember,
+    workflowStates: remember,
+    teamMembers: remember,
+    labels: remember,
+    issueLabels: remember,
+    issueRelations: remember,
+    issueLinks: remember,
+    issueSubscribers: remember,
+    issueDetail: remember,
+    issueActivity: remember,
   });
-  registry.get({ kind, workspaceId, teamId });
+  registry.get({ kind, workspaceId, teamId, issueId: ISSUE_1 } as ShapeKey);
   return id;
 }
 
@@ -126,6 +137,23 @@ describe('persistence', () => {
     expect(files.has(storeName(WS_A))).toBe(true);
   });
 
+  it('v1 store is rebuilt: the stored issue row changed, so the first layout is deleted on open and the second kept', async () => {
+    const { platform, files } = fakePlatform();
+    const scope = deviceScope(WS_A);
+    files.add(`${scope}-v1`);
+    files.add(`${scope}-v1-journal`);
+    // A store of the layout the page writes now (a second tab opened it earlier) stays.
+    files.add(`${scope}-v2`);
+
+    const store = await openWorkspaceStore(WS_A, platform);
+
+    expect(LOCAL_SCHEMA_VERSION).toBe(2);
+    expect(store.name).toBe(`${scope}-v2`);
+    expect(files.has(`${scope}-v1`)).toBe(false);
+    expect(files.has(`${scope}-v1-journal`)).toBe(false);
+    expect(files.has(`${scope}-v2`)).toBe(true);
+  });
+
   it('does not take a version that merely starts with the current one for the current store', async () => {
     const { platform, files } = fakePlatform();
     files.add(`${deviceScope(WS_A)}-v10`);
@@ -155,10 +183,10 @@ describe('persistence', () => {
     await expect(again.database.execute('SELECT id FROM rows')).rejects.toThrow();
   });
 
-  it("dropTeam deletes the team's persisted rows", async () => {
-    const { platform } = fakePlatform();
-    const { database } = await openWorkspaceStore(WS_A, platform);
-    // The registry and per-collection tables as the persistence library lays them out.
+  /** The registry and per-collection tables as the persistence library lays them out, with one collection per team kind. */
+  async function seedTeamStores(database: {
+    execute: (sql: string, params?: ReadonlyArray<unknown>) => Promise<unknown>;
+  }) {
     await database.execute(
       'CREATE TABLE collection_registry (collection_id TEXT PRIMARY KEY, table_name TEXT, tombstone_table_name TEXT)',
     );
@@ -174,21 +202,21 @@ describe('persistence', () => {
       await database.execute(`CREATE TABLE ${table} (collection_id TEXT)`);
     }
     await database.execute('CREATE TABLE cache_generation (physical_id TEXT)');
+    const add = async (id: string, table: string) => {
+      await database.execute(`CREATE TABLE c_${table} (id TEXT)`);
+      await database.execute(`CREATE TABLE t_${table} (id TEXT)`);
+      await database.execute(`INSERT INTO c_${table} VALUES ('row')`);
+      await database.execute('INSERT INTO collection_registry VALUES (?, ?, ?)', [
+        id,
+        `c_${table}`,
+        `t_${table}`,
+      ]);
+      await database.execute('INSERT INTO collection_version VALUES (?)', [id]);
+      await database.execute('INSERT INTO cache_generation VALUES (?)', [id]);
+    };
     for (const [n, team] of [TEAM_1, TEAM_2].entries()) {
       // The ids the app really gives its collections: made by the registry, not typed here.
-      for (const kind of TEAM_KINDS) {
-        const id = idOf(kind, WS_A, team);
-        await database.execute(`CREATE TABLE c_${kind}${n} (id TEXT)`);
-        await database.execute(`CREATE TABLE t_${kind}${n} (id TEXT)`);
-        await database.execute(`INSERT INTO c_${kind}${n} VALUES ('row')`);
-        await database.execute('INSERT INTO collection_registry VALUES (?, ?, ?)', [
-          id,
-          `c_${kind}${n}`,
-          `t_${kind}${n}`,
-        ]);
-        await database.execute('INSERT INTO collection_version VALUES (?)', [id]);
-        await database.execute('INSERT INTO cache_generation VALUES (?)', [id]);
-      }
+      for (const kind of TEAM_KINDS) await add(idOf(kind, WS_A, team), `${kind}${n}`);
     }
     // A restarted shape of team 1 has a suffixed id and its own table.
     await database.execute('CREATE TABLE c_restarted (id TEXT)');
@@ -197,28 +225,90 @@ describe('persistence', () => {
       'c_restarted',
       't_restarted',
     ]);
+    // The labels of no team belong to the workspace, not to a team.
+    await add(`workspaceLabels-${WS_A}`, 'workspaceLabels');
+  }
+
+  const tablesOf = async (database: { execute: <T>(sql: string) => Promise<ReadonlyArray<T>> }) =>
+    (
+      await database.execute<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table'",
+      )
+    ).map((row) => row.name);
+
+  it('names the shapes of one issue after the team and the issue, so the team prefix reaches them', () => {
+    expect(idOf('issueDetail', WS_A, TEAM_1)).toBe(`issueDetail-${WS_A}-${TEAM_1}-${ISSUE_1}`);
+    expect(idOf('issueActivity', WS_A, TEAM_1)).toBe(`issueActivity-${WS_A}-${TEAM_1}-${ISSUE_1}`);
+    expect(idOf('labels', WS_A, TEAM_1)).toBe(`labels-${WS_A}-${TEAM_1}`);
+  });
+
+  it("dropTeam deletes the team's persisted rows", async () => {
+    const { platform } = fakePlatform();
+    const { database } = await openWorkspaceStore(WS_A, platform);
+    await seedTeamStores(database);
 
     await deleteTeamRows(WS_A, TEAM_1);
 
     const left = await database.execute<{ collection_id: string }>(
       'SELECT collection_id FROM collection_registry ORDER BY collection_id',
     );
-    expect(left.every((row) => row.collection_id.includes(TEAM_2))).toBe(true);
-    expect(left).toHaveLength(3);
-    expect(await database.execute('SELECT * FROM collection_version')).toHaveLength(3);
-    expect(await database.execute('SELECT * FROM cache_generation')).toHaveLength(3);
-    const tables = (
-      await database.execute<{ name: string }>(
-        "SELECT name FROM sqlite_master WHERE type = 'table'",
-      )
-    ).map((row) => row.name);
-    expect(tables).not.toContain('c_issues0');
+    // The other team keeps one collection per kind, and the workspace keeps its labels.
+    expect(left.filter((row) => row.collection_id.includes(TEAM_1))).toEqual([]);
+    expect(left.filter((row) => row.collection_id.includes(TEAM_2))).toHaveLength(
+      TEAM_KINDS.length,
+    );
+    expect(left.map((row) => row.collection_id)).toContain(`workspaceLabels-${WS_A}`);
+    const kept = TEAM_KINDS.length + 1;
+    expect(left).toHaveLength(kept);
+    expect(await database.execute('SELECT * FROM collection_version')).toHaveLength(kept);
+    expect(await database.execute('SELECT * FROM cache_generation')).toHaveLength(kept);
+    const tables = await tablesOf(database);
     expect(tables).not.toContain('c_restarted');
-    expect(tables).toContain('c_issues1');
-    // Every one of the three shapes of the lost team is gone, not only its issues.
-    expect(tables).not.toContain('c_workflowStates0');
-    expect(tables).not.toContain('c_teamMembers0');
-    expect(tables).toContain('c_teamMembers1');
+    // Every shape of the lost team is gone, not only its issues: the live ones, the snapshots and the per-issue ones.
+    for (const kind of TEAM_KINDS) {
+      expect(tables).not.toContain(`c_${kind}0`);
+      expect(tables).toContain(`c_${kind}1`);
+    }
+    expect(tables).toContain('c_workspaceLabels');
+  });
+
+  it('deleteTeamRows removes snapshot kinds', async () => {
+    const { platform } = fakePlatform();
+    const { database } = await openWorkspaceStore(WS_A, platform);
+    await seedTeamStores(database);
+
+    await deleteTeamRows(WS_A, TEAM_2);
+
+    const tables = await tablesOf(database);
+    for (const kind of [
+      'labels',
+      'issueLabels',
+      'issueRelations',
+      'issueLinks',
+      'issueSubscribers',
+      'workflowStates',
+      'issueDetail',
+      'issueActivity',
+    ] as const) {
+      expect(TEAM_KINDS).toContain(kind);
+      expect(tables).not.toContain(`c_${kind}1`);
+      expect(tables).toContain(`c_${kind}0`);
+    }
+  });
+
+  it('deleteTeamsExcept removes the snapshots of a team that is not kept, and nothing of the workspace', async () => {
+    const { platform } = fakePlatform();
+    const { database } = await openWorkspaceStore(WS_A, platform);
+    await seedTeamStores(database);
+
+    await deleteTeamsExcept(WS_A, new Set([TEAM_2]));
+
+    const tables = await tablesOf(database);
+    for (const kind of TEAM_KINDS) {
+      expect(tables).not.toContain(`c_${kind}0`);
+      expect(tables).toContain(`c_${kind}1`);
+    }
+    expect(tables).toContain('c_workspaceLabels');
   });
 
   it('does nothing for a workspace whose store is not open', async () => {
