@@ -486,5 +486,10 @@
   "issue.field.estimate": "the estimate",
   "issue.field.assignee": "the assignee",
   "issue.field.dueDate": "the due date",
-  "issue.field.parent": "the parent issue"
+  "issue.field.parent": "the parent issue",
+  "myIssues.tabs": "My issues views",
+  "myIssues.tab.assigned": "Assigned",
+  "myIssues.tab.created": "Created",
+  "myIssues.empty.assigned": "Nothing is assigned to you.",
+  "myIssues.empty.created": "You have not created any issue."
 }

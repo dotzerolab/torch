@@ -147,7 +147,7 @@ export function PickerBody({
     case 'state':
       return (
         <StatePicker
-          states={data.states}
+          states={data.states.filter((state) => state.team_id === issue.team_id)}
           value={issue.state_id}
           onChange={(stateId) => onUpdate({ stateId })}
           onClose={onClose}

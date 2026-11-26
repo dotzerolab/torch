@@ -6,6 +6,7 @@ import { hubFor } from './mirror.ts';
 import { outbox } from './outbox.ts';
 import {
   closeWorkspaceStore,
+  deleteMyIssuesRows,
   deleteShapeRows,
   deleteTeamRows,
   storedGeneration,
@@ -17,8 +18,10 @@ import {
   parseShapeId,
   type ShapeKey,
   useShapeFrom,
+  useShapesFrom,
 } from './registry.ts';
 import { roleOf } from './tabs.ts';
+import { forgetMyIssues } from './team-loss.ts';
 
 export const syncRegistry = createRegistry(collectionFactories, {
   role: roleOf,
@@ -27,6 +30,8 @@ export const syncRegistry = createRegistry(collectionFactories, {
   onTeamDropped: (workspaceId, teamId) => {
     void deleteTeamRows(workspaceId, teamId).catch(() => {});
     void outbox.dropTeamWrites(workspaceId, teamId).catch(() => {});
+    // My Issues holds rows of every team, so the team's rows must leave its copy too.
+    forgetMyIssues(syncRegistry, workspaceId, deleteMyIssuesRows);
   },
   // A shape that started over (access changed) must not leave its old rows on the device for the next page load.
   onShapeRestarted: (key, baseId, keepId) => {
@@ -58,6 +63,13 @@ const demandBudget = createDemandBudget(
 /** The collection of a shape, for render: re-reads when the shape restarts or its team is dropped. */
 export function useShape<K extends ShapeKey>(key: K): CollectionFor<typeof collectionFactories, K> {
   return useShapeFrom(syncRegistry, key);
+}
+
+/** The collections of several shapes, for a screen that reads one per team. */
+export function useShapes<K extends ShapeKey>(
+  keys: readonly K[],
+): CollectionFor<typeof collectionFactories, K>[] {
+  return useShapesFrom(syncRegistry, keys);
 }
 
 // For event handlers and effects, which run at call time and so always see the current instance.

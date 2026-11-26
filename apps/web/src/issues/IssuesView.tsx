@@ -30,6 +30,7 @@ export function IssuesView({
   view,
   groups,
   error,
+  emptyText,
   initialRect,
   revealId,
   aside,
@@ -52,6 +53,8 @@ export function IssuesView({
   view: ViewState;
   groups?: readonly ViewDisplay['group'][];
   error: string | null;
+  /** What a view with no issue at all says; the team text by default. */
+  emptyText?: string;
   initialRect?: { width: number; height: number };
   revealId?: string;
   /** A side panel drawn beside the list (the issue preview). */
@@ -148,7 +151,7 @@ export function IssuesView({
                 </Button>
               </>
             ) : (
-              <p>{t('workspace.noIssues')}</p>
+              <p>{emptyText ?? t('workspace.noIssues')}</p>
             )}
           </div>
         ) : (

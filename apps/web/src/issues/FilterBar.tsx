@@ -130,7 +130,9 @@ export function FilterBar({
             id: state.id,
             label: state.name,
             icon: <StateDot color={state.color} />,
-            hint: t(`issue.stateType.${state.type}`),
+            hint: [data.teamKeys?.get(state.team_id), t(`issue.stateType.${state.type}`)]
+              .filter(Boolean)
+              .join(' · '),
           }));
       case 'assignee':
       case 'creator': {

@@ -5,6 +5,7 @@ import {
   issueDetailShape,
   MEMBER_COLUMNS,
   membersShape,
+  myIssuesShape,
   ownMembershipShape,
   type ShapeDefinition,
   teamDataShape,
@@ -378,5 +379,52 @@ describe('ownMembershipShape', () => {
       expect(shape.where, role).toBe('workspace_id = $1 AND member_id = $2');
       expect(shape.params, role).toEqual([WORKSPACE, SELF]);
     }
+  });
+});
+
+describe('myIssuesShape', () => {
+  it('is the issues of the given teams that the actor holds or created, bound by parameter', () => {
+    const shape = myIssuesShape(actor('member', []), [TEAM_B, TEAM_A]);
+
+    expect(shape.table).toBe('issue');
+    // Sorted ids, then the actor once: both conditions of the OR read the same parameter.
+    expect(shape.where).toBe(
+      'workspace_id = $1 AND team_id IN ($2, $3) AND (assignee_id = $4 OR creator_id = $4)',
+    );
+    expect(shape.params).toEqual([WORKSPACE, TEAM_A, TEAM_B, SELF]);
+    expectParameterised(shape);
+  });
+
+  it('takes the workspace and the person from the actor, and the teams only from the loader', () => {
+    // The actor object claims a team the loader did not list: the shape follows the loader.
+    const shape = myIssuesShape(actor('member', [TEAM_A, TEAM_B]), [TEAM_A]);
+
+    expect(shape.params).toEqual([WORKSPACE, TEAM_A, SELF]);
+    expect(shape.where).toBe(
+      'workspace_id = $1 AND team_id IN ($2) AND (assignee_id = $3 OR creator_id = $3)',
+    );
+  });
+
+  it('an empty list uses the nil uuid so the IN list is never empty and matches nothing', () => {
+    const shape = myIssuesShape(actor('guest', []), []);
+
+    expect(shape.where).toBe(
+      'workspace_id = $1 AND team_id IN ($2) AND (assignee_id = $3 OR creator_id = $3)',
+    );
+    expect(shape.params).toEqual([WORKSPACE, NIL_UUID, SELF]);
+  });
+
+  it('duplicate ids collapse to one parameter, so one visible set is one shape', () => {
+    const once = myIssuesShape(actor('member', []), [TEAM_A, TEAM_B]);
+    const twice = myIssuesShape(actor('member', []), [TEAM_B, TEAM_A, TEAM_B]);
+
+    expect(twice).toEqual(once);
+  });
+
+  it('carries the issue list columns, never the description', () => {
+    const { columns } = myIssuesShape(actor('member', []), [TEAM_A]);
+
+    expect(columns).toEqual(teamScopedShape('issues', TEAM_A).columns);
+    expect(columns).not.toContain('description');
   });
 });

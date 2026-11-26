@@ -30,6 +30,8 @@ export type TeamData = {
   labelsById: ReadonlyMap<string, SyncedLabel>;
   /** Every member, deactivated ones too: an assignee who was deactivated keeps their name. */
   membersById: ReadonlyMap<string, SyncedMember>;
+  /** The key of each team the states and labels come from, set when they come from several (My Issues). */
+  teamKeys?: ReadonlyMap<string, string>;
   /** Everything is loaded. */
   ready: boolean;
   /** The states are loaded: enough to group a list (labels and names fill in when they arrive). */
@@ -37,6 +39,34 @@ export type TeamData = {
 };
 
 const EMPTY: never[] = [];
+
+/** The reference data of one team or of several (My Issues): the rows of each table, put into what a picker or a chip reads. */
+export function composeTeamData(input: {
+  states: readonly SyncedWorkflowState[];
+  labels: readonly SyncedLabel[];
+  workspaceLabels: readonly SyncedLabel[];
+  members: readonly SyncedMember[];
+  ready: boolean;
+  statesReady: boolean;
+}): TeamData {
+  const orderedStates = [...input.states].sort((a, b) => a.position - b.position);
+  const allLabels = [...input.labels, ...input.workspaceLabels];
+  const open = allLabels.filter((label) => label.archived_at === null);
+  const groupsWithLabels = new Set(
+    open.flatMap((label) => (label.parent_id ? [label.parent_id] : [])),
+  );
+  const usable = open.filter((label) => !label.is_group || groupsWithLabels.has(label.id));
+  return {
+    states: orderedStates,
+    labels: usable,
+    members: input.members.filter((member) => member.deactivated_at === null),
+    statesById: new Map(orderedStates.map((state) => [state.id, state])),
+    labelsById: new Map(allLabels.map((label) => [label.id, label])),
+    membersById: new Map(input.members.map((member) => [member.id, member])),
+    ready: input.ready,
+    statesReady: input.statesReady,
+  };
+}
 
 export function useTeamData(workspaceId: string, teamId: string): TeamData {
   const statesCollection = useSnapshot({ kind: 'workflowStates', workspaceId, teamId });
@@ -57,29 +87,22 @@ export function useTeamData(workspaceId: string, teamId: string): TeamData {
   const { data: workspaceLabelRows } = workspaceLabels;
   const { data: memberRows } = members;
 
-  return useMemo(() => {
-    const orderedStates = [...stateRows].sort((a, b) => a.position - b.position);
-    const allLabels = [...labelRows, ...workspaceLabelRows];
-    const open = allLabels.filter((label) => label.archived_at === null);
-    const groupsWithLabels = new Set(
-      open.flatMap((label) => (label.parent_id ? [label.parent_id] : [])),
-    );
-    const usable = open.filter((label) => !label.is_group || groupsWithLabels.has(label.id));
-    return {
-      states: orderedStates,
-      labels: usable,
-      members: memberRows.filter((member) => member.deactivated_at === null),
-      statesById: new Map(orderedStates.map((state) => [state.id, state])),
-      labelsById: new Map(allLabels.map((label) => [label.id, label])),
-      membersById: new Map(memberRows.map((member) => [member.id, member])),
-      ready,
-      statesReady: states.isReady,
-    };
-  }, [stateRows, labelRows, workspaceLabelRows, memberRows, ready, states.isReady]);
+  return useMemo(
+    () =>
+      composeTeamData({
+        states: stateRows,
+        labels: labelRows,
+        workspaceLabels: workspaceLabelRows,
+        members: memberRows,
+        ready,
+        statesReady: states.isReady,
+      }),
+    [stateRows, labelRows, workspaceLabelRows, memberRows, ready, states.isReady],
+  );
 }
 
 /** The writes waiting on this device (every tab's), read again whenever the outbox says its queue changed. */
-function usePendingWrites(workspaceId: string): readonly OutboxWrite[] {
+export function usePendingWrites(workspaceId: string): readonly OutboxWrite[] {
   const [writes, setWrites] = useState<readonly OutboxWrite[]>(EMPTY);
   useEffect(() => {
     let current = true;

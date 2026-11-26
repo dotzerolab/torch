@@ -425,6 +425,19 @@ export async function deleteTeamRows(workspaceId: string, teamId: string): Promi
   }
 }
 
+/**
+ * The device copy of My Issues: one shape of the workspace that holds rows of every team the person could see, so it
+ * cannot be removed with one team's prefix. Every instance of it goes (its ids are `myIssues-<workspaceId>` plus a restart
+ * suffix); it is read from the server again the next time the screen opens.
+ */
+export async function deleteMyIssuesRows(workspaceId: string): Promise<void> {
+  const open = stores.get(workspaceId);
+  if (!open) return;
+  const { database } = await open;
+  await removeCollections(database, `myIssues-${workspaceId}%`);
+  await readStored(workspaceId, database);
+}
+
 /** Deletes the persisted shapes of every team whose id is not in `keep`: the device copy of teams that are gone. */
 export async function deleteTeamsExcept(workspaceId: string, keep: Set<string>): Promise<void> {
   const open = stores.get(workspaceId);
@@ -447,6 +460,8 @@ export async function deleteTeamsExcept(workspaceId: string, keep: Set<string>):
     }
   }
   for (const teamId of gone) await deleteTeamRows(workspaceId, teamId);
+  // My Issues holds rows of the teams that are gone too, and no team prefix reaches it.
+  if (gone.size > 0) await deleteMyIssuesRows(workspaceId);
 }
 
 /**

@@ -36,6 +36,7 @@ function fakeRegistry(max: number, base: string[] = []) {
 
 const BASE = ['teams:w1', 'members:w1', 'ownMemberships:w1'];
 const issues = (team: string) => `issues:w1:${team}`;
+const mine = 'myIssues:w1';
 
 describe('follower demand and the live shape budget', () => {
   beforeEach(() => vi.useFakeTimers());
@@ -174,5 +175,33 @@ describe('follower demand and the live shape budget', () => {
     open.delete(issues('a'));
     vi.advanceTimersByTime(5000);
     expect(open.has(issues('b'))).toBe(false);
+  });
+
+  it('a demanded My Issues shape is budgeted like a team shape: it waits while the page is full and opens when a slot frees', () => {
+    const { registry, open } = fakeRegistry(4, [...BASE, issues('a')]);
+    const budget = createDemandBudget(registry, { max: 4, retryMs: 1000 });
+    budget.hold(mine);
+    expect(open.has(mine)).toBe(false);
+    open.delete(issues('a'));
+    vi.advanceTimersByTime(1000);
+    expect(open.has(mine)).toBe(true);
+  });
+
+  it('a demanded My Issues shape opens at once while there is room', () => {
+    const { registry, open } = fakeRegistry(4, BASE);
+    const budget = createDemandBudget(registry, { max: 4, retryMs: 1000 });
+    budget.hold(mine);
+    expect(open.has(mine)).toBe(true);
+  });
+
+  it('closes a My Issues shape that is open only for a follower when a screen of this tab needs a slot', () => {
+    const { registry, open, paused } = fakeRegistry(4, BASE);
+    const budget = createDemandBudget(registry, { max: 4, retryMs: 1000 });
+    budget.hold(mine);
+    registry.open({ kind: 'issues', workspaceId: 'w1', teamId: 'b' });
+    expect(registry.liveCount()).toBe(5);
+    budget.makeRoom();
+    expect(paused).toContain(mine);
+    expect(open.has(mine)).toBe(false);
   });
 });

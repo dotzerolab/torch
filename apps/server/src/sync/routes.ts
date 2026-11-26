@@ -5,7 +5,11 @@ import { type Actor, canSeeTeam } from '@torch/shared/permissions';
 import { Hono } from 'hono';
 import type { Orm } from '../db.ts';
 import type { ActorResolver } from '../permissions/load-actor.ts';
-import { loadTeamAccess, loadVisibleMemberIds } from '../permissions/load-actor.ts';
+import {
+  loadTeamAccess,
+  loadVisibleMemberIds,
+  loadVisibleTeamIds,
+} from '../permissions/load-actor.ts';
 import { isUuid } from '../util/uuid.ts';
 import { type AccessBus, createAccessBus } from './access-bus.ts';
 import type { ElectricConfig } from './config.ts';
@@ -18,6 +22,7 @@ import {
   issueCommentsShape,
   issueDetailShape,
   membersShape,
+  myIssuesShape,
   ownMembershipShape,
   type ShapeDefinition,
   type TeamDataKind,
@@ -280,6 +285,20 @@ export function createSyncRoutes(deps: SyncRouteDeps): Hono {
     const actor = await authenticate(c.req.raw, workspaceId);
     if (!actor) return unauthenticated();
     return proxy(c.req.raw, ownMembershipShape(actor), actor, since);
+  });
+
+  // My Issues: the issues the actor holds or created, across every team they can see. The shape follows the stored
+  // teams and memberships of the actor on each request, never the URL or the query. When the set of visible teams
+  // changes (a removal, a role change, a team turning private) the bus ends the open request, the next one carries the
+  // new team list, Electric no longer knows the old handle for it and answers must-refetch.
+  routes.get('/w/:workspaceId/my-issues', async (c) => {
+    const workspaceId = c.req.param('workspaceId');
+    if (!isUuid(workspaceId)) return notFound();
+    const since = accessBus.seq();
+    const actor = await authenticate(c.req.raw, workspaceId);
+    if (!actor) return unauthenticated();
+    const shape = myIssuesShape(actor, await loadVisibleTeamIds(orm, actor));
+    return proxy(c.req.raw, shape, actor, since);
   });
 
   const teamRoute = (path: string, kind: 'issues' | 'workflow_states' | 'team_members') =>

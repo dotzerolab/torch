@@ -1,4 +1,4 @@
-import { isShapeId, isTeamKey, parseShapeId, type ShapeKey } from './registry.ts';
+import { isBudgetedKey, isShapeId, parseShapeId, type ShapeKey } from './registry.ts';
 
 /** What the budget needs of the page's registry. */
 export type DemandRegistry = {
@@ -28,8 +28,8 @@ type Demand = {
  * leader's own screens: a long-poll holds a connection (about six per origin on HTTP/1.1) and a write must always find
  * one free, however many tabs read however many teams.
  *
- * - A demanded team shape starts only while the page has room; else it waits and starts as soon as a slot frees.
- * - Shapes of the workspace (teams, members, own memberships) always start: the leader runs them for its own screens.
+ * - A demanded team shape, or My Issues, starts only while the page has room; else it waits and starts as soon as a slot frees.
+ * - The always-live shapes of the workspace (teams, members, own memberships) always start: the leader runs them for its own screens.
  * - When a screen of this tab needs a slot (`makeRoom`), the least recent shape that is open only for a follower closes
  *   and goes back to waiting. The follower keeps showing what it has.
  */
@@ -57,7 +57,7 @@ export function createDemandBudget(
   function admit(demand: Demand) {
     if (demand.ended) return;
     if (
-      !isTeamKey(demand.key) ||
+      !isBudgetedKey(demand.key) ||
       registry.isOpen(demand.key) ||
       registry.liveCount() < options.max
     ) {
@@ -90,7 +90,8 @@ export function createDemandBudget(
   function makeRoom() {
     const open = [...demands]
       .filter(
-        (demand) => demand.close && isTeamKey(demand.key) && registry.holdCount(demand.key) === 1,
+        (demand) =>
+          demand.close && isBudgetedKey(demand.key) && registry.holdCount(demand.key) === 1,
       )
       .sort((a, b) => a.since - b.since);
     for (const demand of open) {

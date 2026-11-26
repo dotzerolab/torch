@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { bindSession, bindTestSession, deviceScope, resetIdentityForTests } from './identity.ts';
 import {
+  deleteMyIssuesRows,
   deleteTeamRows,
   deleteTeamsExcept,
   LOCAL_SCHEMA_VERSION,
@@ -36,6 +37,7 @@ function idOf(kind: (typeof TEAM_KINDS)[number], workspaceId: string, teamId: st
     members: none,
     ownMemberships: none,
     workspaceLabels: none,
+    myIssues: none,
     issues: remember,
     workflowStates: remember,
     teamMembers: remember,
@@ -355,6 +357,80 @@ describe('persistence', () => {
       expect(tables).toContain(`c_${kind}1`);
     }
     expect(tables).toContain('c_workspaceLabels');
+  });
+
+  /** The device copy of My Issues, which holds rows of every team: one collection of the workspace, and a restart suffix. */
+  async function seedMyIssues(database: {
+    execute: (sql: string, params?: ReadonlyArray<unknown>) => Promise<unknown>;
+  }) {
+    for (const [id, table] of [
+      [`myIssues-${WS_A}`, 'myIssues'],
+      [`myIssues-${WS_A}~2`, 'myIssuesTwo'],
+    ] as const) {
+      await database.execute(`CREATE TABLE c_${table} (id TEXT)`);
+      await database.execute(`CREATE TABLE t_${table} (id TEXT)`);
+      await database.execute('INSERT INTO collection_registry VALUES (?, ?, ?)', [
+        id,
+        `c_${table}`,
+        `t_${table}`,
+      ]);
+    }
+  }
+
+  it('deleteMyIssuesRows removes every instance of the My Issues copy, and nothing else', async () => {
+    const { platform } = fakePlatform();
+    const { database } = await openWorkspaceStore(WS_A, platform);
+    await seedTeamStores(database);
+    await seedMyIssues(database);
+    const count = async () =>
+      (await database.execute('SELECT collection_id FROM collection_registry')).length;
+    const before = await count();
+
+    await deleteMyIssuesRows(WS_A);
+
+    const left = (
+      await database.execute<{ collection_id: string }>(
+        'SELECT collection_id FROM collection_registry',
+      )
+    ).map((row) => row.collection_id);
+    expect(left.filter((id) => id.startsWith('myIssues-'))).toEqual([]);
+    expect(await count()).toBe(before - 2);
+    expect(left).toContain(`workspaceLabels-${WS_A}`);
+    const tables = await tablesOf(database);
+    expect(tables).not.toContain('c_myIssues');
+    expect(tables).not.toContain('c_myIssuesTwo');
+  });
+
+  it('deleteTeamsExcept also drops the My Issues copy when a team is gone: it holds rows of that team', async () => {
+    const { platform } = fakePlatform();
+    const { database } = await openWorkspaceStore(WS_A, platform);
+    await seedTeamStores(database);
+    await seedMyIssues(database);
+
+    await deleteTeamsExcept(WS_A, new Set([TEAM_2]));
+
+    const left = (
+      await database.execute<{ collection_id: string }>(
+        'SELECT collection_id FROM collection_registry',
+      )
+    ).map((row) => row.collection_id);
+    expect(left.filter((id) => id.startsWith('myIssues-'))).toEqual([]);
+  });
+
+  it('deleteTeamsExcept keeps the My Issues copy while every team of the device is still kept', async () => {
+    const { platform } = fakePlatform();
+    const { database } = await openWorkspaceStore(WS_A, platform);
+    await seedTeamStores(database);
+    await seedMyIssues(database);
+
+    await deleteTeamsExcept(WS_A, new Set([TEAM_1, TEAM_2]));
+
+    const left = (
+      await database.execute<{ collection_id: string }>(
+        'SELECT collection_id FROM collection_registry',
+      )
+    ).map((row) => row.collection_id);
+    expect(left.filter((id) => id.startsWith('myIssues-'))).toHaveLength(2);
   });
 
   it('does nothing for a workspace whose store is not open', async () => {

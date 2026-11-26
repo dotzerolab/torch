@@ -486,5 +486,10 @@
   "issue.field.estimate": "la stima",
   "issue.field.assignee": "l'assegnatario",
   "issue.field.dueDate": "la scadenza",
-  "issue.field.parent": "l'issue padre"
+  "issue.field.parent": "l'issue padre",
+  "myIssues.tabs": "Viste delle mie issue",
+  "myIssues.tab.assigned": "Assegnate",
+  "myIssues.tab.created": "Create",
+  "myIssues.empty.assigned": "Nessuna issue è assegnata a te.",
+  "myIssues.empty.created": "Non hai creato nessuna issue."
 }

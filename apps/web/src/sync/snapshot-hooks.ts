@@ -3,7 +3,7 @@
 import { useEffect } from 'react';
 import type { collectionFactories } from './collections.ts';
 import { type CollectionFor, type ShapeKey, shapeId } from './registry.ts';
-import { syncRegistry, useShape } from './shapes.ts';
+import { syncRegistry, useShape, useShapes } from './shapes.ts';
 import { createSnapshotWatch } from './snapshot-watch.ts';
 import { createRefresher } from './snapshots.ts';
 
@@ -38,4 +38,36 @@ export function useIssuesFeed(workspaceId: string, teamId: string): void {
     });
     return () => subscription.unsubscribe();
   }, [issues, workspaceId, teamId]);
+}
+
+/** `useSnapshot` for as many snapshots as a screen needs (one per team it shows): all of them kept fresh the same way. */
+export function useSnapshots<K extends ShapeKey>(
+  keys: readonly K[],
+): CollectionFor<typeof collectionFactories, K>[] {
+  const collections = useShapes(keys);
+  const ids = keys.map((key) => shapeId(key)).join('|');
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `ids` names the keys; the array is new every render
+  useEffect(() => {
+    const unmounts = keys.map((key) => snapshotWatch.mount(key));
+    return () => {
+      for (const unmount of unmounts) unmount();
+    };
+  }, [ids]);
+  return collections;
+}
+
+/**
+ * `useIssuesFeed` for My Issues: when issues change, the snapshots of the teams they belong to are asked for (the server
+ * moves an issue's `updated_at` for every change of its labels). The first load is not a change.
+ */
+export function useMyIssuesFeed(workspaceId: string): void {
+  const issues = useShape({ kind: 'myIssues', workspaceId });
+  useEffect(() => {
+    const subscription = issues.subscribeChanges((changes) => {
+      if (!issues.isReady()) return;
+      const teams = new Set(changes.map((change) => change.value.team_id));
+      for (const teamId of teams) snapshotWatch.issuesChanged(workspaceId, teamId);
+    });
+    return () => subscription.unsubscribe();
+  }, [issues, workspaceId]);
 }

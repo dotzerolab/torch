@@ -87,4 +87,26 @@ describe('useViewState', () => {
       Storage.prototype.getItem = real;
     }
   });
+
+  it('a scope with its own defaults opens on them, and the address says only what differs from them', () => {
+    const mine = { ...DEFAULT_DISPLAY, group: 'stateType' as const };
+    const { result } = renderHook(() => useViewState('my-issues', mine));
+    expect(result.current.display.group).toBe('stateType');
+
+    // The global default is a choice here: without it in the address the screen would come back on its own default.
+    act(() => result.current.setDisplay({ ...mine, group: 'state' }));
+    expect(window.location.search).toBe('?group=state');
+    expect(result.current.display.group).toBe('state');
+
+    act(() => result.current.setDisplay({ ...mine, group: 'stateType' }));
+    expect(window.location.search).toBe('');
+    expect(result.current.display.group).toBe('stateType');
+  });
+
+  it('keeps a parameter it does not own, such as the tab, when the view changes', () => {
+    window.history.replaceState({}, '', '/my-issues?tab=created');
+    const { result } = renderHook(() => useViewState('my-issues'));
+    act(() => result.current.setFilter({ priority: [1] }));
+    expect(window.location.search).toBe('?tab=created&priority=1');
+  });
 });

@@ -6,9 +6,9 @@
 // (`SNAPSHOT_KINDS`) is read to its end and closed: it holds no connection, is not counted, and `refresh` reads it again:
 // the new instance syncs beside the old one and replaces it for readers only once the server has answered it, so
 // readers never see an empty collection (and offline they keep the rows they had).
-import { useEffect, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
 
-type WorkspaceKind = 'teams' | 'members' | 'ownMemberships' | 'workspaceLabels';
+type WorkspaceKind = 'teams' | 'members' | 'ownMemberships' | 'workspaceLabels' | 'myIssues';
 type TeamKind =
   | 'issues'
   | 'workflowStates'
@@ -132,6 +132,17 @@ function objectIdOf(key: ShapeKey): string | undefined {
   return undefined;
 }
 
+/**
+ * The workspace shapes a screen holds like a team's: open while a screen reads it, paused after it left (My Issues is the
+ * one screen shape that is not a team's). `teams`, `members` and `ownMemberships` run for the whole session instead.
+ */
+const SCREEN_WORKSPACE_KINDS: readonly ShapeKind[] = ['myIssues'];
+
+/** A live shape that a screen holds (a team's, or My Issues): the ones the budget opens and closes. */
+export function isBudgetedKey(key: ShapeKey): boolean {
+  return isTeamKey(key) || (SCREEN_WORKSPACE_KINDS as readonly string[]).includes(key.kind);
+}
+
 function keyOf(key: ShapeKey): string {
   if (!isTeamKey(key)) return `${key.kind}:${key.workspaceId}`;
   const object = objectIdOf(key);
@@ -148,6 +159,7 @@ const SHARED_KINDS: readonly ShapeKind[] = [
   'teams',
   'members',
   'ownMemberships',
+  'myIssues',
   'issues',
   'teamMembers',
   'documents',
@@ -455,7 +467,7 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
    * closes at once when the page is over its budget (`MAX_LIVE_SHAPES`), else 30 s later so a quick return is free.
    */
   function hold(key: ShapeKey): () => void {
-    if (!isTeamKey(key)) return () => {};
+    if (!isBudgetedKey(key)) return () => {};
     const k = keyOf(key);
     const held = entries.get(k);
     holds.set(k, (holds.get(k) ?? 0) + 1);
@@ -512,7 +524,7 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
 
   /** Ends a team shape now, unless a reader holds it. It starts again, under the same id, when it is next read. */
   function pauseNow(key: ShapeKey) {
-    if (!isTeamKey(key) || holds.has(keyOf(key))) return;
+    if (!isBudgetedKey(key) || holds.has(keyOf(key))) return;
     pause(key);
   }
 
@@ -574,8 +586,35 @@ export function useShapeFrom<F extends Factories, K extends ShapeKey>(
   key: K,
 ): CollectionFor<F, K> {
   const collection = useSyncExternalStore(registry.subscribe, () => registry.get(key));
-  const id = isTeamKey(key) ? shapeId(key) : null;
+  const id = isBudgetedKey(key) ? shapeId(key) : null;
   // biome-ignore lint/correctness/useExhaustiveDependencies: `id` is the key; the object is new every render
   useEffect(() => registry.hold(key), [registry, id, collection]);
   return collection;
+}
+
+/**
+ * The collections of several shapes at once, for a screen that reads as many as it has teams (My Issues reads the states
+ * and labels of every team it has a row of). The array keeps its identity while no instance changed, so it can be a
+ * dependency; it is a new one when any shape restarts or is refreshed.
+ */
+export function useShapesFrom<F extends Factories, K extends ShapeKey>(
+  registry: SyncRegistry<F>,
+  keys: readonly K[],
+): CollectionFor<F, K>[] {
+  const last = useRef<CollectionFor<F, K>[]>([]);
+  const collections = useSyncExternalStore(registry.subscribe, () => {
+    const next = keys.map((key) => registry.get(key));
+    const same = next.length === last.current.length && next.every((c, i) => c === last.current[i]);
+    if (!same) last.current = next;
+    return last.current;
+  });
+  const ids = keys.map((key) => shapeId(key)).join('|');
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `ids` names the keys; the array is new every render
+  useEffect(() => {
+    const releases = keys.map((key) => registry.hold(key));
+    return () => {
+      for (const release of releases) release();
+    };
+  }, [registry, ids, collections]);
+  return collections;
 }

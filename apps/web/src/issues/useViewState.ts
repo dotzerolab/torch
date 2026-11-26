@@ -15,17 +15,19 @@ export type ViewState = {
 };
 
 /** What differs from the defaults: all the address needs to say. */
-function changed(display: ViewDisplay): Partial<ViewDisplay> {
+function changed(display: ViewDisplay, base: ViewDisplay): Partial<ViewDisplay> {
   const out: Record<string, unknown> = {};
   for (const name of Object.keys(DEFAULT_DISPLAY) as (keyof ViewDisplay)[]) {
-    if (JSON.stringify(display[name]) !== JSON.stringify(DEFAULT_DISPLAY[name]))
-      out[name] = display[name];
+    if (JSON.stringify(display[name]) !== JSON.stringify(base[name])) out[name] = display[name];
   }
   return out as Partial<ViewDisplay>;
 }
 
-/** `scope` names what the display options are remembered for: a team id, or `my-issues`. */
-export function useViewState(scope: string): ViewState {
+/**
+ * `scope` names what the display options are remembered for: a team id, or `my-issues`. `base` is what the screen opens
+ * on when neither the address nor the device says otherwise; the address names only what differs from it.
+ */
+export function useViewState(scope: string, base: ViewDisplay = DEFAULT_DISPLAY): ViewState {
   const { pathname, search } = useLocation();
   const decoded = useMemo(() => decodeView(new URLSearchParams(search)), [search]);
   const fromAddress = Object.keys(decoded.display).length > 0;
@@ -37,8 +39,8 @@ export function useViewState(scope: string): ViewState {
     [fromAddress, scope, written],
   );
   const display = useMemo<ViewDisplay>(
-    () => ({ ...DEFAULT_DISPLAY, ...(stored ?? {}), ...decoded.display }),
-    [stored, decoded.display],
+    () => ({ ...base, ...(stored ?? {}), ...decoded.display }),
+    [base, stored, decoded.display],
   );
 
   const latest = useRef({ pathname, search, filter: decoded.filter, display });
@@ -50,9 +52,9 @@ export function useViewState(scope: string): ViewState {
       writeStoredDisplay(scope, remember);
       setWritten((count) => count + 1);
       // The default is the absence of a parameter: the address stays short.
-      navigate(`${path}${withView(current, filter, changed(next))}`, { replace: true });
+      navigate(`${path}${withView(current, filter, changed(next, base))}`, { replace: true });
     },
-    [scope],
+    [scope, base],
   );
 
   const setFilter = useCallback(

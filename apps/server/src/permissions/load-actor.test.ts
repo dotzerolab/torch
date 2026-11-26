@@ -1,8 +1,13 @@
-import { member, teamMember } from '@torch/shared/db/schema';
+import { member, team, teamMember } from '@torch/shared/db/schema';
 import { and, eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { addMember, createWorkspaceFixture, withTempDatabase } from '../test/fixtures.ts';
-import { loadActor, loadTeamAccess, loadVisibleMemberIds } from './load-actor.ts';
+import {
+  loadActor,
+  loadTeamAccess,
+  loadVisibleMemberIds,
+  loadVisibleTeamIds,
+} from './load-actor.ts';
 
 const databaseUrl = process.env.DATABASE_URL;
 
@@ -251,6 +256,116 @@ describe.skipIf(!databaseUrl)('loadVisibleMemberIds (Postgres)', () => {
       const ids = await loadVisibleMemberIds(db.orm, tampered);
 
       expect(ids).toEqual([a.members.guest.id]);
+    });
+  });
+});
+
+describe.skipIf(!databaseUrl)('loadVisibleTeamIds (Postgres)', () => {
+  const sorted = (ids: string[]) => [...ids].sort();
+  const actorOf = async (
+    db: Parameters<Parameters<typeof withTempDatabase>[0]>[0],
+    workspaceId: string,
+    memberId: string,
+  ) => {
+    const actor = await loadActor(db.orm, workspaceId, memberId);
+    return actor as NonNullable<typeof actor>;
+  };
+
+  it('a member sees the public team and the private team they are in', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+
+      const ids = await loadVisibleTeamIds(
+        db.orm,
+        await actorOf(db, f.workspaceId, f.members.member.id),
+      );
+
+      expect(ids).toEqual(sorted([f.teams.eng.id, f.teams.ops.id]));
+    });
+  });
+
+  it('an owner outside the private team sees the public team only; a guest sees only their own team', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      await db.orm
+        .delete(teamMember)
+        .where(
+          and(eq(teamMember.teamId, f.teams.ops.id), eq(teamMember.memberId, f.members.owner.id)),
+        );
+
+      for (const who of ['owner', 'guest', 'outsider'] as const) {
+        const ids = await loadVisibleTeamIds(
+          db.orm,
+          await actorOf(db, f.workspaceId, f.members[who].id),
+        );
+        expect(ids, who).toEqual([f.teams.eng.id]);
+      }
+    });
+  });
+
+  it('a guest in no team sees nothing', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const lonely = await addMember(db.orm, f.workspaceId, 'guest');
+
+      expect(await loadVisibleTeamIds(db.orm, await actorOf(db, f.workspaceId, lonely.id))).toEqual(
+        [],
+      );
+    });
+  });
+
+  it('follows the stored memberships, not the team set the actor object holds', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      // Loaded while still in OPS, then removed: a stale actor must not keep the private team.
+      const stale = await actorOf(db, f.workspaceId, f.members.member.id);
+      expect([...stale.teamIds]).toContain(f.teams.ops.id);
+      await db.orm
+        .delete(teamMember)
+        .where(
+          and(eq(teamMember.teamId, f.teams.ops.id), eq(teamMember.memberId, f.members.member.id)),
+        );
+
+      expect(await loadVisibleTeamIds(db.orm, stale)).toEqual([f.teams.eng.id]);
+
+      // And a team set that names a team of another workspace adds nothing.
+      const other = await createWorkspaceFixture(db.orm);
+      const tampered = { ...stale, teamIds: new Set([other.teams.ops.id, other.teams.eng.id]) };
+      expect(await loadVisibleTeamIds(db.orm, tampered)).toEqual([f.teams.eng.id]);
+    });
+  });
+
+  it('a team that turns private drops out for a member who is not in it', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      await db.orm.update(team).set({ private: true }).where(eq(team.id, f.teams.eng.id));
+      await db.orm
+        .delete(teamMember)
+        .where(
+          and(eq(teamMember.teamId, f.teams.eng.id), eq(teamMember.memberId, f.members.member.id)),
+        );
+
+      const ids = await loadVisibleTeamIds(
+        db.orm,
+        await actorOf(db, f.workspaceId, f.members.member.id),
+      );
+
+      expect(ids).toEqual([f.teams.ops.id]);
+    });
+  });
+
+  it('never lists a team of another workspace', async () => {
+    await withTempDatabase(async (db) => {
+      const a = await createWorkspaceFixture(db.orm);
+      const b = await createWorkspaceFixture(db.orm);
+
+      const ids = await loadVisibleTeamIds(
+        db.orm,
+        await actorOf(db, a.workspaceId, a.members.owner.id),
+      );
+
+      expect(ids).toEqual(sorted([a.teams.eng.id, a.teams.ops.id]));
+      expect(ids).not.toContain(b.teams.eng.id);
     });
   });
 });

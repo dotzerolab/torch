@@ -708,6 +708,7 @@ const HTTP_ROWS: HttpRow[] = [
   http('sync: teams', 200, 200, 200, 200),
   http('sync: members', 200, 200, 200, 200),
   http('sync: own team memberships', 200, 200, 200, 200),
+  http('sync: my issues', 200, 200, 200, 200),
   http('sync: issues (public team)', 200, 200, 200, 200),
   http('sync: workflow states (public team)', 200, 200, 200, 200),
   http('sync: team members (public team)', 200, 200, 200, 200),

@@ -27,6 +27,7 @@ const KIND_NAMES = [
   'members',
   'ownMemberships',
   'workspaceLabels',
+  'myIssues',
   'issues',
   'workflowStates',
   'teamMembers',
@@ -400,6 +401,117 @@ describe('live shape budget', () => {
     releaseOld();
     await Promise.resolve();
     expect(registry.liveCount()).toBe(MAX_LIVE_SHAPES);
+  });
+
+  describe('my issues, the one workspace shape a screen reads', () => {
+    const mine = { kind: 'myIssues', workspaceId: ws } as const;
+
+    it('is a live shape: it counts against the budget and names a shape the tabs share', () => {
+      const { factories } = fakeFactories();
+      const registry = createRegistry(factories);
+      open(registry);
+      registry.get(mine);
+      expect(registry.liveCount()).toBe(MAX_LIVE_SHAPES);
+      expect(isSnapshotKind('myIssues')).toBe(false);
+      expect(shapeId(mine)).toBe('myIssues:w1');
+      expect(isShapeId('myIssues:w1')).toBe(true);
+      expect(parseShapeId('myIssues:w1')).toEqual(mine);
+      expect(TEAM_KINDS).not.toContain('myIssues');
+    });
+
+    it('stays open 30 s after its screen left when there is room, then pauses and resumes under the same id', async () => {
+      const { factories } = fakeFactories();
+      const registry = createRegistry(factories);
+      const fake = registry.get(mine);
+      expect(registry.holdCount(mine)).toBe(0);
+      registry.hold(mine)();
+      expect(registry.holdCount(mine)).toBe(0);
+      vi.advanceTimersByTime(PAUSE_AFTER_MS - 1);
+      await Promise.resolve();
+      expect(fake.cleaned).toBe(0);
+      vi.advanceTimersByTime(1);
+      await Promise.resolve();
+      expect(fake.cleaned).toBe(1);
+      expect(registry.get(mine).id).toBe('myIssues-w1');
+    });
+
+    it('a reader keeps it open however long it reads', async () => {
+      const { factories } = fakeFactories();
+      const registry = createRegistry(factories);
+      const fake = registry.get(mine);
+      registry.hold(mine);
+      vi.advanceTimersByTime(PAUSE_AFTER_MS * 4);
+      await Promise.resolve();
+      expect(fake.cleaned).toBe(0);
+    });
+
+    it('going from My Issues to a team keeps the live count at the budget, not above it', async () => {
+      const { factories } = fakeFactories();
+      const registry = createRegistry(factories);
+      open(registry);
+      registry.get(mine);
+      const releaseMine = registry.hold(mine);
+      expect(registry.liveCount()).toBe(MAX_LIVE_SHAPES);
+      registry.get(team('issues', 't1'));
+      registry.hold(team('issues', 't1'));
+      expect(registry.liveCount()).toBe(MAX_LIVE_SHAPES + 1);
+      releaseMine();
+      await Promise.resolve();
+      expect(registry.liveCount()).toBe(MAX_LIVE_SHAPES);
+      expect(registry.isOpen(mine)).toBe(false);
+    });
+
+    it('going from a team to My Issues pauses the team the same way', async () => {
+      const { factories } = fakeFactories();
+      const registry = createRegistry(factories);
+      open(registry);
+      registry.get(team('issues', 't1'));
+      const releaseTeam = registry.hold(team('issues', 't1'));
+      registry.get(mine);
+      registry.hold(mine);
+      expect(registry.liveCount()).toBe(MAX_LIVE_SHAPES + 1);
+      releaseTeam();
+      await Promise.resolve();
+      expect(registry.liveCount()).toBe(MAX_LIVE_SHAPES);
+      expect(registry.isOpen(team('issues', 't1'))).toBe(false);
+    });
+
+    it('asks the page to make room when a reader takes it above the budget', () => {
+      const overBudget = vi.fn();
+      const { factories } = fakeFactories();
+      const registry = createRegistry(factories, { overBudget });
+      open(registry);
+      registry.get(team('issues', 't1'));
+      registry.hold(team('issues', 't1'));
+      registry.get(mine);
+      registry.hold(mine);
+      expect(overBudget).toHaveBeenCalled();
+    });
+
+    it('pauseNow ends it when nobody holds it, and leaves a held one alone', async () => {
+      const { factories } = fakeFactories();
+      const registry = createRegistry(factories);
+      const fake = registry.get(mine);
+      const release = registry.hold(mine);
+      registry.pauseNow(mine);
+      await Promise.resolve();
+      expect(fake.cleaned).toBe(0);
+      release();
+      registry.pauseNow(mine);
+      await Promise.resolve();
+      expect(fake.cleaned).toBe(1);
+    });
+
+    it('the three always-live shapes are never held or paused', async () => {
+      const { factories } = fakeFactories();
+      const registry = createRegistry(factories);
+      const teams = registry.get({ kind: 'teams', workspaceId: ws });
+      registry.hold({ kind: 'teams', workspaceId: ws })();
+      registry.pauseNow({ kind: 'teams', workspaceId: ws });
+      vi.advanceTimersByTime(PAUSE_AFTER_MS * 2);
+      await Promise.resolve();
+      expect(teams.cleaned).toBe(0);
+    });
   });
 
   it('tells whether a shape is open and how many readers hold it', () => {

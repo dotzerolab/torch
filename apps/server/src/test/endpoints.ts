@@ -820,6 +820,14 @@ export const ENDPOINTS: EndpointCase[] = [
     path: (ids) => `${sync(ids)}/me/team-memberships`,
     minRole: 'guest',
   },
+  // The one cross-team shape: the actor's own issues of every team they can see. Everybody reads it; what it holds
+  // is decided per request from the teams the actor can see.
+  {
+    name: 'sync: my issues',
+    method: 'GET',
+    path: (ids) => `${sync(ids)}/my-issues`,
+    minRole: 'guest',
+  },
   ...TEAMS.flatMap(({ team: key, label, see }): EndpointCase[] => [
     {
       name: `sync: issues (${label})`,

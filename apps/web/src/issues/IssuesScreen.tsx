@@ -12,6 +12,7 @@ import { useIssueRows, useTeamData } from './data.ts';
 import { IssueDetail } from './IssueDetail.tsx';
 import { IssuePeek } from './IssuePeek.tsx';
 import { IssuesView } from './IssuesView.tsx';
+import { MyIssuesScreen } from './MyIssuesScreen.tsx';
 import { localDay } from './model/day.ts';
 import type { IssueRow } from './model/engine.ts';
 import { updateIssue } from './mutate.ts';
@@ -122,7 +123,16 @@ export function IssuesScreen({ locale }: { locale: Locale }) {
     );
   }
   if (route.name === 'myIssues') {
-    return <p className="issues__note">{t(locale, 'shell.myIssues')}</p>;
+    if (!teamsReady) {
+      return (
+        <p className="issues__note" aria-busy="true">
+          {t(locale, 'workspace.loading')}
+        </p>
+      );
+    }
+    return (
+      <MyIssuesScreen workspaceId={workspace.id} memberId={workspace.memberId} teams={teams} />
+    );
   }
   if (!teamsReady) {
     return (

@@ -1832,6 +1832,178 @@ describe.skipIf(!databaseUrl || !electricUrl)('GET /api/sync (real Electric)', (
       expect(next.status).toBe(404);
     });
   }, 30_000);
+
+  const myIssuesLive = (f: WorkspaceFixture) => `/api/sync/w/${f.workspaceId}/my-issues`;
+
+  async function addIssue(
+    db: Db,
+    f: WorkspaceFixture,
+    team: 'eng' | 'ops',
+    number: number,
+    ids: { assignee?: string; creator: string },
+  ) {
+    const [row] = await db.orm
+      .insert(issue)
+      .values({
+        workspaceId: f.workspaceId,
+        teamId: f.teams[team].id,
+        number,
+        title: `Mine ${team} ${number}`,
+        stateId: f.states[team].backlog.id,
+        creatorId: ids.creator,
+        assigneeId: ids.assignee ?? null,
+      })
+      .returning();
+    return row as NonNullable<typeof row>;
+  }
+
+  it('real Electric: my issues holds exactly the issues the person holds or created, in the teams they can see', async () => {
+    await withDevWorkspace(async (db, f) => {
+      const app = realApp(db);
+      const assignedEng = await addIssue(db, f, 'eng', 100, {
+        assignee: f.members.member.id,
+        creator: f.members.owner.id,
+      });
+      const createdOps = await addIssue(db, f, 'ops', 101, { creator: f.members.member.id });
+      const someoneElses = await addIssue(db, f, 'eng', 102, {
+        assignee: f.members.owner.id,
+        creator: f.members.owner.id,
+      });
+      const guestAssignedOps = await addIssue(db, f, 'ops', 103, {
+        assignee: f.members.guest.id,
+        creator: f.members.owner.id,
+      });
+      const guestCreatedEng = await addIssue(db, f, 'eng', 104, { creator: f.members.guest.id });
+
+      const idsFor = async (who: keyof WorkspaceFixture['members']) => {
+        const res = await get(app, `${myIssuesLive(f)}?offset=-1`, as(f.members[who].id));
+        const found = await rows(res);
+        for (const row of found) {
+          expect(Object.keys(row)).not.toContain('description');
+          expect(row.workspace_id).toBe(f.workspaceId);
+        }
+        return new Set(found.map((row) => row.id));
+      };
+      const everything = await db.orm
+        .select()
+        .from(issue)
+        .where(eq(issue.workspaceId, f.workspaceId));
+      const expected = (who: keyof WorkspaceFixture['members'], teams: string[]) =>
+        new Set(
+          everything
+            .filter(
+              (row) =>
+                teams.includes(row.teamId) &&
+                (row.assigneeId === f.members[who].id || row.creatorId === f.members[who].id),
+            )
+            .map((row) => row.id),
+        );
+
+      const member_ = await idsFor('member');
+      expect(member_).toEqual(expected('member', [f.teams.eng.id, f.teams.ops.id]));
+      expect(member_.has(assignedEng.id)).toBe(true);
+      expect(member_.has(createdOps.id)).toBe(true);
+      expect(member_.has(someoneElses.id)).toBe(false);
+
+      // The guest is assigned an issue of a team they are not in: it never reaches them.
+      const guest = await idsFor('guest');
+      expect(guest).toEqual(expected('guest', [f.teams.eng.id]));
+      expect(guest.has(guestCreatedEng.id)).toBe(true);
+      expect(guest.has(guestAssignedOps.id)).toBe(false);
+      expect(
+        [...guest].every(
+          (id) => everything.find((row) => row.id === id)?.teamId === f.teams.eng.id,
+        ),
+      ).toBe(true);
+    });
+  }, 30_000);
+
+  it('real Electric: removed from the private team, the open stream ends, the old handle gets must-refetch and a fresh load holds none of its rows', async () => {
+    await withDevWorkspace(async (db, f) => {
+      const bus = createAccessBus();
+      const app = realApp(db, bus);
+      await addIssue(db, f, 'ops', 101, { creator: f.members.member.id });
+      const who = as(f.members.member.id);
+
+      const initial = await get(app, `${myIssuesLive(f)}?offset=-1`, who);
+      const before = await rows(initial.clone());
+      expect(before.some((row) => row.team_id === f.teams.ops.id)).toBe(true);
+      const handle = initial.headers.get('electric-handle');
+      const offset = initial.headers.get('electric-offset');
+      expect(handle).toBeTruthy();
+
+      const live = get(app, `${myIssuesLive(f)}?offset=${offset}&handle=${handle}&live=true`, {
+        ...who,
+        signal: AbortSignal.timeout(20_000),
+      });
+      await waitUntil(() => bus.tracked() > 0, 5000, 'the live request to open');
+      const removed = await get(
+        app,
+        `/api/w/${f.workspaceId}/teams/${f.teams.ops.id}/members/${f.members.member.id}`,
+        as(f.members.owner.id, { method: 'DELETE', headers: { origin: TEST_ORIGIN } }),
+      );
+      expect(removed.status).toBe(200);
+
+      expect(await (await live).text()).toBe('[{"headers":{"control":"up-to-date"}}]');
+      // The shape now has other teams in its filter, so Electric no longer knows the old handle for it.
+      const next = await get(app, `${myIssuesLive(f)}?offset=${offset}&handle=${handle}`, who);
+      expect(next.status).toBe(409);
+      expect(await next.json()).toEqual([{ headers: { control: 'must-refetch' } }]);
+      expect(next.headers.get('electric-handle')).not.toBe(handle);
+
+      const fresh = await rows(await get(app, `${myIssuesLive(f)}?offset=-1`, who));
+      expect(fresh.length).toBeGreaterThan(0);
+      expect(fresh.every((row) => row.team_id === f.teams.eng.id)).toBe(true);
+    });
+  }, 30_000);
+
+  it('real Electric: the real client drops the rows of a team the person was removed from within 2 s', async () => {
+    await withDevWorkspace(async (db, f) => {
+      const bus = createAccessBus();
+      const app = realApp(db, bus);
+      await addIssue(db, f, 'ops', 101, { creator: f.members.member.id });
+      const who = f.members.member.id;
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const stop = new AbortController();
+      const stream = new ShapeStream({
+        url: `http://localhost${myIssuesLive(f)}`,
+        signal: stop.signal,
+        fetchClient: async (input, init) => {
+          const headers = new Headers(init?.headers);
+          headers.set(TEST_MEMBER_HEADER, who);
+          return app.fetch(new Request(input, { ...init, headers }));
+        },
+      });
+      const shape = new Shape(stream);
+      try {
+        const first = await shape.rows;
+        expect(first.some((row) => row.team_id === f.teams.ops.id)).toBe(true);
+        await waitUntil(() => bus.tracked() > 0, 5000, 'the live request to open');
+
+        const removedAt = Date.now();
+        const removed = await get(
+          app,
+          `/api/w/${f.workspaceId}/teams/${f.teams.ops.id}/members/${who}`,
+          as(f.members.owner.id, { method: 'DELETE', headers: { origin: TEST_ORIGIN } }),
+        );
+        expect(removed.status).toBe(200);
+
+        await waitUntil(
+          () =>
+            shape.currentRows.length > 0 &&
+            shape.currentRows.every((row) => row.team_id === f.teams.eng.id),
+          8000,
+          'the rows of the left team to go',
+        );
+        expect(Date.now() - removedAt).toBeLessThan(2000);
+        expect(warn.mock.calls.filter((call) => String(call[0]).includes('[Electric]'))).toEqual(
+          [],
+        );
+      } finally {
+        stop.abort();
+      }
+    });
+  }, 30_000);
 });
 
 const TEAM_DATA_ROUTES = [
@@ -2260,3 +2432,298 @@ describe.skipIf(!databaseUrl || !electricUrl)(
     }, 30_000);
   },
 );
+
+// ---- My Issues: the one shape that reaches across teams ----
+
+const myIssuesPath = (f: WorkspaceFixture) => `/api/sync/w/${f.workspaceId}/my-issues`;
+const MY_ISSUES_WHERE =
+  'workspace_id = $1 AND team_id IN ($2, $3) AND (assignee_id = $4 OR creator_id = $4)';
+const MY_ISSUES_WHERE_ONE_TEAM =
+  'workspace_id = $1 AND team_id IN ($2) AND (assignee_id = $3 OR creator_id = $3)';
+
+describe.skipIf(!databaseUrl)('GET /api/sync/my-issues (fake Electric)', () => {
+  it('only my issues of the teams I can see: one parameterised shape built from the stored actor', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const res = await get(app, `${myIssuesPath(f)}?offset=-1`, as(f.members.member.id));
+
+      expect(res.status).toBe(200);
+      const q = upstream.calls[0]?.url.searchParams;
+      expect(q?.get('table')).toBe('issue');
+      expect(q?.get('where')).toBe(MY_ISSUES_WHERE);
+      // The member is in ENG (public) and OPS (private); ids sorted, then the person.
+      expect(sentParams(upstream.calls[0])).toEqual([
+        f.workspaceId,
+        ...sorted([f.teams.eng.id, f.teams.ops.id]),
+        f.members.member.id,
+      ]);
+      expect(q?.get('columns')).not.toContain('description');
+      expect(q?.get('secret')).toBe(SECRET);
+    });
+  });
+
+  it('a guest sees only the rows of their own team: the other team never reaches the shape', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const res = await get(app, `${myIssuesPath(f)}?offset=-1`, as(f.members.guest.id));
+
+      expect(res.status).toBe(200);
+      expect(upstream.calls[0]?.url.searchParams.get('where')).toBe(MY_ISSUES_WHERE_ONE_TEAM);
+      expect(sentParams(upstream.calls[0])).toEqual([
+        f.workspaceId,
+        f.teams.eng.id,
+        f.members.guest.id,
+      ]);
+      expect(sentParams(upstream.calls[0])).not.toContain(f.teams.ops.id);
+    });
+  });
+
+  it('a guest in no team gets a shape that matches nothing', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const lonely = await addMember(db.orm, f.workspaceId, 'guest');
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const res = await get(app, `${myIssuesPath(f)}?offset=-1`, as(lonely.id));
+
+      expect(res.status).toBe(200);
+      expect(sentParams(upstream.calls[0])).toEqual([
+        f.workspaceId,
+        '00000000-0000-0000-0000-000000000000',
+        lonely.id,
+      ]);
+    });
+  });
+
+  it('an owner who is not in the private team does not get its rows either', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      await db.orm
+        .delete(teamMember)
+        .where(
+          and(eq(teamMember.teamId, f.teams.ops.id), eq(teamMember.memberId, f.members.owner.id)),
+        );
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      const res = await get(app, `${myIssuesPath(f)}?offset=-1`, as(f.members.owner.id));
+
+      expect(res.status).toBe(200);
+      expect(upstream.calls[0]?.url.searchParams.get('where')).toBe(MY_ISSUES_WHERE_ONE_TEAM);
+      expect(sentParams(upstream.calls[0])).toEqual([
+        f.workspaceId,
+        f.teams.eng.id,
+        f.members.owner.id,
+      ]);
+    });
+  });
+
+  it('a member who left the private team: the next request has no row of it', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const member_ = as(f.members.member.id);
+
+      await get(app, `${myIssuesPath(f)}?offset=-1`, member_);
+      expect(sentParams(upstream.calls[0])).toContain(f.teams.ops.id);
+
+      await db.orm
+        .delete(teamMember)
+        .where(
+          and(eq(teamMember.teamId, f.teams.ops.id), eq(teamMember.memberId, f.members.member.id)),
+        );
+      const after = await get(app, `${myIssuesPath(f)}?offset=-1`, member_);
+
+      expect(after.status).toBe(200);
+      expect(upstream.calls[1]?.url.searchParams.get('where')).toBe(MY_ISSUES_WHERE_ONE_TEAM);
+      expect(sentParams(upstream.calls[1])).toEqual([
+        f.workspaceId,
+        f.teams.eng.id,
+        f.members.member.id,
+      ]);
+    });
+  });
+
+  it('a deactivated member gets 401 and Electric is never called', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      expect((await get(app, myIssuesPath(f), as(f.members.member.id))).status).toBe(200);
+      upstream.calls.length = 0;
+
+      await db.orm
+        .update(member)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(member.id, f.members.member.id));
+      const res = await get(app, `${myIssuesPath(f)}?offset=-1`, as(f.members.member.id));
+
+      expect(res.status).toBe(401);
+      expect(upstream.calls).toHaveLength(0);
+    });
+  });
+
+  it('another workspace answers like one that does not exist, and a malformed or upper-case id is 404', async () => {
+    await withTempDatabase(async (db) => {
+      const a = await createWorkspaceFixture(db.orm);
+      const b = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const actorA = as(a.members.owner.id);
+      expect((await get(app, myIssuesPath(a), actorA)).status).toBe(200);
+      upstream.calls.length = 0;
+
+      const foreign = await get(app, myIssuesPath(b), actorA);
+      const unknown = await get(app, `/api/sync/w/${UNKNOWN_UUID}/my-issues`, actorA);
+      expect(foreign.status).toBe(unknown.status);
+      expect(foreign.status).toBeGreaterThanOrEqual(401);
+      expect(await foreign.text()).toBe(await unknown.text());
+      for (const path of [
+        '/api/sync/w/not-a-uuid/my-issues',
+        `/api/sync/w/${a.workspaceId.toUpperCase()}/my-issues`,
+      ]) {
+        expect((await get(app, path, actorA)).status, path).toBe(404);
+      }
+      expect(upstream.calls).toHaveLength(0);
+    });
+  });
+
+  it('no session -> 401; only GET is served', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+
+      expect((await get(app, `${myIssuesPath(f)}?offset=-1`)).status).toBe(401);
+      expect(
+        (await get(app, myIssuesPath(f), as(f.members.member.id, { method: 'HEAD' }))).status,
+      ).toBe(405);
+      for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+        const res = await get(
+          app,
+          myIssuesPath(f),
+          as(f.members.owner.id, { method, headers: { origin: TEST_ORIGIN } }),
+        );
+        expect(res.status, method).toBeGreaterThanOrEqual(404);
+      }
+      expect(upstream.calls).toHaveLength(0);
+    });
+  });
+
+  it('the client cannot widen the shape: table, where, columns, params and other ids in the query are ignored', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const upstream = fakeUpstream(emptyShape);
+      const app = buildApp(db, upstream.fetchUpstream);
+      const hostile = new URLSearchParams({
+        offset: '-1',
+        table: 'member',
+        where: 'true',
+        columns: 'description,email',
+        'params[1]': f.workspaceId,
+        'params[2]': f.teams.ops.id,
+        member_id: f.members.owner.id,
+        assignee_id: f.members.owner.id,
+        team_id: f.teams.ops.id,
+        secret: 'guess',
+      });
+
+      const res = await get(app, `${myIssuesPath(f)}?${hostile}`, as(f.members.guest.id));
+
+      expect(res.status).toBe(200);
+      const q = upstream.calls[0]?.url.searchParams;
+      expect(q?.get('table')).toBe('issue');
+      expect(q?.get('where')).toBe(MY_ISSUES_WHERE_ONE_TEAM);
+      expect(q?.get('columns')).not.toMatch(/description|email/);
+      expect(q?.get('secret')).toBe(SECRET);
+      expect(sentParams(upstream.calls[0])).toEqual([
+        f.workspaceId,
+        f.teams.eng.id,
+        f.members.guest.id,
+      ]);
+      for (const name of ['member_id', 'assignee_id', 'team_id']) expect(q?.has(name)).toBe(false);
+    });
+  });
+
+  it('an open request ends when the person is removed from a team, and the next one carries the new teams', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const bus = createAccessBus();
+      // The long-poll waits until the proxy ends it; every other request is answered at once.
+      const upstream = fakeUpstream(async (call) => {
+        if (call.url.searchParams.get('live') !== 'true') return emptyShape();
+        return new Promise<Response>((_resolve, reject) => {
+          call.init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError')),
+          );
+        });
+      });
+      const app = buildApp(db, upstream.fetchUpstream, bus);
+      const member_ = as(f.members.member.id);
+
+      const pending = get(
+        app,
+        `${myIssuesPath(f)}?offset=5_1&handle=h-1&cursor=77&live=true`,
+        member_,
+      );
+      await vi.waitFor(() => expect(bus.tracked()).toBe(1));
+      const removed = await get(
+        app,
+        `/api/w/${f.workspaceId}/teams/${f.teams.ops.id}/members/${f.members.member.id}`,
+        as(f.members.owner.id, { method: 'DELETE', headers: { origin: TEST_ORIGIN } }),
+      );
+      expect(removed.status).toBe(200);
+
+      const ended = await pending;
+      expect(ended.status).toBe(200);
+      expect(await ended.json()).toEqual([{ headers: { control: 'up-to-date' } }]);
+
+      upstream.calls.length = 0;
+      const next = await get(app, `${myIssuesPath(f)}?offset=5_1&handle=h-1`, member_);
+      expect(next.status).toBe(200);
+      expect(sentParams(upstream.calls[0])).toEqual([
+        f.workspaceId,
+        f.teams.eng.id,
+        f.members.member.id,
+      ]);
+    });
+  });
+
+  it('an open request ends for the person whose role changes and for everybody when a team turns private', async () => {
+    await withTempDatabase(async (db) => {
+      const f = await createWorkspaceFixture(db.orm);
+      const bus = createAccessBus();
+      const upstream = hangingUpstream();
+      const app = buildApp(db, upstream.fetchUpstream, bus);
+      const live = '?offset=5_1&handle=h-1&cursor=77&live=true';
+      const owner = as(f.members.owner.id, { headers: { origin: TEST_ORIGIN } });
+
+      const forMember = get(app, `${myIssuesPath(f)}${live}`, as(f.members.member.id));
+      const forGuest = get(app, `${myIssuesPath(f)}${live}`, as(f.members.guest.id));
+      await vi.waitFor(() => expect(bus.tracked()).toBe(2));
+
+      const flipped = await get(app, `/api/w/${f.workspaceId}/teams/${f.teams.eng.id}`, {
+        ...owner,
+        method: 'PATCH',
+        headers: { ...owner.headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ private: true }),
+      });
+      expect(flipped.status).toBe(200);
+
+      for (const request of [forMember, forGuest]) {
+        const res = await request;
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual([{ headers: { control: 'up-to-date' } }]);
+      }
+      expect(bus.tracked()).toBe(0);
+    });
+  });
+});
