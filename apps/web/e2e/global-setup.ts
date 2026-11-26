@@ -4,6 +4,8 @@
 import { runMigrations } from '../../server/src/db/migrate.ts';
 import { seedDev } from '../../server/src/db/seed.ts';
 import { createDb } from '../../server/src/db.ts';
+import { readStorageConfig } from '../../server/src/files/config.ts';
+import { corsRules, createS3BucketAdmin } from '../../server/src/files/storage.ts';
 import { restoreDemoLayout } from './helpers/demo-layout.ts';
 
 const REQUIRED = ['DATABASE_URL', 'ELECTRIC_URL', 'ELECTRIC_SECRET', 'SMTP_URL', 'MAILPIT_API_URL'];
@@ -19,6 +21,7 @@ export default async function globalSetup(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL as string;
 
   await runMigrations(databaseUrl);
+  await prepareStorage();
   const db = createDb(databaseUrl);
   try {
     await seedDev(db.orm);
@@ -30,6 +33,18 @@ export default async function globalSetup(): Promise<void> {
          from team t, workspace w
         where issue.team_id = t.id and issue.workspace_id = w.id and w.slug = 'demo'`,
     );
+    // Comments, files and documents the comments-and-files spec left behind (the objects stay in the e2e bucket).
+    for (const table of [
+      'comment_edit',
+      'comment',
+      'attachment',
+      'document_revision',
+      'document',
+    ]) {
+      await db.pool.query(
+        `delete from ${table} where workspace_id in (select id from workspace where slug = 'demo')`,
+      );
+    }
     await db.pool.query(
       `delete from login_token where workspace_id in (select id from workspace where slug in ('demo', 'perf'))`,
     );
@@ -54,4 +69,18 @@ export default async function globalSetup(): Promise<void> {
   } finally {
     await db.close();
   }
+}
+
+/**
+ * The e2e stacks keep attachments in a bucket of their own, open to their two origins. Without a storage service the
+ * comments-and-files spec has nothing to upload to and says so; the other specs do not need it.
+ */
+async function prepareStorage(): Promise<void> {
+  const bucket = process.env.E2E_S3_BUCKET || 'e2e-attachments';
+  const config = readStorageConfig({ ...process.env, S3_BUCKET: bucket });
+  if (!config) return;
+  const admin = createS3BucketAdmin(config);
+  if (!(await admin.bucketExists())) await admin.createBucket();
+  const origins = ['http://localhost:23200', 'http://localhost:23201'];
+  await admin.putCors({ CORSRules: origins.flatMap((origin) => corsRules(origin).CORSRules) });
 }

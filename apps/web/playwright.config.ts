@@ -15,6 +15,9 @@ const stacks = {
   default: { server: 23100, web: 23200 },
   customBrand: { server: 23101, web: 23201 },
 };
+// The attachment bucket of the e2e stacks: its own, so the browser rules for the e2e origins (set in global setup) never
+// replace the ones of the bucket a development stack uses.
+const E2E_BUCKET = process.env.E2E_S3_BUCKET || 'e2e-attachments';
 const acmeBrandPath = fileURLToPath(new URL('./e2e/fixtures/brand.acme.json', import.meta.url));
 
 // `pnpm e2e:perf` runs only the 10,000-issue performance spec (it seeds a big workspace and takes minutes); `pnpm e2e`
@@ -32,7 +35,12 @@ function stackServers(
       command: 'node src/main.ts',
       cwd: '../server',
       // APP_URL is where the browser reaches this stack: the sign-in links and the CSRF origin check use it.
-      env: { PORT: String(stack.server), APP_URL: `http://localhost:${stack.web}`, ...env },
+      env: {
+        PORT: String(stack.server),
+        APP_URL: `http://localhost:${stack.web}`,
+        S3_BUCKET: E2E_BUCKET,
+        ...env,
+      },
       url: `http://localhost:${stack.server}/health`,
       reuseExistingServer: false,
       timeout: 30_000,
