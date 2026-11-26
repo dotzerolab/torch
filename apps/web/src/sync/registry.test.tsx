@@ -274,20 +274,50 @@ describe('useShapeFrom with a live query', () => {
 
 const labelsKey = { kind: 'labels', workspaceId: ws, teamId: 't1' } as const;
 
+/** What each render of `SnapshotList` showed, in order. */
+const snapshotRenders: string[] = [];
+
 function SnapshotList() {
   if (!liveRegistry) throw new Error('no registry');
   const collection = useShapeFrom(liveRegistry, labelsKey);
   const { data } = useLiveQuery({
     query: (q) => q.from({ row: collection as unknown as LocalCollection }),
   });
-  return <p data-testid="labels">{data.map((row) => (row as { id: string }).id).join(',')}</p>;
+  const text = data.map((row) => (row as { id: string }).id).join(',');
+  snapshotRenders.push(text);
+  return <p data-testid="labels">{text}</p>;
 }
 
 describe('refreshing a snapshot shape', () => {
-  it('re-binds an open reader to the new collection and cleans the old one up', async () => {
+  /** Like `localFactory`, but the shape only counts as answered when the test says so. */
+  function gatedFactory(rows: () => { id: string }[], made: Array<{ status: string }>) {
+    const answers: Array<() => void> = [];
+    const make = (_key: ShapeKey, id: string, context: { settled: () => void }) => {
+      const collection = createCollection<{ id: string }>({
+        id,
+        getKey: (row) => row.id,
+        sync: {
+          sync: ({ begin, write, commit, markReady }) => {
+            begin();
+            for (const row of rows()) write({ type: 'insert', value: row });
+            commit();
+            markReady();
+          },
+        },
+      });
+      made.push(collection);
+      answers.push(() => context.settled());
+      return collection;
+    };
+    return { factories: allKinds(make) satisfies Factories, answers };
+  }
+
+  it('keeps showing the old rows until the new instance has answered, then re-binds and cleans the old one up', async () => {
     let rows = [{ id: 'a' }];
     const made: Array<{ status: string }> = [];
-    liveRegistry = createRegistry(localFactory(() => rows, made));
+    const { factories, answers } = gatedFactory(() => rows, made);
+    liveRegistry = createRegistry(factories);
+    snapshotRenders.length = 0;
     render(<SnapshotList />);
     await act(async () => {});
     expect(screen.getByTestId('labels').textContent).toBe('a');
@@ -298,10 +328,22 @@ describe('refreshing a snapshot shape', () => {
       liveRegistry?.refresh(labelsKey);
     });
     await act(async () => {});
-    expect(screen.getByTestId('labels').textContent).toBe('b,c');
+    // The new instance is reading, but has not answered: readers keep the old one, with its rows.
     expect(made).toHaveLength(2);
+    expect(screen.getByTestId('labels').textContent).toBe('a');
+    expect(made[0]?.status).not.toBe('cleaned-up');
+
+    await act(async () => {
+      answers[1]?.();
+    });
+    await act(async () => {});
+    expect(screen.getByTestId('labels').textContent).toBe('b,c');
     expect(made[0]?.status).toBe('cleaned-up');
     expect(made[1]?.status).toBe('ready');
+    // Once the rows were there, no render in between showed an empty list.
+    expect(
+      snapshotRenders.slice(snapshotRenders.indexOf('a')).filter((text) => text === ''),
+    ).toEqual([]);
   });
 });
 
@@ -659,22 +701,79 @@ describe('snapshot shapes', () => {
     }
   });
 
-  it('refresh replaces the instance with a new id, tells readers and cleans the old one up', async () => {
-    const { factories } = fakeFactories();
+  /** Fakes that can be started and answered one by one. */
+  function controlled() {
+    const made: Array<Fake & { preloaded: number; answer: () => void }> = [];
+    const build = (
+      _key: ShapeKey,
+      id: string,
+      context: { inert: boolean; settled: () => void },
+    ) => {
+      const fake: Fake & { preloaded: number; answer: () => void } = {
+        id,
+        inert: context.inert,
+        cleaned: 0,
+        preloaded: 0,
+        answer: () => context.settled(),
+        cleanup() {
+          fake.cleaned += 1;
+        },
+        preload() {
+          fake.preloaded += 1;
+          return Promise.resolve();
+        },
+      } as never;
+      made.push(fake);
+      return fake;
+    };
+    return { factories: allKinds(build) as unknown as Factories, made };
+  }
+
+  it('refresh starts the next instance beside the old one: readers keep the old one until the new one answers', async () => {
+    const { factories, made } = controlled();
     const registry = createRegistry(factories);
     const listener = vi.fn();
     const first = registry.get(labels());
     registry.subscribe(listener);
     registry.refresh(labels());
     await Promise.resolve();
-    const second = registry.get(labels());
-    expect(second).not.toBe(first);
-    expect(first.id).toBe('labels-w1-t1');
-    expect(second.id).toBe('labels-w1-t1~2');
-    expect(first.cleaned).toBe(1);
+    // The new instance is made and started, nobody reads it yet.
+    expect(made.map((fake) => fake.id)).toEqual(['labels-w1-t1', 'labels-w1-t1~2']);
+    expect(made[1]?.preloaded).toBe(1);
+    expect(registry.get(labels())).toBe(first);
+    expect(made[0]?.cleaned).toBe(0);
+    expect(listener).not.toHaveBeenCalled();
+
+    made[1]?.answer();
+    await Promise.resolve();
+    expect(registry.get(labels())).toBe(made[1]);
+    expect(made[0]?.cleaned).toBe(1);
+    expect(made[1]?.cleaned).toBe(0);
     expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it('a refresh that never answers (offline) leaves readers on the old instance, and a newer refresh replaces it', async () => {
+    const { factories, made } = controlled();
+    const registry = createRegistry(factories);
+    const first = registry.get(labels());
     registry.refresh(labels());
-    expect(registry.get(labels()).id).toBe('labels-w1-t1~3');
+    registry.refresh(labels());
+    await Promise.resolve();
+    expect(registry.get(labels())).toBe(first);
+    expect(made.map((fake) => fake.id)).toEqual([
+      'labels-w1-t1',
+      'labels-w1-t1~2',
+      'labels-w1-t1~3',
+    ]);
+    // The read that was still waiting is ended, the old instance is untouched.
+    expect(made.map((fake) => fake.cleaned)).toEqual([0, 1, 0]);
+    // The ended read answering late changes nothing.
+    made[1]?.answer();
+    expect(registry.get(labels())).toBe(first);
+    made[2]?.answer();
+    await Promise.resolve();
+    expect(registry.get(labels())).toBe(made[2]);
+    expect(made[0]?.cleaned).toBe(1);
   });
 
   it('refresh of a snapshot nobody read creates nothing and stays quiet', () => {
@@ -696,46 +795,65 @@ describe('snapshot shapes', () => {
     expect(issues.cleaned).toBe(0);
   });
 
-  it('older device copies go once the new instance has settled, not before (an offline refresh keeps the old copy)', async () => {
-    const contexts: Array<{ settled: () => void }> = [];
-    const build = (_key: ShapeKey, _id: string, context: { settled: () => void }) => {
-      contexts.push(context);
-      return { cleanup() {} };
-    };
+  it('refresh of a team that is gone reads nothing', () => {
+    const { factories, made } = controlled();
+    const registry = createRegistry(factories);
+    registry.get(labels());
+    registry.dropTeam(ws, 't1');
+    const before = made.length;
+    registry.refresh(labels());
+    expect(made).toHaveLength(before);
+  });
+
+  it('older device copies go once the new instance has answered and the old one has stopped, not before', async () => {
+    const { factories, made } = controlled();
     const onShapeRestarted = vi.fn();
-    const registry = createRegistry(allKinds(build) as unknown as Factories, { onShapeRestarted });
+    const registry = createRegistry(factories, { onShapeRestarted });
     registry.get(labels());
     registry.refresh(labels());
-    await Promise.resolve();
-    registry.get(labels());
     await Promise.resolve();
     // The new instance has not heard from the server: the copy on the device is all that shows labels offline.
     expect(onShapeRestarted).not.toHaveBeenCalled();
-    contexts[1]?.settled();
+    made[1]?.answer();
+    await Promise.resolve();
+    await Promise.resolve();
     expect(onShapeRestarted).toHaveBeenCalledOnce();
     expect(onShapeRestarted).toHaveBeenCalledWith(labels(), 'labels-w1-t1', 'labels-w1-t1~2');
     // Later answers of the same instance delete nothing more.
-    contexts[1]?.settled();
+    made[1]?.answer();
+    await Promise.resolve();
     expect(onShapeRestarted).toHaveBeenCalledOnce();
   });
 
-  it('an instance that was replaced again before it settled deletes nothing', async () => {
-    const contexts: Array<{ settled: () => void }> = [];
-    const build = (_key: ShapeKey, _id: string, context: { settled: () => void }) => {
-      contexts.push(context);
-      return { cleanup() {} };
-    };
+  it('an instance that was replaced again before it answered deletes nothing', async () => {
+    const { factories, made } = controlled();
     const onShapeRestarted = vi.fn();
-    const registry = createRegistry(allKinds(build) as unknown as Factories, { onShapeRestarted });
+    const registry = createRegistry(factories, { onShapeRestarted });
     registry.get(labels());
     registry.refresh(labels());
-    registry.get(labels());
     registry.refresh(labels());
-    registry.get(labels());
-    contexts[1]?.settled();
+    made[1]?.answer();
+    await Promise.resolve();
     expect(onShapeRestarted).not.toHaveBeenCalled();
-    contexts[2]?.settled();
+    made[2]?.answer();
+    await Promise.resolve();
+    await Promise.resolve();
     expect(onShapeRestarted).toHaveBeenCalledWith(labels(), 'labels-w1-t1', 'labels-w1-t1~3');
+  });
+
+  it('dropTeam ends a read that was waiting for its answer too', async () => {
+    const { factories, made } = controlled();
+    const registry = createRegistry(factories);
+    registry.get(labels());
+    registry.refresh(labels());
+    registry.dropTeam(ws, 't1');
+    await Promise.resolve();
+    expect(made.map((fake) => fake.cleaned)).toEqual([1, 1]);
+    made[1]?.answer();
+    await Promise.resolve();
+    // The team stays gone: what is read now is an inert collection.
+    registry.get(labels());
+    expect(made[made.length - 1]?.inert).toBe(true);
   });
 
   it('dropTeam ends the snapshots of the team, the per-issue ones included, and keeps the workspace ones', async () => {

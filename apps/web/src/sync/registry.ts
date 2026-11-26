@@ -3,7 +3,9 @@
 // A restarted collection is a NEW instance with a NEW id: react-db derives a live query's identity from the ids of
 // its source collections, so a reused id would leave open queries bound to the instance that was cleaned up.
 // Most shapes are live (they keep a connection open and count against `MAX_LIVE_SHAPES`). A snapshot shape
-// (`SNAPSHOT_KINDS`) is read to its end and closed: it holds no connection, is not counted, and `refresh` reads it again.
+// (`SNAPSHOT_KINDS`) is read to its end and closed: it holds no connection, is not counted, and `refresh` reads it again:
+// the new instance syncs beside the old one and replaces it for readers only once the server has answered it, so
+// readers never see an empty collection (and offline they keep the rows they had).
 import { useEffect, useSyncExternalStore } from 'react';
 
 type WorkspaceKind = 'teams' | 'members' | 'ownMemberships' | 'workspaceLabels';
@@ -32,7 +34,11 @@ type KeyOf<K extends ShapeKind> = K extends WorkspaceKind
 export type ShapeKey = KeyOf<ShapeKind>;
 
 /** What the registry needs of a collection. */
-export type Cleanable = { cleanup(options?: { dependents?: boolean }): unknown };
+export type Cleanable = {
+  cleanup(options?: { dependents?: boolean }): unknown;
+  /** Starts the sync of an instance nobody reads yet (a collection syncs when first read). Optional. */
+  preload?(): unknown;
+};
 
 /** What a factory may call back into. `inert` asks for an empty collection that never syncs (a team that is gone). */
 export type ShapeContext = {
@@ -261,11 +267,12 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
       : `${key.kind}-${key.workspaceId}-${key.teamId}`;
   }
 
-  // Snapshots that were refreshed and whose next instance has not settled yet: the older device copies of such a shape go
-  // once the new one holds the server's answer, so a refresh that cannot reach the server (offline) loses nothing.
-  const refreshing = new Set<string>();
+  // Refreshed snapshots whose next instance has not answered yet. Readers keep the entry in `entries` until it does; then
+  // the new one takes its place and the older device copies go, so a refresh that cannot reach the server (offline)
+  // loses nothing.
+  const pending = new Map<string, Entry>();
 
-  function create(key: ShapeKey): Entry {
+  function create(key: ShapeKey, refreshing = false): Entry {
     const k = keyOf(key);
     const role = hooks.role?.(key.workspaceId) ?? 'leader';
     if (role === 'leader' && !generations.has(k)) {
@@ -283,13 +290,24 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
       id: string,
       context: ShapeContext,
     ) => Cleanable;
-    let supersedes = refreshing.delete(k);
+    let supersedes = refreshing;
     const settled = () => {
-      // Only the current instance of the shape: a restart or a drop already replaced the one that calls.
-      if (entries.get(k)?.generation !== generation) return;
       if (supersedes) {
+        // A refresh that was waiting for its answer: it takes the place of the instance readers hold. A newer refresh, a
+        // restart or a drop already ended the one that calls when `pending` holds another generation.
+        const next = pending.get(k);
+        if (next?.generation !== generation) return;
         supersedes = false;
-        hooks.onShapeRestarted?.(key, baseId(key), storeId);
+        pending.delete(k);
+        const old = entries.get(k);
+        entries.set(k, next);
+        // The old instance stops before its device copies go, so no write of it races the delete.
+        const stopped = old ? dispose(old.collection) : Promise.resolve();
+        void stopped.then(() => hooks.onShapeRestarted?.(key, baseId(key), storeId));
+        notify();
+      } else if (entries.get(k)?.generation !== generation) {
+        // Only the current instance of the shape: a restart or a drop already replaced the one that calls.
+        return;
       }
       for (const listener of [...(settledListeners.get(key.kind) ?? [])]) listener(key.workspaceId);
     };
@@ -312,15 +330,20 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
     return entry.collection as CollectionFor<F, K>;
   }
 
-  /** Ends the instance of a shape; resolves when it has stopped, or at once when there was none. */
+  /**
+   * Ends the instance of a shape, and the refresh that was waiting for its answer; resolves when they have stopped, or
+   * returns null when there was none.
+   */
   function replace(key: ShapeKey): Promise<void> | null {
     const k = keyOf(key);
     clearTimeout(pauseTimers.get(k));
     pauseTimers.delete(k);
-    refreshing.delete(k);
+    const waiting = pending.get(k);
+    pending.delete(k);
     const old = entries.get(k);
     entries.delete(k);
-    return old ? dispose(old.collection) : null;
+    const stops = [old, waiting].flatMap((entry) => (entry ? [dispose(entry.collection)] : []));
+    return stops.length ? Promise.all(stops).then(() => {}) : null;
   }
 
   /** Ends the shape and starts a fresh one the next time it is read; open readers are told to re-bind. */
@@ -344,16 +367,30 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
   }
 
   /**
-   * Reads a snapshot shape again: the instance ends and the next read makes a new one, with a new id (see the note at the
-   * top of this file), so open readers re-bind. Only a snapshot is refreshed; a live shape is always current.
+   * Reads a snapshot shape again, make-before-break: a new instance (a new id, see the note at the top of this file) is
+   * started beside the current one, which readers keep until the new one has the server's answer; then they re-bind. A
+   * refresh that cannot reach the server (offline) changes nothing readers see. A refresh asked while another waits ends
+   * the waiting one: the new read starts from the present. Only a snapshot is refreshed; a live shape is always current.
    */
   function refresh(key: ShapeKey) {
     if (!isSnapshotKind(key.kind)) return;
-    const stopped = replace(key);
-    // A shape nobody read yet has nothing to refresh. It starts the first time it is read.
-    if (!stopped) return;
-    refreshing.add(keyOf(key));
-    notify();
+    const k = keyOf(key);
+    // A shape nobody read yet has nothing to refresh. It starts the first time it is read. A team that is gone for this
+    // person serves an inert collection that never syncs: nothing to read again.
+    if (!entries.has(k)) return;
+    if (isTeamKey(key) && gone.has(goneKey(key.workspaceId, key.teamId))) return;
+    const waiting = pending.get(k);
+    pending.delete(k);
+    // Ended first, so its request is aborted before the next one is made.
+    if (waiting) void dispose(waiting.collection);
+    const next = create(key, true);
+    pending.set(k, next);
+    // Nobody reads the new instance, and a collection only syncs once read or started.
+    try {
+      void Promise.resolve(next.collection.preload?.()).catch(() => {});
+    } catch {
+      // A collection that cannot start now stays unanswered: readers keep the old instance.
+    }
   }
 
   /** The team is no longer visible: end its shapes. Readers still on screen get empty collections. */
@@ -404,11 +441,13 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
    * now, and the device copy it left (rows and resume position) is what the new instance starts from.
    */
   function pause(key: ShapeKey) {
-    const entry = entries.get(keyOf(key));
-    if (entry) entry.state.paused = true;
-    if (!replace(key)) return;
     const k = keyOf(key);
-    generations.set(k, Math.max(0, (generations.get(k) ?? 1) - 1));
+    const entry = entries.get(k);
+    if (entry) entry.state.paused = true;
+    // A refresh that was waiting took a generation of its own: the id the next instance continues under is the current one's.
+    const taken = pending.has(k) ? 2 : 1;
+    if (!replace(key)) return;
+    generations.set(k, Math.max(0, (generations.get(k) ?? taken) - taken));
   }
 
   /**
@@ -496,14 +535,14 @@ export function createRegistry<F extends Factories>(factories: F, hooks: Registr
 
   /** Test helper: end everything. */
   function reset() {
-    for (const entry of entries.values()) dispose(entry.collection);
+    for (const entry of [...entries.values(), ...pending.values()]) dispose(entry.collection);
     entries.clear();
+    pending.clear();
     for (const timer of pauseTimers.values()) clearTimeout(timer);
     pauseTimers.clear();
     holds.clear();
     generations.clear();
     gone.clear();
-    refreshing.clear();
     notify();
   }
 
