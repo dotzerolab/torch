@@ -176,7 +176,9 @@ async function sendUpload(
 }
 
 describe.skipIf(!config)('S3 storage (integration)', () => {
-  const real = config as StorageConfig;
+  // A skipped suite still runs this body to collect its tests, so nothing here may need a real service: without
+  // S3_ENDPOINT the offline config builds a client that is never used, because every test below is skipped.
+  const real: StorageConfig = config ?? unitConfig;
   const storage: FileStorage = createS3Storage(real);
   const made: string[] = [];
   const keyOf = () => {

@@ -18,12 +18,16 @@ jobs:
   gates:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
-    # The full stack of the dev compose on its default ports: Postgres, Electric and Mailpit. These are local
-    # development values (the same as .env.example), not secrets.
+    # The full stack of the dev compose on its default ports: Postgres, Electric, the S3-compatible object storage and
+    # Mailpit. These are local development values (the same as .env.example), not secrets.
     env:
       DATABASE_URL: postgres://torch:torch@localhost:5432/torch
       ELECTRIC_URL: http://localhost:3010
       ELECTRIC_SECRET: dev-electric-secret
+      S3_ENDPOINT: http://localhost:9000
+      S3_BUCKET: attachments-dev
+      S3_ACCESS_KEY_ID: dev-access-key
+      S3_SECRET_ACCESS_KEY: dev-secret-key
       SMTP_URL: smtp://localhost:1025
       MAILPIT_API_URL: http://localhost:8025
     steps:
@@ -42,10 +46,15 @@ jobs:
         run: pnpm lint
       - name: typecheck
         run: pnpm typecheck
-      # Postgres with wal_level=logical, the Electric sync service and the Mailpit mail catcher, so the database,
-      # sync and SMTP integration tests run instead of being skipped. Object storage is not used yet.
+      # Postgres with wal_level=logical, the Electric sync service, the S3-compatible object storage (RustFS, the image
+      # the dev compose pins) and the Mailpit mail catcher, so the database, sync, storage and SMTP integration tests
+      # run instead of being skipped. The storage tests create their bucket on first use; the end-to-end global setup
+      # creates the bucket of the e2e stacks.
       - name: start the dev services
-        run: docker compose -f docker-compose.dev.yml up -d --wait postgres electric mail
+        run: docker compose -f docker-compose.dev.yml up -d --wait postgres electric s3 mail
+      # The storage image has no health check, so --wait returns as soon as the container runs: wait for its API.
+      - name: wait for the object storage
+        run: curl --silent --show-error --fail --retry 30 --retry-delay 2 --retry-connrefused --retry-all-errors http://localhost:9000/health
       - name: apply the database migrations
         run: pnpm --filter @torch/server db:migrate
       - name: unit and integration tests
@@ -64,4 +73,4 @@ jobs:
         run: pnpm e2e
       - name: service logs (on failure)
         if: failure()
-        run: docker compose -f docker-compose.dev.yml logs --no-color --tail=200 postgres electric mail
+        run: docker compose -f docker-compose.dev.yml logs --no-color --tail=200 postgres electric s3 mail
