@@ -18,7 +18,8 @@
     "./mutations/workflow": "./src/mutations/workflow.ts",
     "./mutations/comment": "./src/mutations/comment.ts",
     "./mutations/attachment": "./src/mutations/attachment.ts",
-    "./mutations/document": "./src/mutations/document.ts"
+    "./mutations/document": "./src/mutations/document.ts",
+    "./views": "./src/views.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p ."
