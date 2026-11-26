@@ -73,6 +73,22 @@ const harness = (params: Record<string, string>) =>
 const issueView = (ids: Ids) => harness({ view: 'issue', team: ids.engTeam, issue: ids.engIssue });
 const unique = () => crypto.randomUUID().slice(0, 8);
 
+// What the other person's page waits for after a change. It is not instant by design: the server bumps the issue, the
+// live issues shape says so, and the snapshot is read again after a gap of up to 3 s (MIN_GAP_MS), on top of the moment
+// Electric needs to pick the write up from the WAL, which is seconds on a loaded CI runner.
+const PROPAGATION = { timeout: 20_000 };
+
+/** The thread of the page that holds `marker`: the text of a comment the test wrote, unique to this run. */
+const threadWith = (page: Page, marker: string) =>
+  page.locator('[data-testid^="thread-"]').filter({ hasText: marker });
+
+/** The comments of the issue are on screen (not the loading skeleton) and the person can write. */
+async function commentsReady(page: Page) {
+  await expect(page.getByTestId('comment-thread')).toBeVisible();
+  await expect(page.getByText(/Loading comments/)).toBeHidden();
+  await expect(page.getByRole('textbox', { name: 'Write a comment' })).toBeEnabled();
+}
+
 async function send(page: Page, label: string, text: string) {
   await page.getByRole('textbox', { name: label }).fill(text);
   await page.keyboard.press('Control+Enter');
@@ -90,8 +106,8 @@ test.describe
       bruno = await person(browser, baseURL, 'admin');
       await alice.page.goto(issueView(ids));
       await bruno.page.goto(issueView(ids));
-      await expect(alice.page.getByTestId('comment-thread')).toBeVisible();
-      await expect(bruno.page.getByTestId('comment-thread')).toBeVisible();
+      await commentsReady(alice.page);
+      await commentsReady(bruno.page);
     });
     test.afterAll(async () => {
       await alice?.context.close();
@@ -99,24 +115,24 @@ test.describe
     });
 
     test('a comment reaches the other person, who replies and reacts; the first resolves; an edit keeps its history', async () => {
+      // Every run writes its own text and looks only at its own thread: the issue may already hold the comments (and
+      // resolved threads) of an earlier attempt of this test, since a retry runs on the same database.
       const text = `First comment ${unique()}`;
       await send(alice.page, 'Write a comment', text);
       await expect(alice.page.getByText(text)).toBeVisible();
       // The server bumps the issue, the live issues shape says so, and the other page reads the comments again.
-      await expect(bruno.page.getByText(text)).toBeVisible({ timeout: 8000 });
+      await expect(bruno.page.getByText(text)).toBeVisible(PROPAGATION);
 
       // The author edits: the new text shows, the first one stays in the history.
       const edited = `${text} (edited)`;
-      await alice.page.getByRole('button', { name: 'More actions' }).click();
+      const aliceThread = threadWith(alice.page, text);
+      await aliceThread.getByRole('button', { name: 'More actions' }).click();
       await alice.page.getByRole('menuitem', { name: 'Edit' }).click();
       await alice.page.getByRole('textbox', { name: 'Edit' }).fill(edited);
       await alice.page.getByRole('button', { name: 'Save' }).click();
       await expect(alice.page.getByText(edited)).toBeVisible();
-      await expect(bruno.page.getByText(edited)).toBeVisible({ timeout: 8000 });
-      await alice.page
-        .getByRole('button', { name: /edited/ })
-        .first()
-        .click();
+      await expect(bruno.page.getByText(edited)).toBeVisible(PROPAGATION);
+      await aliceThread.getByRole('button', { name: /edited/ }).click();
       const history = alice.page.getByTestId('edit-history');
       await expect(history.getByText(text, { exact: true })).toBeVisible();
       await expect(history.getByText('Current version')).toBeVisible();
@@ -124,39 +140,42 @@ test.describe
 
       // The other person replies and reacts.
       const reply = `Reply ${unique()}`;
-      const thread = bruno.page.locator('[data-testid^="thread-"]').filter({ hasText: edited });
+      const thread = threadWith(bruno.page, text);
       await thread.getByRole('button', { name: 'Reply' }).click();
       await send(bruno.page, 'Reply to Member Example', reply);
       await expect(bruno.page.getByText(reply)).toBeVisible();
       await thread.getByRole('button', { name: 'Add reaction' }).first().click();
       await bruno.page.getByRole('button', { name: 'React with 🎉' }).click();
-      await expect(alice.page.getByText(reply)).toBeVisible({ timeout: 8000 });
-      await expect(alice.page.getByRole('button', { name: /React with 🎉 \(1\)/ })).toBeVisible({
-        timeout: 8000,
-      });
+      await expect(alice.page.getByText(reply)).toBeVisible(PROPAGATION);
+      await expect(aliceThread.getByRole('button', { name: /React with 🎉 \(1\)/ })).toBeVisible(
+        PROPAGATION,
+      );
 
-      // The first person resolves the thread; both see it collapsed with who resolved it.
-      await alice.page
-        .locator('[data-testid^="thread-"]')
-        .filter({ hasText: edited })
-        .getByRole('button', { name: 'Resolve thread' })
-        .click();
-      await expect(alice.page.getByText('Resolved by Member Example')).toBeVisible();
-      await expect(bruno.page.getByText('Resolved by Member Example')).toBeVisible({
-        timeout: 8000,
-      });
+      // The first person resolves the thread; both see it collapsed with who resolved it. A collapsed thread no longer
+      // shows the text, so it is found by its id from here on.
+      const threadId = await aliceThread.getAttribute('data-testid');
+      if (!threadId) throw new Error('the thread has no test id');
+      await aliceThread.getByRole('button', { name: 'Resolve thread' }).click();
+      await expect(
+        alice.page.getByTestId(threadId).getByText('Resolved by Member Example'),
+      ).toBeVisible();
+      await expect(
+        bruno.page.getByTestId(threadId).getByText('Resolved by Member Example'),
+      ).toBeVisible(PROPAGATION);
     });
 
     test('a PNG goes to the storage and the other person sees it and downloads it; an html file is refused', async () => {
+      // A name of its own: a retry of this test finds the file of the attempt before it on the same issue.
+      const fileName = `pixel-${unique()}.png`;
       await alice.page.getByTestId('file-input').setInputFiles({
-        name: 'pixel.png',
+        name: fileName,
         mimeType: 'image/png',
         buffer: PIXEL,
       });
       const row = (page: Page) =>
-        page.locator('li[data-testid^="attachment-"]').filter({ hasText: 'pixel.png' });
+        page.locator('li[data-testid^="attachment-"]').filter({ hasText: fileName });
       await expect(row(alice.page)).toBeVisible({ timeout: 15_000 });
-      await expect(row(bruno.page)).toBeVisible({ timeout: 8000 });
+      await expect(row(bruno.page)).toBeVisible(PROPAGATION);
 
       // The thumbnail and the download are the server's own address; it redirects to a short-lived signed one.
       const id = ((await row(bruno.page).getAttribute('data-testid')) ?? '').replace(
@@ -169,7 +188,7 @@ test.describe
       expect(download.ok()).toBe(true);
       expect(download.headers()['content-type']).toContain('image/png');
       expect((await download.body()).equals(PIXEL)).toBe(true);
-      const thumb = row(bruno.page).getByRole('img', { name: 'pixel.png' });
+      const thumb = row(bruno.page).getByRole('img', { name: fileName });
       await expect
         .poll(() => thumb.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth))
         .toBe(1);
@@ -237,26 +256,30 @@ test.describe
       await expect(alice.page.getByText('Saved')).toBeVisible();
 
       // The titles are a live shape: the other person's list shows it without a reload; opening it reads the body.
-      await expect(bruno.page.getByText(title)).toBeVisible({ timeout: 8000 });
+      await expect(bruno.page.getByText(title)).toBeVisible(PROPAGATION);
       await bruno.page.getByText(title).click();
-      await expect(bruno.page.getByRole('textbox', { name: 'Document text' })).toHaveValue(body, {
-        timeout: 8000,
-      });
+      await expect(bruno.page.getByRole('textbox', { name: 'Document text' })).toHaveValue(
+        body,
+        PROPAGATION,
+      );
 
       // The history keeps the first text once the second is saved.
       const second = `${body}\n\nSecond paragraph`;
       await alice.page.getByRole('textbox', { name: 'Document text' }).fill(second);
       await alice.page.keyboard.press('Control+s');
-      await expect(bruno.page.getByRole('textbox', { name: 'Document text' })).toHaveValue(second, {
-        timeout: 8000,
-      });
+      await expect(bruno.page.getByRole('textbox', { name: 'Document text' })).toHaveValue(
+        second,
+        PROPAGATION,
+      );
       await bruno.page.getByRole('button', { name: 'History' }).click();
       await expect(bruno.page.getByTestId('revision-list').getByText(/Body/).first()).toBeVisible();
     });
 
     test('a comment written offline appears after reconnecting, once', async () => {
       await alice.page.goto(issueView(ids));
-      await expect(alice.page.getByTestId('comment-thread')).toBeVisible();
+      // Only go offline once the comments are on screen and the person can write: the thread shows its skeleton while
+      // the shape loads, and a comment written before that has no list to show up in.
+      await commentsReady(alice.page);
       const text = `Offline comment ${unique()}`;
       await alice.context.setOffline(true);
       await send(alice.page, 'Write a comment', text);
