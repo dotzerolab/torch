@@ -1062,8 +1062,13 @@ describe('shapes of comments, attachments and documents', () => {
     }
   });
 
-  it('gives every object its own collection id, and a refresh a new one', async () => {
-    const { factories } = fakeFactories();
+  it('gives every object its own collection id, and a refresh a new one once it has answered', async () => {
+    // A refresh starts the new instance beside the old one; readers move to it when it settles.
+    const settles: Array<() => void> = [];
+    const factories = allKinds((_key: ShapeKey, id: string, context: { settled: () => void }) => {
+      settles.push(context.settled);
+      return { id, cleanup() {} } as Fake;
+    }) satisfies Factories;
     const registry = createRegistry(factories);
     expect(registry.get(issueKey('issueComments')).id).toBe('issueComments-w1-t1-i1');
     expect(registry.get(issueKey('issueComments', 'i2')).id).toBe('issueComments-w1-t1-i2');
@@ -1071,6 +1076,9 @@ describe('shapes of comments, attachments and documents', () => {
     expect(registry.get(docKey).id).toBe('documentContent-w1-t1-d1');
     expect(registry.get(documentsKey).id).toBe('documents-w1-t1');
     registry.refresh(issueKey('issueComments'));
+    await Promise.resolve();
+    expect(registry.get(issueKey('issueComments')).id).toBe('issueComments-w1-t1-i1');
+    settles.at(-1)?.();
     await Promise.resolve();
     expect(registry.get(issueKey('issueComments')).id).toBe('issueComments-w1-t1-i1~2');
     // A live shape is never refreshed: it is always current.
