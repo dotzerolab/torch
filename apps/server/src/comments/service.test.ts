@@ -263,7 +263,9 @@ describe.skipIf(!databaseUrl)('comment service', () => {
         expect(result).toMatchObject({ ok: false, status: 409, code: 'issue_archived' });
       }
       // Reading stays open.
-      expect(got(await listComments(w.db.orm, w.member, w.issue.id)).value).toHaveLength(1);
+      expect(got(await listComments(w.db.orm, w.member, w.issue.id)).value.comments).toHaveLength(
+        1,
+      );
     });
 
     it('empty and oversize body 400', async () => {
@@ -629,7 +631,7 @@ describe.skipIf(!databaseUrl)('comment service', () => {
         await w.db.orm.select().from(commentEdit).where(eq(commentEdit.commentId, root.value.id)),
       ).toHaveLength(0);
       expect((await rowOf(w.db, reply.value.id)).body).toBe('a reply that stays');
-      const listed = got(await listComments(w.db.orm, w.guest, w.issue.id)).value;
+      const listed = got(await listComments(w.db.orm, w.guest, w.issue.id)).value.comments;
       expect(listed.map((row) => [row.id, row.deleted, row.body])).toEqual([
         [root.value.id, true, ''],
         [reply.value.id, false, 'a reply that stays'],
@@ -691,7 +693,7 @@ describe.skipIf(!databaseUrl)('comment service', () => {
       );
       got(await deleteComment(w.db.orm, w.guest, second.value.id));
 
-      const listed = got(await listComments(w.db.orm, w.owner, w.issue.id)).value;
+      const listed = got(await listComments(w.db.orm, w.owner, w.issue.id)).value.comments;
 
       expect(listed.map((row) => row.id)).toEqual([
         first.value.id,
@@ -700,6 +702,139 @@ describe.skipIf(!databaseUrl)('comment service', () => {
       ]);
       expect(listed[1]).toMatchObject({ deleted: true, body: '' });
       expect(listed[2]).toMatchObject({ parentId: first.value.id, deleted: false });
+    });
+
+    it('history cap keeps the newest 50', async () => {
+      const w = await world('CAP');
+      const created = got(await createComment(w.db.orm, w.member, w.issue.id, { body: 'v0' }));
+      const id = created.value.id;
+
+      for (let i = 1; i <= 55; i++) {
+        got(await editComment(w.db.orm, w.member, id, { body: `v${i}` }));
+      }
+
+      // Edit i stores the text it replaced (v(i-1)): the newest 50 of 55 are v5 to v54, oldest first.
+      const history = got(await listEdits(w.db.orm, w.member, id)).value;
+      expect(history).toHaveLength(50);
+      expect(history[0]?.body).toBe('v5');
+      expect(history[49]?.body).toBe('v54');
+      expect(
+        await w.db.orm.select().from(commentEdit).where(eq(commentEdit.commentId, id)),
+      ).toHaveLength(50);
+    });
+
+    it('the history read is capped at 50 even when more rows are stored', async () => {
+      const w = await world('HRC');
+      const created = got(await createComment(w.db.orm, w.member, w.issue.id, { body: 'now' }));
+      const id = created.value.id;
+      const base = Date.now() - 100_000;
+      await w.db.orm.insert(commentEdit).values(
+        Array.from({ length: 70 }, (_, i) => ({
+          workspaceId: w.f.workspaceId,
+          teamId: w.t.team.id,
+          issueId: w.issue.id,
+          commentId: id,
+          body: `old ${i}`,
+          editedBy: w.member.memberId,
+          createdAt: new Date(base + i * 1000),
+        })),
+      );
+
+      const history = got(await listEdits(w.db.orm, w.owner, id)).value;
+
+      expect(history).toHaveLength(50);
+      expect(history[0]?.body).toBe('old 20');
+      expect(history[49]?.body).toBe('old 69');
+    });
+
+    it('the cap is per comment: another comment keeps its own history', async () => {
+      const w = await world('CAQ');
+      const a = got(await createComment(w.db.orm, w.member, w.issue.id, { body: 'a0' }));
+      const b = got(await createComment(w.db.orm, w.member, w.issue.id, { body: 'b0' }));
+      got(await editComment(w.db.orm, w.member, b.value.id, { body: 'b1' }));
+
+      for (let i = 1; i <= 52; i++) {
+        got(await editComment(w.db.orm, w.member, a.value.id, { body: `a${i}` }));
+      }
+
+      expect(got(await listEdits(w.db.orm, w.member, a.value.id)).value).toHaveLength(50);
+      expect(
+        got(await listEdits(w.db.orm, w.member, b.value.id)).value.map((edit) => edit.body),
+      ).toEqual(['b0']);
+    });
+
+    it('the list pages with limit and cursor, in order, and the last page has no cursor', async () => {
+      const w = await world('PGE');
+      const ids: string[] = [];
+      for (let i = 0; i < 7; i++) {
+        const made = got(await createComment(w.db.orm, w.member, w.issue.id, { body: `c${i}` }));
+        ids.push(made.value.id);
+      }
+
+      const seen: string[] = [];
+      const sizes: number[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < 5; page++) {
+        const result = got(
+          await listComments(w.db.orm, w.guest, w.issue.id, { limit: 3, cursor }),
+        ).value;
+        seen.push(...result.comments.map((row) => row.id));
+        sizes.push(result.comments.length);
+        if (!result.nextCursor) break;
+        cursor = result.nextCursor;
+      }
+
+      expect(seen).toEqual(ids);
+      expect(sizes).toEqual([3, 3, 1]);
+    });
+
+    it('without a limit the list holds the first 50, with a cursor for the rest', async () => {
+      const w = await world('PG5');
+      const base = Date.now() - 200_000;
+      await w.db.orm.insert(comment).values(
+        Array.from({ length: 60 }, (_, i) => ({
+          workspaceId: w.f.workspaceId,
+          teamId: w.t.team.id,
+          issueId: w.issue.id,
+          authorId: w.member.memberId,
+          body: `bulk ${i}`,
+          createdAt: new Date(base + i * 1000),
+        })),
+      );
+
+      const first = got(await listComments(w.db.orm, w.member, w.issue.id)).value;
+      const second = got(
+        await listComments(w.db.orm, w.member, w.issue.id, { cursor: first.nextCursor ?? '' }),
+      ).value;
+
+      expect(first.comments).toHaveLength(50);
+      expect(first.comments[0]?.body).toBe('bulk 0');
+      expect(first.nextCursor).not.toBeNull();
+      expect(second.comments.map((row) => row.body)).toEqual(
+        Array.from({ length: 10 }, (_, i) => `bulk ${50 + i}`),
+      );
+      expect(second.nextCursor).toBeNull();
+    });
+
+    it('a limit outside 1 to 100 and a cursor that is not ours answer 400', async () => {
+      const w = await world('PGB');
+
+      for (const limit of [0, 101, -1, 1.5, Number.NaN]) {
+        const result = await listComments(w.db.orm, w.member, w.issue.id, { limit });
+        expect(result, String(limit)).toMatchObject({
+          ok: false,
+          status: 400,
+          code: 'invalid_input',
+        });
+      }
+      for (const cursor of [
+        'nope!',
+        'aGVsbG8',
+        Buffer.from('2026-01-01|x').toString('base64url'),
+      ]) {
+        const result = await listComments(w.db.orm, w.member, w.issue.id, { cursor });
+        expect(result, cursor).toMatchObject({ ok: false, status: 400, code: 'invalid_input' });
+      }
     });
 
     it('history needs sight of the issue', async () => {

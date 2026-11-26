@@ -22,7 +22,7 @@ import {
   canEditComment,
   type TeamAccess,
 } from '@torch/shared/permissions';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import type { Orm, Tx } from '../db.ts';
 import { type IssueApiError, IssueRefusal, invalidReference, refusal } from '../issues/errors.ts';
 import type { ChangeResult } from '../issues/join-changes.ts';
@@ -38,6 +38,25 @@ import { recordCommentCreated } from './events.ts';
 export type CommentResult<T> = ChangeResult<T>;
 /** A read: the value, or the refusal. There is no transaction id to wait for. */
 export type ReadResult<T> = { ok: true; value: T } | Failure;
+
+/** Earlier versions kept per comment: the newest ones; an edit that pushes the count over it drops the oldest. */
+export const MAX_EDITS = 50;
+/** A page of the comment list: this many without `limit`, at most `MAX_LIST_LIMIT`. */
+export const DEFAULT_LIST_LIMIT = 50;
+export const MAX_LIST_LIMIT = 100;
+
+// A cursor is the creation time of the last comment seen, with microseconds (a JavaScript Date keeps milliseconds
+// only), and its id. Opaque to callers.
+const STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+const encodeCursor = (stamp: string, id: string) =>
+  Buffer.from(`${stamp}|${id}`, 'utf8').toString('base64url');
+
+function decodeCursor(cursor: string): { stamp: string; id: string } | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(cursor)) return null;
+  const [stamp, id, extra] = Buffer.from(cursor, 'base64url').toString('utf8').split('|');
+  if (extra !== undefined || !stamp || !id || !STAMP.test(stamp) || !isUuid(id)) return null;
+  return { stamp, id };
+}
 export type CreateCommentResult =
   | { ok: true; txid: number; value: CommentDto; replayed: boolean }
   | Failure;
@@ -286,6 +305,18 @@ export async function editComment(
       .update(comment)
       .set({ body, editedAt: sql`clock_timestamp()` })
       .where(and(eq(comment.workspaceId, row.workspaceId), eq(comment.id, row.id)));
+    // Keep the newest versions only: a person who may comment cannot make the history grow without end.
+    await tx.delete(commentEdit).where(
+      and(
+        eq(commentEdit.workspaceId, row.workspaceId),
+        eq(commentEdit.commentId, row.id),
+        sql`${commentEdit.id} not in (
+          select id from comment_edit
+          where workspace_id = ${row.workspaceId} and comment_id = ${row.id}
+          order by created_at desc, id desc
+          limit ${MAX_EDITS})`,
+      ),
+    );
     return { value: null, changed: true };
   });
 }
@@ -380,23 +411,60 @@ export async function setReaction(
   });
 }
 
-/** Every comment of an issue, oldest first; tombstones keep their place. 404 for an issue the actor cannot see. */
+/**
+ * The comments of an issue, oldest first, one page at a time: `limit` (1 to 100, default 50) and the `nextCursor` of the
+ * previous page, like the other lists. Tombstones keep their place. 404 for an issue the actor cannot see.
+ */
 export async function listComments(
   orm: Orm,
   actor: ClientActor,
   issueId: string,
-): Promise<ReadResult<CommentDto[]>> {
+  options: { limit?: number; cursor?: string } = {},
+): Promise<ReadResult<{ comments: CommentDto[]; nextCursor: string | null }>> {
+  const limit = options.limit ?? DEFAULT_LIST_LIMIT;
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIST_LIMIT) {
+    return refuse('invalid_input', 400, {
+      message: `limit must be an integer from 1 to ${MAX_LIST_LIMIT}.`,
+    });
+  }
+  const cursor = options.cursor === undefined ? undefined : decodeCursor(options.cursor);
+  if (options.cursor !== undefined && !cursor) {
+    return refuse('invalid_input', 400, { message: 'cursor is not valid.' });
+  }
   if (!isUuid(issueId)) return refuse('not_found', 404);
   if (!(await readableIssue(orm, actor, issueId))) return refuse('not_found', 404);
   const rows = await orm
-    .select()
+    .select({
+      row: comment,
+      stamp: sql<string>`to_char(${comment.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+    })
     .from(comment)
-    .where(and(eq(comment.workspaceId, actor.workspaceId), eq(comment.issueId, issueId)))
-    .orderBy(asc(comment.createdAt), asc(comment.id));
-  return { ok: true, value: rows.map(toCommentDto) };
+    .where(
+      and(
+        eq(comment.workspaceId, actor.workspaceId),
+        eq(comment.issueId, issueId),
+        cursor
+          ? sql`(${comment.createdAt}, ${comment.id}) > (${cursor.stamp}::timestamptz, ${cursor.id}::uuid)`
+          : undefined,
+      ),
+    )
+    .orderBy(asc(comment.createdAt), asc(comment.id))
+    .limit(limit + 1);
+  const page = rows.slice(0, limit);
+  const last = page.at(-1);
+  return {
+    ok: true,
+    value: {
+      comments: page.map((entry) => toCommentDto(entry.row)),
+      nextCursor: rows.length > limit && last ? encodeCursor(last.stamp, last.row.id) : null,
+    },
+  };
 }
 
-/** The earlier versions of a comment, oldest first. Needs sight of the issue; a deleted comment has none. */
+/**
+ * The earlier versions of a comment, oldest first: the newest 50 (the history keeps no more). Needs sight of the issue;
+ * a deleted comment has none.
+ */
 export async function listEdits(
   orm: Orm,
   actor: ClientActor,
@@ -410,10 +478,11 @@ export async function listEdits(
     .where(
       and(eq(commentEdit.workspaceId, actor.workspaceId), eq(commentEdit.commentId, commentId)),
     )
-    .orderBy(asc(commentEdit.createdAt), asc(commentEdit.id));
+    .orderBy(desc(commentEdit.createdAt), desc(commentEdit.id))
+    .limit(MAX_EDITS);
   return {
     ok: true,
-    value: rows.map((row) => ({
+    value: rows.reverse().map((row) => ({
       id: row.id,
       body: row.body,
       editedBy: row.editedBy,

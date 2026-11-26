@@ -56,7 +56,8 @@ for a new one each time; do not store it.
 
 ## Reading what is there
 
-- `GET /issues/:issueId/comments` lists every comment of an issue, oldest first. The history of one comment:
+- `GET /issues/:issueId/comments` lists the comments of an issue, oldest first, 50 per page (`limit`, `cursor` and
+  `nextCursor` as in the issue list). The newest 50 earlier versions of one comment:
   `GET /comments/:commentId/history` (anyone who can see the issue reads it).
 - `GET /issues/:issueId/attachments` lists the published files; `GET /teams/:teamId/documents` lists a team's documents
   without their text, and `GET /documents/:documentId` reads one with its text. Earlier versions:
@@ -82,4 +83,6 @@ for a new one each time; do not store it.
 
 The web app reads comments, files and a document's text as snapshots of one opened issue or document, read again when
 the issue's `updated_at` changes (every comment and file write moves it, in the same transaction) and right after the
-person's own write. Document titles are a live shape per team. A synced row never carries a storage key.
+person's own write. Document titles are a live shape per team. A synced row never carries a storage key. When a comment
+is deleted the comments stream of its issue starts over: a client that holds the old stream is answered `409`
+(`must-refetch`) and reads the new snapshot, which holds the tombstone and no text.

@@ -75,8 +75,32 @@ describe.skipIf(!databaseUrl)('comment routes', () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get('cache-control')).toBe('no-store');
-    const json = (await res.json()) as { comments: CommentBody[] };
+    const json = (await res.json()) as { comments: CommentBody[]; nextCursor: string | null };
     expect(json.comments.map((row) => row.id)).toEqual([one.id, two.id]);
+    expect(json.nextCursor).toBeNull();
+  });
+
+  it('GET takes limit and cursor like the other lists; a bad value is 400', async () => {
+    const s = await setup();
+    const one = await add(s, 'one');
+    const two = await add(s, 'two');
+    const three = await add(s, 'three');
+
+    const first = await s.t.get(`${s.list}?limit=2`, { cookie: s.guest });
+    const page = (await first.json()) as { comments: CommentBody[]; nextCursor: string };
+    const second = await s.t.get(`${s.list}?limit=2&cursor=${page.nextCursor}`, {
+      cookie: s.guest,
+    });
+    const rest = (await second.json()) as { comments: CommentBody[]; nextCursor: string | null };
+
+    expect(page.comments.map((row) => row.id)).toEqual([one.id, two.id]);
+    expect(rest.comments.map((row) => row.id)).toEqual([three.id]);
+    expect(rest.nextCursor).toBeNull();
+    for (const query of ['limit=0', 'limit=101', 'limit=abc', 'cursor=nope!']) {
+      const bad = await s.t.get(`${s.list}?${query}`, { cookie: s.guest });
+      expect(bad.status, query).toBe(400);
+      expect(await bad.json()).toMatchObject({ error: 'invalid_input' });
+    }
   });
 
   it('Idempotency-Key: the second call replays the answer and says so', async () => {

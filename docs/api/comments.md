@@ -10,7 +10,8 @@ Everything is checked against the caller's permissions, see [permissions](../per
   resolve, a guest included. An issue the caller cannot see answers 404, never 403.
 - **Threads are one level deep.** A reply points at a top-level comment of the same issue; a reply to a reply is refused
   with 422 `invalid_reference` (`details.field` is `parentId`). Only a top-level comment can be resolved.
-- Only the **author** edits a comment (an owner or admin included: 403). The previous text goes to the history.
+- Only the **author** edits a comment (an owner or admin included: 403). The previous text goes to the history, which
+  keeps the newest 50 versions of each comment.
 - The **author, an owner or an admin** deletes a comment. A deleted comment stays in its thread as a tombstone
   (`deleted: true`, empty text, no reactions, no history): the database keeps no deleted text and no earlier version of
   it. Nobody is sent it after the delete either: the live comment stream of the issue starts a new snapshot at every
@@ -26,13 +27,17 @@ Everything is checked against the caller's permissions, see [permissions](../per
 
 | Call                                                        | What it does                                                                 |
 | ----------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `GET /issues/:issueId/comments`                             | Every comment of the issue, oldest first. Answers `{ comments }`.            |
+| `GET /issues/:issueId/comments`                             | The comments of the issue, oldest first, one page at a time (below). Answers `{ comments, nextCursor }`. |
 | `POST /issues/:issueId/comments`                            | Add `{ body, parentId? }`. Answers 201 `{ comment, txid }`.                  |
 | `PATCH /comments/:commentId`                                | Change the text `{ body }`. Author only. Answers `{ txid }`.                 |
 | `DELETE /comments/:commentId`                               | Delete (tombstone). Answers `{ txid }`.                                      |
 | `POST /comments/:commentId/resolve`, `/unresolve`           | Resolve or reopen a thread. Doing either twice changes nothing. `{ txid }`.  |
 | `PUT`, `DELETE /comments/:commentId/reactions/:emoji`       | Add or remove your reaction; the emoji is URL-encoded. `{ txid }`.           |
-| `GET /comments/:commentId/history`                          | The earlier versions of the text, oldest first. Answers `{ edits }`.         |
+| `GET /comments/:commentId/history`                          | The earlier versions of the text (the newest 50), oldest first. Answers `{ edits }`. |
+
+`GET /issues/:issueId/comments` takes the same paging as [the issue list](issues.md): `limit` (1 to 100, default 50) and
+`cursor` (the `nextCursor` of the previous page; `null` on the last page, and an opaque value you never build). A limit
+or a cursor that is not valid is 400 `invalid_input`.
 
 The reactions are a fixed set of eight: 👍 👎 😄 🎉 😕 ❤️ 🚀 👀. Any other emoji is 400 `invalid_input`.
 

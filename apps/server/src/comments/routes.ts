@@ -2,14 +2,14 @@
 // the actor of that workspace. Refusals are `{ error, message, details? }` (see issues/errors.ts), and no answer is
 // cached: it is one person's data.
 //
-//   GET    /w/:ws/issues/:issueId/comments            -> { comments }
+//   GET    /w/:ws/issues/:issueId/comments            -> { comments, nextCursor } (?limit=1-100, default 50, ?cursor=)
 //   POST   /w/:ws/issues/:issueId/comments            -> 201 { comment, txid } (header Idempotency-Key, 1-128 visible
 //                                                        characters; a replay adds `Idempotent-Replayed: true`)
 //   PATCH  /w/:ws/comments/:commentId                 -> { txid }
 //   DELETE /w/:ws/comments/:commentId                 -> { txid } (the comment stays as a tombstone)
 //   POST   /w/:ws/comments/:commentId/resolve|unresolve -> { txid }
 //   PUT|DELETE /w/:ws/comments/:commentId/reactions/:emoji -> { txid } (the emoji URL-encoded)
-//   GET    /w/:ws/comments/:commentId/history         -> { edits }
+//   GET    /w/:ws/comments/:commentId/history         -> { edits } (the newest 50 versions)
 import { commentCreateInput, commentEditInput } from '@torch/shared/mutations/comment';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
@@ -46,10 +46,12 @@ export function createCommentRoutes(deps: CommentRouteDeps): Hono {
   routes.get(issuePath, async (c) => {
     const actor = await actorOf(c, deps.auth);
     if (actor instanceof Response) return actor;
-    const result = await listComments(deps.orm, actor, c.req.param('issueId'));
-    return result.ok
-      ? Response.json({ comments: result.value }, { headers: NO_STORE })
-      : errorResponse(result);
+    const limit = c.req.query('limit');
+    const result = await listComments(deps.orm, actor, c.req.param('issueId'), {
+      limit: limit === undefined ? undefined : /^\d+$/.test(limit) ? Number(limit) : Number.NaN,
+      cursor: c.req.query('cursor'),
+    });
+    return result.ok ? Response.json(result.value, { headers: NO_STORE }) : errorResponse(result);
   });
 
   routes.post(issuePath, writes, async (c) => {
