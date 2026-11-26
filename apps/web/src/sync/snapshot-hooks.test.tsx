@@ -48,6 +48,12 @@ describe('snapshot hooks', () => {
   it('a change of the live issues of the team refreshes the labels the screen reads, once per burst', () => {
     render(<Screen />);
     expect(refresh).not.toHaveBeenCalled();
+    // The first load of the issues is not news: a change counts once the snapshots are a few seconds old.
+    act(() => issuesChange?.());
+    expect(refresh).not.toHaveBeenCalled();
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
     act(() => issuesChange?.());
     expect(refresh).toHaveBeenCalledExactlyOnceWith(labels);
     // Ten changes inside the gap: one more read after the gap.

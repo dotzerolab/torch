@@ -1,6 +1,7 @@
 import { expect, type Page, test } from '@playwright/test';
 import { seedPerf } from '../../server/src/cli/seed-perf.ts';
 import { createDb } from '../../server/src/db.ts';
+import { issueTitle, issueTitleInput } from './helpers/issues.ts';
 import { openSessionAs } from './helpers/session.ts';
 
 // The sync bar on 10,000 issues (docs/design.md section 14, ADR 0001 sections 2 and 5), measured in real Chromium
@@ -20,7 +21,7 @@ type PerfIds = { workspaceId: string; teamId: string; issues: Record<number, str
 let ids: PerfIds;
 
 // Each run changes a few titles; this puts them back so a re-run starts from the seeded state.
-const EDITED = [3, 5, 7, 9];
+const EDITED = [7, 13, 19];
 
 test.beforeAll(async () => {
   const databaseUrl = process.env.DATABASE_URL;
@@ -64,11 +65,10 @@ async function openPerfPage(browser: import('@playwright/test').Browser, baseURL
   return { context, page: await context.newPage() };
 }
 
-/** The page is interactive when the first issue is on screen and can be typed into. */
+/** The page is interactive when the first issue is on screen. The list is windowed: the rows the specs edit (numbers 7, 13 and 19, all in the first group) are near the top. */
 async function coldStart(page: Page): Promise<number> {
   await page.goto('/');
   await page.getByTestId('issue-title-1').waitFor({ state: 'visible' });
-  await expect(page.getByTestId('issue-title-1')).toBeEditable();
   // `performance.now()` counts from the start of the navigation.
   return page.evaluate(() => performance.now());
 }
@@ -82,8 +82,8 @@ async function remoteChange(page: Page, number: number, title: string): Promise<
       ({ testid, title }) =>
         new Promise<number>((resolve) => {
           const timer = setInterval(() => {
-            const input = document.querySelector<HTMLInputElement>(`[data-testid="${testid}"]`);
-            if (input?.value === title) {
+            const title_ = document.querySelector(`[data-testid="${testid}"]`);
+            if (title_?.textContent === title) {
               clearInterval(timer);
               resolve(Date.now());
             }
@@ -113,7 +113,7 @@ test('@perf first remote edit after cold load < 1 s', async ({ browser, baseURL 
   // A new browser context has no device copy: this is the first visit, with the whole list still being written to it.
   const { context, page } = await openPerfPage(browser, baseURL);
   await coldStart(page);
-  const ms = await remoteChange(page, 5, `First edit ${crypto.randomUUID().slice(0, 8)}`);
+  const ms = await remoteChange(page, 13, `First edit ${crypto.randomUUID().slice(0, 8)}`);
   report('first-remote-edit', ms);
   expect(ms).toBeLessThan(FIRST_REMOTE_EDIT_MS);
   await context.close();
@@ -133,13 +133,15 @@ test('@perf remote change < 1 s and local update < 100 ms on a settled page', as
   expect(remote).toBeLessThan(REMOTE_CHANGE_MS);
 
   const title = `Local ${crypto.randomUUID().slice(0, 8)}`;
-  const field = page.getByTestId('issue-title-9');
+  await issueTitle(page, 19).dblclick();
+  const field = issueTitleInput(page, 19);
+  await expect(field).toBeVisible();
   // From the Enter key to the optimistic row being on screen: the collection holds the new title and a frame was drawn.
   const shown = page.evaluate(
     ({ module, workspaceId, teamId, issueId, title, testid }) =>
       new Promise<number>((resolve, reject) => {
         const input = document.querySelector<HTMLInputElement>(`[data-testid="${testid}"]`);
-        if (!input) return reject(new Error('the row is not on the page'));
+        if (!input) return reject(new Error('the rename field is not on the page'));
         input.addEventListener(
           'keydown',
           async (event) => {
@@ -160,9 +162,9 @@ test('@perf remote change < 1 s and local update < 100 ms on a settled page', as
       module: SHAPES_MODULE,
       workspaceId: ids.workspaceId,
       teamId: ids.teamId,
-      issueId: ids.issues[9],
+      issueId: ids.issues[19],
       title,
-      testid: 'issue-title-9',
+      testid: 'issue-title-input-19',
     },
   );
   await field.fill(title);

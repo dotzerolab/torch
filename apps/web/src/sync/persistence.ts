@@ -406,10 +406,23 @@ export async function deleteTeamRows(workspaceId: string, teamId: string): Promi
   const open = stores.get(workspaceId);
   if (!open) return;
   const { database } = await open;
-  for (const kind of TEAM_KINDS) {
-    await removeCollections(database, `${kind}-${workspaceId}-${teamId}%`);
+  const remove = async () => {
+    for (const kind of TEAM_KINDS) {
+      await removeCollections(database, `${kind}-${workspaceId}-${teamId}%`);
+    }
+    await readStored(workspaceId, database);
+  };
+  await remove();
+  // A copy job that was running when the team went (its instance is cancelled, but a write in flight lands) can put a
+  // collection back after the delete above. Once the jobs of the workspace have ended, delete once more. The first
+  // delete does not wait: the rows of a lost team leave the device at once.
+  const jobs = copyQueues.get(workspaceId);
+  if (jobs) {
+    void jobs
+      .catch(() => {})
+      .then(remove)
+      .catch(() => {});
   }
-  await readStored(workspaceId, database);
 }
 
 /** Deletes the persisted shapes of every team whose id is not in `keep`: the device copy of teams that are gone. */

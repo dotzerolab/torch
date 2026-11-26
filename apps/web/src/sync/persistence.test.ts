@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { bindSession, bindTestSession, deviceScope, resetIdentityForTests } from './identity.ts';
 import {
   deleteTeamRows,
@@ -281,6 +281,37 @@ describe('persistence', () => {
       expect(tables).toContain(`c_${kind}1`);
     }
     expect(tables).toContain('c_workspaceLabels');
+  });
+
+  it('deleteTeamRows deletes again once the copy jobs have ended, for a copy that landed after the first delete', async () => {
+    const { platform } = fakePlatform();
+    const { database } = await openWorkspaceStore(WS_A, platform);
+    await seedTeamStores(database);
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // A copy of a shape of the lost team that was running when the team went: it lands after the first delete.
+    const job = queueDeviceCopy(WS_A, async () => {
+      await gate;
+      await database.execute('CREATE TABLE c_late (id TEXT)');
+      await database.execute('CREATE TABLE t_late (id TEXT)');
+      await database.execute('INSERT INTO collection_registry VALUES (?, ?, ?)', [
+        `labels-${WS_A}-${TEAM_1}~2`,
+        'c_late',
+        't_late',
+      ]);
+    });
+    // The first delete does not wait for the queue: the rows of a lost team leave the device at once.
+    await deleteTeamRows(WS_A, TEAM_1);
+    release();
+    await job;
+    await vi.waitFor(async () => {
+      const left = await database.execute<{ collection_id: string }>(
+        'SELECT collection_id FROM collection_registry',
+      );
+      expect(left.filter((row) => row.collection_id.includes(TEAM_1))).toEqual([]);
+    });
   });
 
   it('deleteTeamRows removes snapshot kinds', async () => {

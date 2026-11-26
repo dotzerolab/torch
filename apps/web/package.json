@@ -24,6 +24,7 @@
     "@tanstack/db": "1.0.0-rc.1.5",
     "@tanstack/electric-db-collection": "1.0.0-rc.1.5",
     "@tanstack/react-db": "1.0.0-rc.1.5",
+    "@tanstack/react-virtual": "^3.14.28",
     "@torch/shared": "workspace:*",
     "lucide-react": "^1.72.0",
     "react": "^19.3.1",

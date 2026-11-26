@@ -1,18 +1,11 @@
 import { type BrowserContext, expect, type Page, test } from '@playwright/test';
 import { persistedRowCount, storageNames } from './helpers/device-store.ts';
+import { renameIssue } from './helpers/issues.ts';
 import { openSessionAs } from './helpers/session.ts';
+import { countLiveShapeRequests } from './helpers/shapes-in-flight.ts';
 
 const workspaceId = () => process.env.E2E_DEMO_WORKSPACE_ID as string;
 const SEEDED_ISSUES = 50;
-
-/** Counts the shape requests a page makes from now on. */
-function countSyncRequests(page: Page): { count: () => number } {
-  let n = 0;
-  page.on('request', (request) => {
-    if (request.url().includes('/api/sync/')) n += 1;
-  });
-  return { count: () => n };
-}
 
 /**
  * The owner of the demo workspace with two tabs of one browser profile. The first tab opens first, so it syncs; the
@@ -26,15 +19,15 @@ async function openTwoTabs(
   await openSessionAs(context, baseURL, 'owner');
   const a = await context.newPage();
   await a.goto('/');
-  await expect(a.getByTestId('issue-title-3')).toHaveValue('ENG issue 3');
+  await expect(a.getByTestId('issue-title-3')).toHaveText('ENG issue 3');
   // Warm: the device holds every issue of the team before the second tab opens.
   await expect
     .poll(() => persistedRowCount(a, workspaceId(), 'issues-'), { timeout: 10_000 })
     .toBeGreaterThanOrEqual(SEEDED_ISSUES);
   const b = await context.newPage();
-  const bRequests = countSyncRequests(b);
+  const bRequests = countLiveShapeRequests(b);
   await b.goto('/');
-  await expect(b.getByTestId('issue-title-3')).toHaveValue('ENG issue 3');
+  await expect(b.getByTestId('issue-title-3')).toHaveText('ENG issue 3');
   return { context, a, b, bRequests };
 }
 
@@ -43,9 +36,7 @@ async function setTitle(page: Page, issue: number, title: string) {
   const answered = page.waitForResponse(
     (response) => response.request().method() === 'PATCH' && response.url().includes('/issues/'),
   );
-  const field = page.getByTestId(`issue-title-${issue}`);
-  await field.fill(title);
-  await field.press('Enter');
+  await renameIssue(page, issue, title);
   await answered;
 }
 
@@ -69,15 +60,13 @@ test('an edit in one tab shows in the other in under a second', async ({ browser
   const { context, a, b } = await openTwoTabs(browser, baseURL);
   try {
     const title = `Shared ${crypto.randomUUID().slice(0, 8)}`;
-    await a.getByTestId('issue-title-8').fill(title);
-    await a.getByTestId('issue-title-8').press('Enter');
-    await expect(b.getByTestId('issue-title-8')).toHaveValue(title, { timeout: 1000 });
+    await renameIssue(a, 8, title);
+    await expect(b.getByTestId('issue-title-8')).toHaveText(title, { timeout: 1000 });
 
     // And the other way round: the follower writes, the first tab shows it.
     const back = `Back ${crypto.randomUUID().slice(0, 8)}`;
-    await b.getByTestId('issue-title-8').fill(back);
-    await b.getByTestId('issue-title-8').press('Enter');
-    await expect(a.getByTestId('issue-title-8')).toHaveValue(back, { timeout: 1000 });
+    await renameIssue(b, 8, back);
+    await expect(a.getByTestId('issue-title-8')).toHaveText(back, { timeout: 1000 });
   } finally {
     // The other specs read this issue's seeded title.
     await setTitle(b, 8, 'ENG issue 8').catch(() => {});
@@ -103,11 +92,10 @@ test('when the leader tab closes the other tab takes over within 3 s and stays l
     await c.goto('/');
     await expect(c.getByTestId('issue-title-7')).toBeVisible();
     const title = `Takeover ${crypto.randomUUID().slice(0, 8)}`;
-    await c.getByTestId('issue-title-7').fill(title);
-    await c.getByTestId('issue-title-7').press('Enter');
-    await expect(b.getByTestId('issue-title-7')).toHaveValue(title, { timeout: 3000 });
+    await renameIssue(c, 7, title);
+    await expect(b.getByTestId('issue-title-7')).toHaveText(title, { timeout: 3000 });
     await setTitle(c, 7, 'ENG issue 7');
-    await expect(b.getByTestId('issue-title-7')).toHaveValue('ENG issue 7', { timeout: 3000 });
+    await expect(b.getByTestId('issue-title-7')).toHaveText('ENG issue 7', { timeout: 3000 });
   } finally {
     await closeContext(context);
   }

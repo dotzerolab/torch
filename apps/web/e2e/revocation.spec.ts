@@ -84,13 +84,13 @@ test('revoked rows leave < 2 s: gone from the page and from the store', async ({
   const member = await open(browser, baseURL, 'member');
   await member.page.goto('/');
   await member.page.getByTestId('team-OPS').click();
-  await expect(member.page.getByTestId('issue-title-3')).toHaveValue('OPS issue 3');
+  await expect(member.page.getByTestId('issue-title-3')).toHaveText('OPS issue 3');
   await warm(member.page, opsPrefix(), SEEDED_ISSUES);
 
   const startedAt = Date.now();
   await changeTeam(owner.page, 'remove', opsTeamId(), await memberId('member'));
   await expect(member.page.getByTestId('team-OPS')).toHaveCount(0, { timeout: REVOCATION_MS });
-  await expect(member.page.getByTestId('issue-title-3')).toHaveValue('ENG issue 3', {
+  await expect(member.page.getByTestId('issue-title-3')).toHaveText('ENG issue 3', {
     timeout: REVOCATION_MS,
   });
   await expect
@@ -117,7 +117,7 @@ test('join reaches open page < 2 s', async ({ browser, baseURL }) => {
   await changeTeam(owner.page, 'add', opsTeamId(), await memberId('member'));
   await expect(member.page.getByTestId('team-OPS')).toBeVisible({ timeout: REVOCATION_MS });
   await member.page.getByTestId('team-OPS').click();
-  await expect(member.page.getByTestId('issue-title-3')).toHaveValue('OPS issue 3', {
+  await expect(member.page.getByTestId('issue-title-3')).toHaveText('OPS issue 3', {
     timeout: REVOCATION_MS,
   });
   await member.context.close();
@@ -134,18 +134,18 @@ test('revoked rows leave the follower tab too: < 2 s, from its memory', async ({
   const member = await open(browser, baseURL, 'member');
   await member.page.goto('/');
   await member.page.getByTestId('team-OPS').click();
-  await expect(member.page.getByTestId('issue-title-3')).toHaveValue('OPS issue 3');
+  await expect(member.page.getByTestId('issue-title-3')).toHaveText('OPS issue 3');
   const follower = await member.context.newPage();
   await follower.goto('/');
   await follower.getByTestId('team-OPS').click();
-  await expect(follower.getByTestId('issue-title-3')).toHaveValue('OPS issue 3');
+  await expect(follower.getByTestId('issue-title-3')).toHaveText('OPS issue 3');
   await expect
     .poll(() => liveTeamRowCount(follower, workspaceId(), opsTeamId()), { timeout: 5000 })
     .toBeGreaterThanOrEqual(SEEDED_ISSUES);
 
   await changeTeam(owner.page, 'remove', opsTeamId(), await memberId('member'));
   await expect(follower.getByTestId('team-OPS')).toHaveCount(0, { timeout: REVOCATION_MS });
-  await expect(follower.getByTestId('issue-title-3')).toHaveValue('ENG issue 3', {
+  await expect(follower.getByTestId('issue-title-3')).toHaveText('ENG issue 3', {
     timeout: REVOCATION_MS,
   });
   await expect
@@ -174,7 +174,7 @@ test('revoked workflow states and team members leave the store too, not only the
   await warm(admin.page, membersPrefix, 3);
   await admin.page.goto('/');
   await admin.page.getByTestId('team-OPS').click();
-  await expect(admin.page.getByTestId('issue-title-3')).toHaveValue('OPS issue 3');
+  await expect(admin.page.getByTestId('issue-title-3')).toHaveText('OPS issue 3');
   await warm(admin.page, opsPrefix(), SEEDED_ISSUES);
   await openTeamShapeInPage(admin.page, workspaceId(), opsTeamId(), 'workflowStates');
   await warm(admin.page, statesPrefix, 1);
@@ -187,9 +187,10 @@ test('revoked workflow states and team members leave the store too, not only the
       .poll(() => persistedRowCount(admin.page, workspaceId(), prefix), { timeout: REVOCATION_MS })
       .toBe(0);
   }
-  expect(await persistedCollections(admin.page, workspaceId())).not.toContainEqual(
-    expect.stringContaining(opsTeamId()),
-  );
+  // A device copy that was being written when the team went is deleted once its job has ended.
+  await expect
+    .poll(() => persistedCollections(admin.page, workspaceId()), { timeout: REVOCATION_MS })
+    .not.toContainEqual(expect.stringContaining(opsTeamId()));
   await admin.context.close();
   await owner.context.close();
 });
@@ -204,7 +205,7 @@ test('a team lost while the app was closed: its rows never show once the network
   const member = await open(browser, baseURL, 'member');
   await member.page.goto('/');
   await member.page.getByTestId('team-OPS').click();
-  await expect(member.page.getByTestId('issue-title-3')).toHaveValue('OPS issue 3');
+  await expect(member.page.getByTestId('issue-title-3')).toHaveText('OPS issue 3');
   await warm(member.page, opsPrefix(), SEEDED_ISSUES);
   await member.page.close();
 
@@ -288,7 +289,7 @@ test('a deleted issue leaves the device copy of a cold shape, resuming from the 
     );
     const owner = await open(browser, baseURL, 'owner');
     await owner.page.goto('/');
-    await expect(owner.page.getByTestId('issue-title-3')).toHaveValue('ENG issue 3');
+    await expect(owner.page.getByTestId('issue-title-3')).toHaveText('ENG issue 3');
     // The cold copy holds the seeded issues and the temporary one.
     await warm(owner.page, prefix, SEEDED_ISSUES + 1);
 

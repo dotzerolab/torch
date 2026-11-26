@@ -30,7 +30,10 @@ export type TeamData = {
   labelsById: ReadonlyMap<string, SyncedLabel>;
   /** Every member, deactivated ones too: an assignee who was deactivated keeps their name. */
   membersById: ReadonlyMap<string, SyncedMember>;
+  /** Everything is loaded. */
   ready: boolean;
+  /** The states are loaded: enough to group a list (labels and names fill in when they arrive). */
+  statesReady: boolean;
 };
 
 const EMPTY: never[] = [];
@@ -70,8 +73,9 @@ export function useTeamData(workspaceId: string, teamId: string): TeamData {
       labelsById: new Map(allLabels.map((label) => [label.id, label])),
       membersById: new Map(memberRows.map((member) => [member.id, member])),
       ready,
+      statesReady: states.isReady,
     };
-  }, [stateRows, labelRows, workspaceLabelRows, memberRows, ready]);
+  }, [stateRows, labelRows, workspaceLabelRows, memberRows, ready, states.isReady]);
 }
 
 /** The writes waiting on this device (every tab's), read again whenever the outbox says its queue changed. */
@@ -132,5 +136,6 @@ export function useIssueRows(
       ]),
     [base, writes, workspaceId],
   );
-  return { rows, ready: issues.isReady && links.isReady };
+  // The rows are there when the issues are; their labels may arrive a moment later and then appear on them.
+  return { rows, ready: issues.isReady };
 }

@@ -151,3 +151,142 @@
 .priority-icon--urgent {
   color: var(--danger);
 }
+
+/* the list: sections, rows and their cells */
+.issues {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.issue-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  position: relative;
+}
+.issue-list__space {
+  position: relative;
+  width: 100%;
+}
+.issue-list__slot,
+.issue-section {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+.issue-section {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-4);
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--border);
+}
+.issue-section__title {
+  margin: 0;
+  font-size: inherit;
+  font-weight: 600;
+}
+.issue-section__count {
+  margin-left: var(--space-2);
+  color: var(--fg-subtle);
+  font: var(--count-font);
+}
+.issue-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 100%;
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--border);
+  outline-offset: -2px;
+}
+.issue-row:hover {
+  background: var(--bg-hover);
+}
+.issue-row[data-selected="true"] {
+  background: var(--bg-selected);
+}
+.issue-row[data-pending="true"] {
+  opacity: 0.7;
+}
+.issue-row__id {
+  min-width: 56px;
+  color: var(--fg-subtle);
+  font: var(--id-font);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.issue-row__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.issue-row__title--editing {
+  height: 28px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+.issue-row__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg-subtle);
+  font: var(--count-font);
+}
+.issue-row__updated {
+  white-space: nowrap;
+}
+.issue-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 24px;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.issue-cell:hover {
+  background: var(--bg-hover);
+}
+.issue-cell--overdue {
+  color: var(--danger);
+}
+.issue-cell--labels {
+  gap: var(--space-1);
+}
+.label-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.issue-cell__none {
+  width: 16px;
+  height: 16px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 50%;
+}
+@media (max-width: 767px) {
+  .issue-row__meta .issue-cell--estimate,
+  .issue-row__meta .issue-cell--due,
+  .issue-row__updated {
+    display: none;
+  }
+}

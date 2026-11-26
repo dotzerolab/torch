@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ShapeKey } from './registry.ts';
-import { createSnapshotWatch, MOUNT_STALE_MS } from './snapshot-watch.ts';
+import { createSnapshotWatch, MIN_REFRESH_GAP_MS, MOUNT_STALE_MS } from './snapshot-watch.ts';
 
 const ws = 'w1';
 const labels: ShapeKey = { kind: 'labels', workspaceId: ws, teamId: 't1' };
@@ -112,11 +112,12 @@ describe('snapshot refresh triggers', () => {
   });
 
   it("a change of the team's live issues asks for the team's snapshots within the gap", () => {
-    const { watch, request } = setup();
+    const { watch, request, advance } = setup();
     watch.mount(labels);
     watch.mount(states);
     watch.mount(otherTeam);
     watch.mount(workspaceLabels);
+    advance(MIN_REFRESH_GAP_MS);
     watch.issuesChanged(ws, 't1');
     expect(request.mock.calls).toEqual([
       [labels, { now: false }],
@@ -124,10 +125,22 @@ describe('snapshot refresh triggers', () => {
     ]);
   });
 
+  it('a change of the issues right after a snapshot was read does not read it again (the first load of the issues is not news)', () => {
+    const { watch, request, advance } = setup();
+    watch.mount(labels);
+    advance(MIN_REFRESH_GAP_MS - 1);
+    watch.issuesChanged(ws, 't1');
+    expect(request).not.toHaveBeenCalled();
+    advance(1);
+    watch.issuesChanged(ws, 't1');
+    expect(request).toHaveBeenCalledExactlyOnceWith(labels, { now: false });
+  });
+
   it('a snapshot of one issue is refreshed with its team', () => {
-    const { watch, request } = setup();
+    const { watch, request, advance } = setup();
     const detail: ShapeKey = { kind: 'issueDetail', workspaceId: ws, teamId: 't1', issueId: 'i1' };
     watch.mount(detail);
+    advance(MIN_REFRESH_GAP_MS);
     watch.issuesChanged(ws, 't1');
     expect(request).toHaveBeenCalledExactlyOnceWith(detail, { now: false });
   });

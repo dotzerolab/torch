@@ -5,6 +5,9 @@
 // The refresher (`snapshots.ts`) turns bursts of these into at most one read per shape every few seconds.
 import { isTeamKey, type ShapeKey, type ShapeKind, shapeId } from './registry.ts';
 
+/** A change of the issues asks for a snapshot only when it was read this long ago or longer: a fresh read is current. */
+export const MIN_REFRESH_GAP_MS = 3000;
+
 /** A screen opening a snapshot that was read this long ago or longer reads it again. */
 export const MOUNT_STALE_MS = 60_000;
 
@@ -36,6 +39,8 @@ export function createSnapshotWatch({
   const held = new Map<string, { key: ShapeKey; readers: number }>();
   // When each snapshot was last read (or asked to be), by shape id.
   const readAt = new Map<string, number>();
+  // When a screen first held each snapshot: what the issues do just after that is their first load.
+  const opened = new Map<string, number>();
 
   const each = (visit: (key: ShapeKey) => void) => {
     for (const { key } of [...held.values()]) visit(key);
@@ -59,6 +64,7 @@ export function createSnapshotWatch({
       const last = readAt.get(id);
       if (last === undefined) {
         readAt.set(id, now());
+        opened.set(id, now());
       } else if (now() - last >= MOUNT_STALE_MS) {
         readAt.set(id, now());
         request(key, { now: true });
@@ -90,6 +96,8 @@ export function createSnapshotWatch({
     issuesChanged(workspaceId: string, teamId: string) {
       each((key) => {
         if (key.workspaceId !== workspaceId || !isTeamKey(key) || key.teamId !== teamId) return;
+        // The first load of the issues is a stream of changes: the snapshots were read at the same time.
+        if (now() - (opened.get(shapeId(key)) ?? 0) < MIN_REFRESH_GAP_MS) return;
         readAt.set(shapeId(key), now());
         request(key, { now: false });
       });
@@ -100,6 +108,7 @@ export function createSnapshotWatch({
       target.removeEventListener('focus', onFocus);
       held.clear();
       readAt.clear();
+      opened.clear();
     },
   };
 }

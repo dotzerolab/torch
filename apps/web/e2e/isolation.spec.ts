@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { issueCount, issueTitle } from './helpers/issues.ts';
 import { signInAs } from './helpers/sign-in.ts';
 
 const workspaceId = () => process.env.E2E_DEMO_WORKSPACE_ID as string;
@@ -9,8 +10,8 @@ test('guest sees ENG only', async ({ page }) => {
 
   await expect(page.getByTestId('team-ENG')).toBeVisible();
   await expect(page.getByTestId('team-OPS')).toHaveCount(0);
-  await expect(page.getByTestId('issue-title-1')).toHaveValue('ENG issue 1');
-  await expect(page.locator('[data-testid^="issue-title-"]')).toHaveCount(50);
+  await expect(issueTitle(page, 1)).toHaveText('ENG issue 1');
+  await expect.poll(() => issueCount(page)).toBe(50);
 });
 
 test('guest request to the OPS issues shape answers 404', async ({ page }) => {
