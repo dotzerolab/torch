@@ -9,7 +9,7 @@ export function useIssue(
   workspaceId: string,
   team: Pick<SyncedTeam, 'id' | 'key'>,
   number: number,
-): { row: IssueRow | null; ready: boolean; gone: boolean } {
+): { row: IssueRow | null; rows: IssueRow[]; ready: boolean; gone: boolean } {
   const { rows, ready } = useIssueRows(workspaceId, team);
   const row = useMemo(
     () => rows.find((candidate) => candidate.issue.number === number) ?? null,
@@ -17,5 +17,5 @@ export function useIssue(
   );
   const seen = useRef(false);
   if (row) seen.current = true;
-  return { row, ready, gone: seen.current && ready && row === null };
+  return { row, rows, ready, gone: seen.current && ready && row === null };
 }

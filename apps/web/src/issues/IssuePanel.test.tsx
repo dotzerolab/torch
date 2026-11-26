@@ -16,13 +16,24 @@ import { makeData, makeRow } from './testing.ts';
 const hub = vi.hoisted(() => ({
   rows: [] as unknown[],
   ready: true,
-  detail: { description: 'Hello', subscriberIds: [] as string[], ready: true },
+  detail: {
+    description: 'Hello',
+    subscriberIds: [] as string[],
+    relations: [] as unknown[],
+    links: [] as unknown[],
+    activity: [] as unknown[],
+    ready: true,
+  },
 }));
 const mocks = vi.hoisted(() => ({
   updateIssue: vi.fn(),
   saveDescription: vi.fn(),
   setSubscribed: vi.fn(),
   setArchived: vi.fn(),
+  addRelation: vi.fn(),
+  removeRelation: vi.fn(),
+  addLink: vi.fn(),
+  removeLink: vi.fn(),
 }));
 
 vi.mock('./data.ts', async () => {
@@ -57,7 +68,14 @@ function wrap(children: React.ReactNode) {
 beforeEach(() => {
   hub.rows = [makeRow(3), makeRow(4)];
   hub.ready = true;
-  hub.detail = { description: 'Hello', subscriberIds: [], ready: true };
+  hub.detail = {
+    description: 'Hello',
+    subscriberIds: [],
+    relations: [],
+    links: [],
+    activity: [],
+    ready: true,
+  };
   for (const mock of Object.values(mocks)) mock.mockReset().mockResolvedValue(undefined);
   window.history.replaceState({}, '', '/');
   void makeData;

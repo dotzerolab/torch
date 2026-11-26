@@ -40,7 +40,7 @@ const property = (page: Page, name: string) =>
 async function choose(page: Page, name: string, option: RegExp) {
   await property(page, name).click();
   const answered = patched(page);
-  await page.getByRole('option', { name: option }).click();
+  await page.locator('.popover').getByRole('option', { name: option }).click();
   await answered;
 }
 
@@ -68,7 +68,10 @@ test('a change made in the peek is kept after a reload and shows on the issue pa
     // Labels: a multi-select that stays open; the label write is a PATCH too.
     await property(page, 'Labels').click();
     answered = patched(page);
-    await page.getByRole('option', { name: /Frontend/ }).click();
+    await page
+      .locator('.popover')
+      .getByRole('option', { name: /Frontend/ })
+      .click();
     await answered;
     await page.keyboard.press('Escape');
 
@@ -97,7 +100,10 @@ test('a change made in the peek is kept after a reload and shows on the issue pa
     if (await property(page, 'Labels').getByText('Frontend').count()) {
       await property(page, 'Labels').click();
       answered = patched(page);
-      await page.getByRole('option', { name: /Frontend/ }).click();
+      await page
+        .locator('.popover')
+        .getByRole('option', { name: /Frontend/ })
+        .click();
       await answered;
       await page.keyboard.press('Escape');
     }
@@ -153,4 +159,72 @@ test('Escape closes the peek, the page for an unknown issue says so, and the des
   await page.keyboard.press('Escape');
   await expect(page.getByTestId('issue-peek')).toHaveCount(0);
   expect(new URL(page.url()).searchParams.has('peek')).toBe(false);
+});
+
+test('a relation shows on both issues', async ({ browser, baseURL }) => {
+  test.setTimeout(90_000);
+  const page = await ownerPage(browser, baseURL);
+  await page.goto('/teams/ENG?peek=ENG-2');
+  await expect(panel(page).getByRole('textbox', { name: /Title of ENG-2/ })).toBeVisible();
+  const relations = panel(page).getByRole('region', { name: 'Relations' });
+  await relations.getByRole('searchbox', { name: 'Find an issue' }).fill('ENG-3');
+  const added = page.waitForResponse(
+    (response) => response.request().method() === 'POST' && response.url().endsWith('/relations'),
+  );
+  await relations.getByRole('button', { name: 'ENG-3 ENG issue 3' }).click();
+  await added;
+  try {
+    await expect(relations.getByTestId('relation-blocks')).toContainText('ENG-3');
+    await page.goto('/issues/ENG-3');
+    await expect(
+      panel(page).getByRole('region', { name: 'Relations' }).getByTestId('relation-blocked_by'),
+    ).toContainText('ENG-2');
+  } finally {
+    await page.goto('/teams/ENG?peek=ENG-2');
+    const again = panel(page).getByRole('region', { name: 'Relations' });
+    const removed = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'DELETE' && response.url().includes('/relations/'),
+    );
+    await again
+      .getByRole('button', { name: /Remove relation/ })
+      .first()
+      .click();
+    await removed;
+    await expect(again.getByTestId('relation-blocks')).toHaveCount(0);
+  }
+});
+
+test('a relation to an issue of a team the guest cannot see names no issue', async ({
+  browser,
+  baseURL,
+}) => {
+  test.setTimeout(90_000);
+  const db = createDb(process.env.DATABASE_URL as string);
+  const ids = `select e.workspace_id, e.team_id, e.id as eng, o.id as ops, o.team_id as ops_team
+       from issue e join team te on te.id = e.team_id and te.key = 'ENG' and e.number = 3
+       join workspace w on w.id = e.workspace_id and w.slug = 'demo'
+       join issue o on o.workspace_id = e.workspace_id and o.number = 1
+       join team tp on tp.id = o.team_id and tp.key = 'OPS'`;
+  try {
+    await db.pool.query(
+      `insert into issue_relation (workspace_id, team_id, issue_id, related_team_id, related_issue_id, type, created_by)
+       select i.workspace_id, i.team_id, i.eng, i.ops_team, i.ops, 'blocks',
+              (select id from member where workspace_id = i.workspace_id and email = 'owner@example.test')
+         from (${ids}) i`,
+    );
+    const context = await browser.newContext({ baseURL });
+    await openSessionAs(context, baseURL, 'guest');
+    const page = await context.newPage();
+    await page.goto('/issues/ENG-3');
+    const region = panel(page).getByRole('region', { name: 'Relations' });
+    await expect(region.getByTestId('relation-hidden')).toHaveText('Issue you cannot see');
+    await expect(panel(page)).not.toContainText('OPS');
+  } finally {
+    await db.pool.query(
+      `delete from issue_relation r using (${ids}) i
+        where r.issue_id = i.eng and r.related_issue_id = i.ops`,
+    );
+    await db.close();
+  }
 });

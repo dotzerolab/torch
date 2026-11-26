@@ -11,10 +11,25 @@ import { useShell } from '../shell/ShellContext.ts';
 import type { SyncedTeam } from '../sync/collections.ts';
 import { useShape } from '../sync/shapes.ts';
 import { useTeamData } from './data.ts';
+import { IssueActivity } from './IssueActivity.tsx';
 import { IssuePanelView } from './IssuePanelView.tsx';
+import { Links } from './Links.tsx';
 import { localDay } from './model/day.ts';
+import { relationsOf, subIssueProgress } from './model/detail.ts';
 import type { IssueRow } from './model/engine.ts';
-import { saveDescription, setArchived, setSubscribed, updateIssue } from './mutate.ts';
+import {
+  addLink,
+  addRelation,
+  removeLink,
+  removeRelation,
+  saveDescription,
+  setArchived,
+  setSubscribed,
+  updateIssue,
+} from './mutate.ts';
+import { Relations } from './Relations.tsx';
+import { SubIssues } from './SubIssues.tsx';
+import { Subscribers } from './Subscribers.tsx';
 import { useIssue } from './useIssue.ts';
 import { useIssueDetail } from './useIssueDetail.ts';
 
@@ -32,12 +47,14 @@ function Loaded({
   workspaceId,
   team,
   row,
+  rows,
   variant,
   onClose,
 }: {
   workspaceId: string;
   team: SyncedTeam;
   row: IssueRow;
+  rows: IssueRow[];
   variant: 'peek' | 'page';
   onClose: () => void;
 }) {
@@ -78,8 +95,56 @@ function Loaded({
     );
   };
 
+  const archived = row.issue.archived_at !== null;
+  const readOnly = archived || row.pending;
+  const relations = useMemo(
+    () => relationsOf(detail.relations, row.id),
+    [detail.relations, row.id],
+  );
+  const progress = useMemo(
+    () => subIssueProgress(rows, row.id, data.statesById),
+    [rows, row.id, data.statesById],
+  );
+  const parent = row.issue.parent_id
+    ? rows.find((other) => other.id === row.issue.parent_id)
+    : undefined;
+  const run = (job: Promise<unknown>) => {
+    setError(null);
+    job.catch(fail);
+  };
+  const sections = (
+    <>
+      <SubIssues parent={parent} subIssues={progress.children} done={progress.done} data={data} />
+      <Relations
+        relations={relations}
+        rows={rows}
+        self={row}
+        readOnly={readOnly}
+        onAdd={(type, otherId) => run(addRelation(row.issue, otherId, type))}
+        onRemove={(relationId) => run(removeRelation(row.issue, relationId))}
+      />
+      <Links
+        links={detail.links}
+        readOnly={readOnly}
+        onAdd={(url, title) => addLink(row.issue, url, title)}
+        onRemove={(linkId) => run(removeLink(row.issue, linkId))}
+      />
+      <Subscribers
+        subscriberIds={detail.subscriberIds}
+        members={data.members}
+        membersById={data.membersById}
+        meId={meId}
+        readOnly={readOnly}
+        onAdd={(memberId) => run(setSubscribed(row.issue, memberId, true))}
+        onRemoveSelf={() => run(setSubscribed(row.issue, meId, false))}
+      />
+      <IssueActivity activity={detail.activity} data={data} />
+    </>
+  );
+
   return (
     <IssuePanelView
+      sections={sections}
       row={row}
       data={data}
       teamName={team.name}
@@ -137,7 +202,7 @@ export function IssuePanel({
   const toast = useToast();
   const split = splitIdentifier(identifier);
   const number = split && split.key === team.key ? split.number : -1;
-  const { row, ready, gone } = useIssue(workspaceId, team, number);
+  const { row, rows, ready, gone } = useIssue(workspaceId, team, number);
 
   useEffect(() => {
     if (!gone) return;
@@ -147,7 +212,14 @@ export function IssuePanel({
 
   if (row) {
     return (
-      <Loaded workspaceId={workspaceId} team={team} row={row} variant={variant} onClose={onClose} />
+      <Loaded
+        workspaceId={workspaceId}
+        team={team}
+        row={row}
+        rows={rows}
+        variant={variant}
+        onClose={onClose}
+      />
     );
   }
   if (gone) return null;

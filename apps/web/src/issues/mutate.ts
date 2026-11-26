@@ -1,7 +1,12 @@
 // Changing an issue from a screen. Scalar fields go through the issues collection (the change shows at once and a refusal
 // rolls it back); labels have no column on the issue, so a label edit goes through the outbox and the label snapshot is
 // read again once the server has it. Either way a refusal rejects with the server's code (`mutationErrorMessage`).
-import { type IssueUpdateInput, issueUpdateInput } from '@torch/shared/mutations/issue';
+import {
+  type IssueUpdateInput,
+  issueLinkInput,
+  issueUpdateInput,
+  type RELATION_INPUT_TYPES,
+} from '@torch/shared/mutations/issue';
 import { ApiError } from '../api.ts';
 import type { SyncedIssue } from '../sync/collections.ts';
 import { enqueueWrite, type OutboxWrite } from '../sync/outbox.ts';
@@ -90,7 +95,7 @@ export async function updateIssue(
 
 // ---- writes of the issue panel: they go through the outbox (they survive a reload and replay with their key) ----
 
-type SnapshotKind = 'issueDetail' | 'issueSubscribers';
+type SnapshotKind = 'issueDetail' | 'issueSubscribers' | 'issueRelations' | 'issueLinks';
 
 export type DetailDeps = {
   enqueue: (write: OutboxWrite) => Promise<{ txid: number }>;
@@ -153,4 +158,72 @@ export async function setArchived(
     path: `${issuePath(issue)}/${archived ? 'archive' : 'unarchive'}`,
     idempotencyKey: crypto.randomUUID(),
   });
+}
+
+/** `type` is what the person chose: `blocked_by` is `blocks` read from the other end, and the server turns it round. */
+export async function addRelation(
+  issue: IssueRef,
+  relatedIssueId: string,
+  type: (typeof RELATION_INPUT_TYPES)[number],
+  deps: DetailDeps = detailDeps,
+): Promise<void> {
+  await deps.enqueue({
+    workspaceId: issue.workspace_id,
+    teamId: issue.team_id,
+    method: 'POST',
+    path: `${issuePath(issue)}/relations`,
+    body: { relatedIssueId, type },
+    idempotencyKey: crypto.randomUUID(),
+  });
+  deps.refresh(issue.workspace_id, issue.team_id, ['issueRelations']);
+}
+
+export async function removeRelation(
+  issue: IssueRef,
+  relationId: string,
+  deps: DetailDeps = detailDeps,
+): Promise<void> {
+  await deps.enqueue({
+    workspaceId: issue.workspace_id,
+    teamId: issue.team_id,
+    method: 'DELETE',
+    path: `${issuePath(issue)}/relations/${relationId}`,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  deps.refresh(issue.workspace_id, issue.team_id, ['issueRelations']);
+}
+
+/** The address is checked here with the server's own rule, so a mistake is answered at once and nothing is queued. */
+export async function addLink(
+  issue: IssueRef,
+  url: string,
+  title: string | undefined,
+  deps: DetailDeps = detailDeps,
+): Promise<void> {
+  const parsed = issueLinkInput.safeParse({ url: url.trim(), title: title?.trim() || undefined });
+  if (!parsed.success) throw new ApiError(400, 'invalid_input', 'The link is not valid.');
+  await deps.enqueue({
+    workspaceId: issue.workspace_id,
+    teamId: issue.team_id,
+    method: 'POST',
+    path: `${issuePath(issue)}/links`,
+    body: parsed.data,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  deps.refresh(issue.workspace_id, issue.team_id, ['issueLinks']);
+}
+
+export async function removeLink(
+  issue: IssueRef,
+  linkId: string,
+  deps: DetailDeps = detailDeps,
+): Promise<void> {
+  await deps.enqueue({
+    workspaceId: issue.workspace_id,
+    teamId: issue.team_id,
+    method: 'DELETE',
+    path: `${issuePath(issue)}/links/${linkId}`,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  deps.refresh(issue.workspace_id, issue.team_id, ['issueLinks']);
 }

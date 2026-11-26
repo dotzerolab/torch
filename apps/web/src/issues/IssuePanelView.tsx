@@ -2,7 +2,7 @@
 // it is given and says what the person did; `IssuePanel` knows where the data comes from and where the writes go.
 import type { IssueUpdateInput } from '@torch/shared/mutations/issue';
 import { Link2, MoreHorizontal, X } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Avatar } from '../design/components/Avatar.tsx';
 import { Button } from '../design/components/Button.tsx';
 import { IconButton } from '../design/components/IconButton.tsx';
@@ -39,6 +39,8 @@ export type IssuePanelViewProps = {
   onSetArchived: (archived: boolean) => void;
   onCopy: (what: 'identifier' | 'link') => void;
   onClose: () => void;
+  /** What follows the description: sub-issues, relations, links, followers, activity. */
+  sections?: ReactNode;
 };
 
 const PROPERTIES: { kind: PickerKind; label: string }[] = [
@@ -67,6 +69,7 @@ export function IssuePanelView({
   onSetArchived,
   onCopy,
   onClose,
+  sections,
 }: IssuePanelViewProps) {
   const t = useT();
   const locale = useLocale();
@@ -374,6 +377,7 @@ export function IssuePanelView({
           </button>
         )}
       </section>
+      {sections}
     </article>
   );
 }
