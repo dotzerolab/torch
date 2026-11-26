@@ -37,6 +37,10 @@ const KIND_NAMES = [
   'issueSubscribers',
   'issueDetail',
   'issueActivity',
+  'issueComments',
+  'issueAttachments',
+  'documents',
+  'documentContent',
 ] as const;
 /** A factory table where every kind is made by `make`. */
 function allKinds<T>(make: T): { [K in (typeof KIND_NAMES)[number]]: T } {
@@ -578,7 +582,10 @@ describe('snapshot shapes', () => {
   it('names the snapshot kinds: the existing workflow states and the new read-only tables', () => {
     expect([...SNAPSHOT_KINDS].sort()).toEqual(
       [
+        'documentContent',
         'issueActivity',
+        'issueAttachments',
+        'issueComments',
         'issueDetail',
         'issueLabels',
         'issueLinks',
@@ -590,7 +597,14 @@ describe('snapshot shapes', () => {
       ].sort(),
     );
     for (const kind of SNAPSHOT_KINDS) expect(isSnapshotKind(kind)).toBe(true);
-    for (const kind of ['teams', 'members', 'ownMemberships', 'issues', 'teamMembers']) {
+    for (const kind of [
+      'teams',
+      'members',
+      'ownMemberships',
+      'issues',
+      'teamMembers',
+      'documents',
+    ]) {
       expect(isSnapshotKind(kind)).toBe(false);
     }
     expect(isSnapshotKind('nonsense')).toBe(false);
@@ -774,5 +788,112 @@ describe('snapshot shapes', () => {
       expect.arrayContaining(['issues', 'labels', 'issueDetail', 'issueActivity', 'teamMembers']),
     );
     expect(TEAM_KINDS).not.toContain('workspaceLabels');
+  });
+});
+
+describe('shapes of comments, attachments and documents', () => {
+  const issueKey = (kind: 'issueComments' | 'issueAttachments', issueId = 'i1') =>
+    ({ kind, workspaceId: ws, teamId: 't1', issueId }) as const;
+  const docKey = {
+    kind: 'documentContent',
+    workspaceId: ws,
+    teamId: 't1',
+    documentId: 'd1',
+  } as const;
+  const documentsKey = { kind: 'documents', workspaceId: ws, teamId: 't1' } as const;
+
+  it('names the shapes of one issue and of one document by their team and object', () => {
+    expect(shapeId(issueKey('issueComments'))).toBe('issueComments:w1:t1:i1');
+    expect(shapeId(issueKey('issueAttachments'))).toBe('issueAttachments:w1:t1:i1');
+    expect(shapeId(docKey)).toBe('documentContent:w1:t1:d1');
+    expect(shapeId(documentsKey)).toBe('documents:w1:t1');
+    expect(parseShapeId('issueComments:w1:t1:i1')).toEqual(issueKey('issueComments'));
+    expect(parseShapeId('documentContent:w1:t1:d1')).toEqual(docKey);
+    expect(parseShapeId('documents:w1:t1')).toEqual(documentsKey);
+  });
+
+  it('shares the live document titles between tabs and never a snapshot of one object', () => {
+    expect(isShapeId('documents:w1:t1')).toBe(true);
+    expect(isShapeId('documents:w1')).toBe(false);
+    expect(isShapeId('issueComments:w1:t1:i1')).toBe(false);
+    expect(isShapeId('issueAttachments:w1:t1:i1')).toBe(false);
+    expect(isShapeId('documentContent:w1:t1:d1')).toBe(false);
+    expect(isShapeId('documents:w1:t1:extra')).toBe(false);
+  });
+
+  it("makes the three object kinds snapshots and the document titles live, all of them the team's", () => {
+    for (const kind of ['issueComments', 'issueAttachments', 'documentContent']) {
+      expect(isSnapshotKind(kind)).toBe(true);
+      expect(SNAPSHOT_KINDS).toContain(kind);
+    }
+    expect(isSnapshotKind('documents')).toBe(false);
+    for (const kind of ['issueComments', 'issueAttachments', 'documentContent', 'documents']) {
+      expect(TEAM_KINDS).toContain(kind);
+    }
+  });
+
+  it('gives every object its own collection id, and a refresh a new one', async () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    expect(registry.get(issueKey('issueComments')).id).toBe('issueComments-w1-t1-i1');
+    expect(registry.get(issueKey('issueComments', 'i2')).id).toBe('issueComments-w1-t1-i2');
+    expect(registry.get(issueKey('issueAttachments')).id).toBe('issueAttachments-w1-t1-i1');
+    expect(registry.get(docKey).id).toBe('documentContent-w1-t1-d1');
+    expect(registry.get(documentsKey).id).toBe('documents-w1-t1');
+    registry.refresh(issueKey('issueComments'));
+    await Promise.resolve();
+    expect(registry.get(issueKey('issueComments')).id).toBe('issueComments-w1-t1-i1~2');
+    // A live shape is never refreshed: it is always current.
+    registry.refresh(documentsKey);
+    expect(registry.get(documentsKey).id).toBe('documents-w1-t1');
+  });
+
+  it('ends them with their team, and starts them again when the team is back', async () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    const mine = [
+      registry.get(issueKey('issueComments')),
+      registry.get(issueKey('issueAttachments')),
+      registry.get(docKey),
+      registry.get(documentsKey),
+    ];
+    const other = registry.get({ ...issueKey('issueComments'), teamId: 't2' });
+    registry.dropTeam(ws, 't1');
+    await Promise.resolve();
+    expect(mine.map((fake) => fake.cleaned)).toEqual([1, 1, 1, 1]);
+    expect(other.cleaned).toBe(0);
+    // A reader of a dropped team is served an empty collection.
+    expect(registry.get(issueKey('issueComments')).inert).toBe(true);
+    registry.reinstateTeam(ws, 't1');
+    expect(registry.get(issueKey('issueComments')).inert).toBe(false);
+  });
+
+  it('counts the document titles against the live budget and the snapshots not at all', () => {
+    const { factories } = fakeFactories();
+    const registry = createRegistry(factories);
+    registry.get(issueKey('issueComments'));
+    registry.get(issueKey('issueAttachments'));
+    registry.get(docKey);
+    expect(registry.liveCount()).toBe(0);
+    registry.get(documentsKey);
+    expect(registry.liveCount()).toBe(1);
+  });
+
+  it('pauses a held snapshot of one object 30 s after its reader left, over budget or not', async () => {
+    vi.useFakeTimers();
+    try {
+      const { factories } = fakeFactories();
+      const registry = createRegistry(factories);
+      const fake = registry.get(issueKey('issueComments'));
+      registry.hold(issueKey('issueComments'))();
+      vi.advanceTimersByTime(PAUSE_AFTER_MS - 1);
+      await Promise.resolve();
+      expect(fake.cleaned).toBe(0);
+      vi.advanceTimersByTime(1);
+      await Promise.resolve();
+      expect(fake.cleaned).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

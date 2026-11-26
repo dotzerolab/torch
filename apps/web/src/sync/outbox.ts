@@ -14,7 +14,7 @@ export type OutboxWrite = {
   workspaceId: string;
   /** The team the write belongs to, so writes of a team the person lost can be dropped together. */
   teamId?: string;
-  method: 'POST' | 'PATCH' | 'DELETE';
+  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   path: string;
   body?: unknown;
   /** A UUID made when the write is first queued, unchanged on every replay. */

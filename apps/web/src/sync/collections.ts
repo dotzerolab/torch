@@ -170,6 +170,60 @@ export type SyncedActivity = {
   created_at: string;
 };
 
+/**
+ * A `comment` row of one opened issue. A deleted comment keeps its place (`deleted_at` set, `body` empty, no reactions).
+ * `reactions` maps an emoji to the ids of the members who gave it.
+ */
+export type SyncedComment = {
+  id: string;
+  workspace_id: string;
+  team_id: string;
+  issue_id: string;
+  parent_id: string | null;
+  author_id: string;
+  body: string;
+  reactions: Record<string, string[]>;
+  created_at: string;
+  edited_at: string | null;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  deleted_at: string | null;
+};
+
+/** An `attachment` row of one opened issue: ready files only, and never the storage key. */
+export type SyncedAttachment = {
+  id: string;
+  workspace_id: string;
+  team_id: string;
+  issue_id: string;
+  uploader_id: string;
+  file_name: string;
+  content_type: string;
+  size_bytes: number;
+  created_at: string;
+};
+
+/** A `document` row of a team's list: the title and who changed it, never the body (that syncs per opened document). */
+export type SyncedDocumentSummary = {
+  id: string;
+  workspace_id: string;
+  team_id: string;
+  title: string;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+};
+
+/** The body of one opened document. */
+export type SyncedDocumentContent = {
+  id: string;
+  workspace_id: string;
+  team_id: string;
+  body: string;
+};
+
 // How long a write waits for its txid to come back through Electric before the optimistic state is dropped.
 const TXID_TIMEOUT_MS = 10_000;
 
@@ -809,9 +863,9 @@ export function createWorkspaceLabelsCollection(
   return createCollection(shaped({ kind: 'workspaceLabels', workspaceId }, build, context));
 }
 
-// The shapes of ONE issue report errors with the workspace alone: a 404 there says the issue is unknown or hidden, not
-// that the team is gone, and the team must not be dropped for it. A team that really went is dropped through its own
-// shapes (the issue list, the labels), which answer 404 the same way.
+// The shapes of ONE issue or ONE document report errors with the workspace alone: a 404 there says the object is unknown
+// or hidden, not that the team is gone, and the team must not be dropped for it. A team that really went is dropped
+// through its own shapes (the issue list, the labels), which answer 404 the same way.
 
 /** The description of one opened issue (the list shape leaves it out: ADR 0001 section 4). */
 export function createIssueDetailCollection(
@@ -858,6 +912,98 @@ export function createIssueActivityCollection(
     });
   return createCollection(
     shaped({ kind: 'issueActivity', workspaceId, teamId, issueId }, build, context),
+  );
+}
+
+/** The comments of one opened issue. A snapshot: refreshed when the issue changes (the server bumps it on every write). */
+export function createIssueCommentsCollection(
+  workspaceId: string,
+  teamId: string,
+  issueId: string,
+  id = `issueComments-${workspaceId}-${teamId}-${issueId}`,
+  context = NO_CONTEXT,
+) {
+  const build = () =>
+    electricCollectionOptions<SyncedComment>({
+      id,
+      getKey: (row) => row.id,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/issues/${issueId}/comments`,
+        { workspaceId },
+        context,
+        { snapshot: true },
+      ),
+    });
+  return createCollection(
+    shaped({ kind: 'issueComments', workspaceId, teamId, issueId }, build, context),
+  );
+}
+
+/** The ready files of one opened issue. */
+export function createIssueAttachmentsCollection(
+  workspaceId: string,
+  teamId: string,
+  issueId: string,
+  id = `issueAttachments-${workspaceId}-${teamId}-${issueId}`,
+  context = NO_CONTEXT,
+) {
+  const build = () =>
+    electricCollectionOptions<SyncedAttachment>({
+      id,
+      getKey: (row) => row.id,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/issues/${issueId}/attachments`,
+        { workspaceId },
+        context,
+        { snapshot: true },
+      ),
+    });
+  return createCollection(
+    shaped({ kind: 'issueAttachments', workspaceId, teamId, issueId }, build, context),
+  );
+}
+
+/** The documents of a team, titles only. Live: it is the shape of the team in view while the documents screen is open. */
+export function createDocumentsCollection(
+  workspaceId: string,
+  teamId: string,
+  id = `documents-${workspaceId}-${teamId}`,
+  context = NO_CONTEXT,
+) {
+  const build = () =>
+    electricCollectionOptions<SyncedDocumentSummary>({
+      id,
+      getKey: (row) => row.id,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/teams/${teamId}/documents`,
+        { workspaceId, teamId },
+        context,
+      ),
+    });
+  return createCollection(shaped({ kind: 'documents', workspaceId, teamId }, build, context));
+}
+
+/** The body of one opened document. A 404 says the document is unknown or hidden, not that the team is gone. */
+export function createDocumentContentCollection(
+  workspaceId: string,
+  teamId: string,
+  documentId: string,
+  id = `documentContent-${workspaceId}-${teamId}-${documentId}`,
+  context = NO_CONTEXT,
+) {
+  const build = () =>
+    electricCollectionOptions<SyncedDocumentContent>({
+      id,
+      getKey: (row) => row.id,
+      shapeOptions: shapeOptions(
+        `/api/sync/w/${workspaceId}/documents/${documentId}/content`,
+        { workspaceId },
+        context,
+        { snapshot: true },
+      ),
+    });
+  return createCollection(
+    shaped({ kind: 'documentContent', workspaceId, teamId, documentId }, build, context),
   );
 }
 
@@ -942,6 +1088,14 @@ export const collectionFactories = {
     createIssueDetailCollection(key.workspaceId, key.teamId, key.issueId, id, context),
   issueActivity: (key, id, context) =>
     createIssueActivityCollection(key.workspaceId, key.teamId, key.issueId, id, context),
+  issueComments: (key, id, context) =>
+    createIssueCommentsCollection(key.workspaceId, key.teamId, key.issueId, id, context),
+  issueAttachments: (key, id, context) =>
+    createIssueAttachmentsCollection(key.workspaceId, key.teamId, key.issueId, id, context),
+  documents: (key, id, context) =>
+    createDocumentsCollection(key.workspaceId, key.teamId, id, context),
+  documentContent: (key, id, context) =>
+    createDocumentContentCollection(key.workspaceId, key.teamId, key.documentId, id, context),
 } satisfies Factories;
 
 /**

@@ -9,7 +9,11 @@ vi.mock('../api.ts', async (importOriginal) => ({
 
 import {
   BACKOFF_OPTIONS,
+  createDocumentContentCollection,
+  createDocumentsCollection,
   createIssueActivityCollection,
+  createIssueAttachmentsCollection,
+  createIssueCommentsCollection,
   createIssueDetailCollection,
   createIssueLabelsCollection,
   createIssueLinksCollection,
@@ -257,6 +261,7 @@ describe('observeSync', () => {
 const WS = '11111111-1111-4111-8111-111111111111';
 const TEAM = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const ISSUE = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const DOCUMENT = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 
 const shapeContext = (over: Partial<ShapeContext> = {}): ShapeContext => ({
   dropTeam: vi.fn(),
@@ -394,6 +399,21 @@ describe('snapshot shapes', () => {
       () => createIssueActivityCollection(WS, TEAM, ISSUE, 'x', shapeContext()),
       `/issues/${ISSUE}/activity`,
     ],
+    [
+      'issueComments',
+      () => createIssueCommentsCollection(WS, TEAM, ISSUE, 'x', shapeContext()),
+      `/issues/${ISSUE}/comments`,
+    ],
+    [
+      'issueAttachments',
+      () => createIssueAttachmentsCollection(WS, TEAM, ISSUE, 'x', shapeContext()),
+      `/issues/${ISSUE}/attachments`,
+    ],
+    [
+      'documentContent',
+      () => createDocumentContentCollection(WS, TEAM, DOCUMENT, 'x', shapeContext()),
+      `/documents/${DOCUMENT}/content`,
+    ],
   ];
 
   it.each(paths)('%s reads the route the server serves, once', async (_kind, make, tail) => {
@@ -477,11 +497,32 @@ describe('snapshot shapes', () => {
       'w',
       shapeContext({ dropTeam: quiet }),
     );
-    for (const collection of [detail, activity, workspaceLabels]) {
+    const comments = createIssueCommentsCollection(
+      WS,
+      TEAM,
+      ISSUE,
+      'c',
+      shapeContext({ dropTeam: quiet }),
+    );
+    const attachments = createIssueAttachmentsCollection(
+      WS,
+      TEAM,
+      ISSUE,
+      'f',
+      shapeContext({ dropTeam: quiet }),
+    );
+    const content = createDocumentContentCollection(
+      WS,
+      TEAM,
+      DOCUMENT,
+      'b',
+      shapeContext({ dropTeam: quiet }),
+    );
+    for (const collection of [detail, activity, workspaceLabels, comments, attachments, content]) {
       opened.push(collection);
       void collection.preload().catch(() => {});
     }
-    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(6));
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(quiet).not.toHaveBeenCalled();
   });
@@ -519,5 +560,105 @@ describe('snapshot shapes', () => {
     expect(row?.started_at).toBe('2026-11-25T11:00:00Z');
     expect(row?.completed_at).toBeNull();
     expect(row?.canceled_at).toBeNull();
+  });
+});
+
+describe('comment, attachment and document shapes', () => {
+  beforeEach(() => bindTestSession(WS));
+  afterEach(async () => {
+    for (const collection of opened.splice(0)) await collection.cleanup();
+    vi.unstubAllGlobals();
+    resetIdentityForTests();
+  });
+
+  const comment = {
+    id: 'c1',
+    workspace_id: WS,
+    team_id: TEAM,
+    issue_id: ISSUE,
+    parent_id: null,
+    author_id: 'm1',
+    body: 'First',
+    reactions: { '👍': ['m2'] },
+    created_at: '2026-11-25T10:00:00Z',
+    edited_at: null,
+    resolved_at: null,
+    resolved_by: null,
+    deleted_at: null,
+  };
+
+  it('keeps a comment with its reactions, a file by its id and a document body by its id', async () => {
+    serve([comment, { ...comment, id: 'c2', parent_id: 'c1', body: 'Reply' }]);
+    const comments = await open(
+      createIssueCommentsCollection(WS, TEAM, ISSUE, 'c', shapeContext()),
+    );
+    expect(comments.size).toBe(2);
+    expect(comments.get('c1')?.reactions).toEqual({ '👍': ['m2'] });
+    expect(comments.get('c2')?.parent_id).toBe('c1');
+
+    serve([
+      {
+        id: 'f1',
+        workspace_id: WS,
+        team_id: TEAM,
+        issue_id: ISSUE,
+        uploader_id: 'm1',
+        file_name: 'shot.png',
+        content_type: 'image/png',
+        size_bytes: 12,
+        created_at: '2026-11-25T10:00:00Z',
+      },
+    ]);
+    const files = await open(
+      createIssueAttachmentsCollection(WS, TEAM, ISSUE, 'f', shapeContext()),
+    );
+    expect(files.get('f1')?.file_name).toBe('shot.png');
+
+    serve([{ id: DOCUMENT, workspace_id: WS, team_id: TEAM, body: '# Notes' }]);
+    const content = await open(
+      createDocumentContentCollection(WS, TEAM, DOCUMENT, 'b', shapeContext()),
+    );
+    expect(content.get(DOCUMENT)?.body).toBe('# Notes');
+  });
+
+  it('the document titles are a live team shape: they keep asking, and a 404 drops the team', async () => {
+    const urls = serve([
+      {
+        id: DOCUMENT,
+        workspace_id: WS,
+        team_id: TEAM,
+        title: 'Plan',
+        created_by: 'm1',
+        updated_by: 'm1',
+        created_at: '2026-11-25T10:00:00Z',
+        updated_at: '2026-11-25T10:00:00Z',
+        archived_at: null,
+      },
+    ]);
+    const documents = await open(
+      createDocumentsCollection(WS, TEAM, 'documents-t1', shapeContext()),
+    );
+    expect(documents.get(DOCUMENT)?.title).toBe('Plan');
+    expect(new URL(urls[0] ?? '').pathname).toBe(`/api/sync/w/${WS}/teams/${TEAM}/documents`);
+    await vi.waitFor(() => expect(urls.some((url) => url.includes('live=true'))).toBe(true));
+
+    const dropTeam = vi.fn();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('', { status: 404 })),
+    );
+    const gone = createDocumentsCollection(WS, TEAM, 'documents-gone', shapeContext({ dropTeam }));
+    opened.push(gone);
+    void gone.preload().catch(() => {});
+    await vi.waitFor(() => expect(dropTeam).toHaveBeenCalledWith(WS, TEAM));
+  });
+
+  it('a team that is gone has empty comments and asks for nothing', async () => {
+    const urls = serve([comment]);
+    const comments = await open(
+      createIssueCommentsCollection(WS, TEAM, ISSUE, 'c', shapeContext({ inert: true })),
+    );
+    expect(comments.size).toBe(0);
+    expect(urls).toHaveLength(0);
   });
 });
