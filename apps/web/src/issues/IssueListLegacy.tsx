@@ -147,8 +147,8 @@ function IssueList({
   );
 }
 
-/** The page of the signed-in shell for now: the issues of the team the shell is showing. */
-export function Workspace({ locale }: { locale: Locale }) {
+/** The issues of the team the shell is showing, as the plain list the first screens had. */
+export function IssueListLegacy({ locale }: { locale: Locale }) {
   const { workspace, team, teams, teamsReady } = useShell();
   if (!teamsReady) {
     return (

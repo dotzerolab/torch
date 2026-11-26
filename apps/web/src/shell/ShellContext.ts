@@ -18,8 +18,3 @@ export function useShell(): ShellState {
   if (!state) throw new Error('useShell needs an AppShell above it');
   return state;
 }
-
-/** `/teams/ENG` gives `ENG`; any other address gives null. */
-export function teamKeyFromPath(pathname: string): string | null {
-  return /^\/teams\/([^/]+)\/?$/.exec(pathname)?.[1] ?? null;
-}

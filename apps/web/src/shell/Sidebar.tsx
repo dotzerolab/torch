@@ -7,6 +7,7 @@ import { Dialog } from '../design/components/Dialog.tsx';
 import { useT } from '../design/locale.tsx';
 import type { ResolvedTheme } from '../design/theme.ts';
 import { navigate, usePathname } from '../navigation.ts';
+import { parseRoute } from '../routes.ts';
 import type { SyncedTeam } from '../sync/collections.ts';
 import { signOutWorkspaces } from '../sync/sign-out.ts';
 import { WorkspaceSwitcher } from './WorkspaceSwitcher.tsx';
@@ -50,7 +51,9 @@ export function Sidebar({
 }) {
   const t = useT();
   const pathname = usePathname();
-  const onSettings = pathname === '/settings' || pathname.startsWith('/settings/');
+  const route = parseRoute(pathname);
+  const onSettings = route.name === 'settings';
+  const onMyIssues = route.name === 'myIssues';
   // Set while the person is asked whether to sign out with changes that never reached the server.
   const [asking, setAsking] = useState<{ pending: number; answer: (go: boolean) => void } | null>(
     null,
@@ -74,9 +77,23 @@ export function Sidebar({
         onSelect={onSelectWorkspace}
       />
       <ul className="sidebar__list">
-        <Placeholder icon={<UserRound size={16} aria-hidden="true" />}>
-          {t('shell.myIssues')}
-        </Placeholder>
+        <li>
+          <a
+            className="sidebar__item"
+            href="/my-issues"
+            data-testid="nav-my-issues"
+            aria-current={onMyIssues ? 'page' : undefined}
+            onClick={(event) => {
+              if (!isPlainClick(event)) return;
+              event.preventDefault();
+              navigate('/my-issues');
+              onNavigate?.();
+            }}
+          >
+            <UserRound size={16} aria-hidden="true" />
+            {t('shell.myIssues')}
+          </a>
+        </li>
         <Placeholder icon={<Inbox size={16} aria-hidden="true" />}>{t('shell.inbox')}</Placeholder>
       </ul>
       <p className="sidebar__group" id="sidebar-teams">
@@ -84,7 +101,7 @@ export function Sidebar({
       </p>
       <ul className="sidebar__list" aria-labelledby="sidebar-teams">
         {teams.map((team) => {
-          const href = `/teams/${team.key}`;
+          const href = `/teams/${encodeURIComponent(team.key)}`;
           return (
             <li key={team.id}>
               <a
