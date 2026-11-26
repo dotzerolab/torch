@@ -76,7 +76,7 @@ for a new one each time; do not store it.
 | 415    | `file_type_not_allowed`                  | The type is not on the list.                                               |
 | 422    | `file_rejected`                          | The stored file does not match what was declared.                          |
 | 422    | `idempotency_key_reused`                 | The same `Idempotency-Key` with another body.                              |
-| 429    | `rate_limited`                           | Too many requests, or 10 uploads already open.                             |
+| 429    | `rate_limited`                           | More than 60 comment or document writes in a minute (see `Retry-After`), or 10 uploads already open. |
 | 503    | `storage_unavailable`                    | No file storage is configured, or it did not answer.                       |
 
 ## For people who synchronise a copy

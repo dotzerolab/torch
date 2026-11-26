@@ -167,12 +167,12 @@ export function createApp(deps: AppDeps): App {
 
   if (deps.db?.orm && deps.auth) {
     app.route('/api', createIssueRoutes({ orm: deps.db.orm, auth: deps.auth }));
-    app.route('/api', createCommentRoutes({ orm: deps.db.orm, auth: deps.auth }));
+    app.route('/api', createCommentRoutes({ orm: deps.db.orm, auth: deps.auth, now: deps.now }));
     app.route(
       '/api',
       createAttachmentRoutes({ orm: deps.db.orm, auth: deps.auth, files: deps.files }),
     );
-    app.route('/api', createDocumentRoutes({ orm: deps.db.orm, auth: deps.auth }));
+    app.route('/api', createDocumentRoutes({ orm: deps.db.orm, auth: deps.auth, now: deps.now }));
     app.route('/api', createLabelRoutes({ orm: deps.db.orm, auth: deps.auth }));
     app.route('/api', createWorkflowRoutes({ orm: deps.db.orm, auth: deps.auth }));
     app.route('/api', createMemberRoutes({ orm: deps.db.orm, auth: deps.auth, accessBus }));

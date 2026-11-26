@@ -13,7 +13,16 @@ import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { Orm } from '../db.ts';
 import { errorResponse } from '../issues/errors.ts';
-import { actorOf, changeResponse, NO_STORE, readBody, tooLarge } from '../issues/http.ts';
+import {
+  actorOf,
+  changeResponse,
+  createMemberWriteLimit,
+  NO_STORE,
+  readBody,
+  tooLarge,
+  WRITE_WINDOW_MS,
+  WRITES_PER_MINUTE,
+} from '../issues/http.ts';
 import type { ActorResolver } from '../permissions/load-actor.ts';
 import {
   archiveDocument,
@@ -24,7 +33,7 @@ import {
   updateDocument,
 } from './service.ts';
 
-export type DocumentRouteDeps = { orm: Orm; auth: ActorResolver };
+export type DocumentRouteDeps = { orm: Orm; auth: ActorResolver; now?: () => Date };
 
 /** The largest body a document write takes: 100,000 characters, with room for JSON escapes and the other fields. */
 export const DOCUMENT_BODY_LIMIT = 512 * 1024;
@@ -34,6 +43,12 @@ const IDEMPOTENCY_KEY = /^[\x21-\x7e]{1,128}$/;
 
 export function createDocumentRoutes(deps: DocumentRouteDeps): Hono {
   const routes = new Hono();
+  // One budget for everything a member writes here: creating, changing and archiving documents.
+  const limited = createMemberWriteLimit({
+    limit: WRITES_PER_MINUTE,
+    windowMs: WRITE_WINDOW_MS,
+    now: deps.now,
+  });
   const writes = bodyLimit({ maxSize: DOCUMENT_BODY_LIMIT, onError: tooLarge });
   const small = bodyLimit({ maxSize: SMALL_BODY_LIMIT, onError: tooLarge });
   const teamPath = '/w/:workspaceId/teams/:teamId/documents';
@@ -53,6 +68,8 @@ export function createDocumentRoutes(deps: DocumentRouteDeps): Hono {
   routes.post(teamPath, writes, async (c) => {
     const actor = await actorOf(c, deps.auth);
     if (actor instanceof Response) return actor;
+    const slowDown = limited(actor);
+    if (slowDown) return slowDown;
 
     const key = c.req.header('idempotency-key');
     if (key !== undefined && !IDEMPOTENCY_KEY.test(key)) {
@@ -101,6 +118,8 @@ export function createDocumentRoutes(deps: DocumentRouteDeps): Hono {
   routes.patch(documentPath, writes, async (c) => {
     const actor = await actorOf(c, deps.auth);
     if (actor instanceof Response) return actor;
+    const slowDown = limited(actor);
+    if (slowDown) return slowDown;
     const body = await readBody(c, documentUpdateInput);
     if (body instanceof Response) return body;
     return changeResponse(
@@ -116,6 +135,8 @@ export function createDocumentRoutes(deps: DocumentRouteDeps): Hono {
     routes.post(`${documentPath}/${path}`, small, async (c) => {
       const actor = await actorOf(c, deps.auth);
       if (actor instanceof Response) return actor;
+      const slowDown = limited(actor);
+      if (slowDown) return slowDown;
       return changeResponse(
         await archiveDocument(deps.orm, actor, c.req.param('documentId'), archived),
         200,

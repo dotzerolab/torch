@@ -17,6 +17,8 @@ on writes). Everything is checked against the caller's permissions, see [permiss
 - Title: 1 to 255 characters, trimmed. Body: up to 100,000 characters, may be empty. Bodies up to 512 KiB are read;
   larger ones are 413.
 - A list never carries bodies. Read one document to get its text.
+- **One person writes at most 60 times a minute** (create, edit and archive together; reads are not counted). More is
+  429 `rate_limited` with a `Retry-After` header in seconds.
 
 ## Calls
 

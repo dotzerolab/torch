@@ -64,6 +64,48 @@ describe.skipIf(!databaseUrl)('document routes', () => {
     expect(Number.isInteger(json.txid)).toBe(true);
   });
 
+  it('a member who writes more than 60 times in a minute is answered 429 rate_limited; reads and others are not', async () => {
+    const s = await setup();
+    const doc = await add(s);
+
+    // The create above was the first write; each of these changes nothing and still counts.
+    for (let i = 0; i < 59; i++) {
+      const res = await s.t.request(
+        'PATCH',
+        s.one(doc.id),
+        { title: 'Runbook' },
+        { cookie: s.member },
+      );
+      expect(res.status).toBe(200);
+    }
+    const blocked = await s.t.request(
+      'PATCH',
+      s.one(doc.id),
+      { title: 'Runbook' },
+      { cookie: s.member },
+    );
+    const create = await s.t.post(s.list, { title: 'Another' }, { cookie: s.member });
+    const archive = await s.t.post(`${s.one(doc.id)}/archive`, undefined, { cookie: s.member });
+    const other = await s.t.post(s.list, { title: 'From somebody else' }, { cookie: s.admin });
+    const read = await s.t.get(s.one(doc.id), { cookie: s.member });
+    s.t.clock.current = new Date(s.t.clock.current.getTime() + 61_000);
+    const later = await s.t.request(
+      'PATCH',
+      s.one(doc.id),
+      { title: 'Runbook' },
+      { cookie: s.member },
+    );
+
+    for (const res of [blocked, create, archive]) {
+      expect(res.status).toBe(429);
+      expect(await res.json()).toMatchObject({ error: 'rate_limited' });
+      expect(Number(res.headers.get('retry-after'))).toBeGreaterThanOrEqual(1);
+    }
+    expect(other.status).toBe(201);
+    expect(read.status).toBe(200);
+    expect(later.status).toBe(200);
+  });
+
   it('Idempotency-Key: the second call replays the answer and says so', async () => {
     const s = await setup();
     const headers = { 'idempotency-key': 'doc-queue-0001' };

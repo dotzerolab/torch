@@ -21,6 +21,8 @@ Everything is checked against the caller's permissions, see [permissions](../per
   server. Deleting twice changes nothing.
 - **An archived issue is read-only**: every write answers 409 `issue_archived`. Reading stays open.
 - Every write moves the `updated_at` of the issue, in the same transaction.
+- **One person writes at most 60 times a minute** (comments, edits, deletes, resolves and reactions together; reads are
+  not counted). More is 429 `rate_limited` with a `Retry-After` header in seconds.
 - A comment is at most 20,000 characters, trimmed, never empty.
 
 ## Calls

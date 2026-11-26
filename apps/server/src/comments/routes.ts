@@ -15,7 +15,16 @@ import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { Orm } from '../db.ts';
 import { errorResponse } from '../issues/errors.ts';
-import { actorOf, changeResponse, NO_STORE, readBody, tooLarge } from '../issues/http.ts';
+import {
+  actorOf,
+  changeResponse,
+  createMemberWriteLimit,
+  NO_STORE,
+  readBody,
+  tooLarge,
+  WRITE_WINDOW_MS,
+  WRITES_PER_MINUTE,
+} from '../issues/http.ts';
 import type { ActorResolver } from '../permissions/load-actor.ts';
 import {
   createComment,
@@ -27,7 +36,7 @@ import {
   setResolved,
 } from './service.ts';
 
-export type CommentRouteDeps = { orm: Orm; auth: ActorResolver };
+export type CommentRouteDeps = { orm: Orm; auth: ActorResolver; now?: () => Date };
 
 /** The largest body a comment write takes: 20,000 characters, with room for JSON escapes and the other fields. */
 export const COMMENT_BODY_LIMIT = 128 * 1024;
@@ -38,6 +47,12 @@ const IDEMPOTENCY_KEY = /^[\x21-\x7e]{1,128}$/;
 
 export function createCommentRoutes(deps: CommentRouteDeps): Hono {
   const routes = new Hono();
+  // One budget for everything a member writes here: comments, edits, deletes, resolves and reactions.
+  const limited = createMemberWriteLimit({
+    limit: WRITES_PER_MINUTE,
+    windowMs: WRITE_WINDOW_MS,
+    now: deps.now,
+  });
   const writes = bodyLimit({ maxSize: COMMENT_BODY_LIMIT, onError: tooLarge });
   const small = bodyLimit({ maxSize: SMALL_BODY_LIMIT, onError: tooLarge });
   const issuePath = '/w/:workspaceId/issues/:issueId/comments';
@@ -57,6 +72,8 @@ export function createCommentRoutes(deps: CommentRouteDeps): Hono {
   routes.post(issuePath, writes, async (c) => {
     const actor = await actorOf(c, deps.auth);
     if (actor instanceof Response) return actor;
+    const slowDown = limited(actor);
+    if (slowDown) return slowDown;
 
     const key = c.req.header('idempotency-key');
     if (key !== undefined && !IDEMPOTENCY_KEY.test(key)) {
@@ -85,6 +102,8 @@ export function createCommentRoutes(deps: CommentRouteDeps): Hono {
   routes.patch(commentPath, writes, async (c) => {
     const actor = await actorOf(c, deps.auth);
     if (actor instanceof Response) return actor;
+    const slowDown = limited(actor);
+    if (slowDown) return slowDown;
     const body = await readBody(c, commentEditInput);
     if (body instanceof Response) return body;
     return changeResponse(
@@ -96,6 +115,8 @@ export function createCommentRoutes(deps: CommentRouteDeps): Hono {
   routes.delete(commentPath, small, async (c) => {
     const actor = await actorOf(c, deps.auth);
     if (actor instanceof Response) return actor;
+    const slowDown = limited(actor);
+    if (slowDown) return slowDown;
     return changeResponse(await deleteComment(deps.orm, actor, c.req.param('commentId')), 200);
   });
 
@@ -106,6 +127,8 @@ export function createCommentRoutes(deps: CommentRouteDeps): Hono {
     routes.post(`${commentPath}/${path}`, small, async (c) => {
       const actor = await actorOf(c, deps.auth);
       if (actor instanceof Response) return actor;
+      const slowDown = limited(actor);
+      if (slowDown) return slowDown;
       return changeResponse(
         await setResolved(deps.orm, actor, c.req.param('commentId'), resolved),
         200,
@@ -116,6 +139,8 @@ export function createCommentRoutes(deps: CommentRouteDeps): Hono {
   routes.put(`${commentPath}/reactions/:emoji`, small, async (c) => {
     const actor = await actorOf(c, deps.auth);
     if (actor instanceof Response) return actor;
+    const slowDown = limited(actor);
+    if (slowDown) return slowDown;
     return changeResponse(
       await setReaction(deps.orm, actor, c.req.param('commentId'), c.req.param('emoji'), true),
       200,
@@ -124,6 +149,8 @@ export function createCommentRoutes(deps: CommentRouteDeps): Hono {
   routes.delete(`${commentPath}/reactions/:emoji`, small, async (c) => {
     const actor = await actorOf(c, deps.auth);
     if (actor instanceof Response) return actor;
+    const slowDown = limited(actor);
+    if (slowDown) return slowDown;
     return changeResponse(
       await setReaction(deps.orm, actor, c.req.param('commentId'), c.req.param('emoji'), false),
       200,

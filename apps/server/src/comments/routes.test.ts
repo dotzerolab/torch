@@ -66,6 +66,43 @@ describe.skipIf(!databaseUrl)('comment routes', () => {
     expect(Number.isInteger(json.txid)).toBe(true);
   });
 
+  it('a member who writes more than 60 times in a minute is answered 429 rate_limited; reads, others and the next minute are not', async () => {
+    const s = await setup();
+    const root = await add(s, 'one');
+    const react = (cookie: string) =>
+      s.t.request('PUT', `${s.one(root.id)}/reactions/${encodeURIComponent('👍')}`, undefined, {
+        cookie,
+      });
+
+    // The comment above was the first write; the reactions are the next 59 (the repeat of a reaction still counts).
+    for (let i = 0; i < 59; i++) expect((await react(s.member)).status).toBe(200);
+    const blocked = await react(s.member);
+    const edit = await s.t.request(
+      'PATCH',
+      s.one(root.id),
+      { body: 'again' },
+      { cookie: s.member },
+    );
+    const create = await s.t.post(s.list, { body: 'more' }, { cookie: s.member });
+    const remove = await s.t.request('DELETE', s.one(root.id), undefined, { cookie: s.member });
+    const resolve = await s.t.post(`${s.one(root.id)}/resolve`, undefined, { cookie: s.member });
+    const other = await s.t.post(s.list, { body: 'from somebody else' }, { cookie: s.admin });
+    const read = await s.t.get(s.list, { cookie: s.member });
+    s.t.clock.current = new Date(s.t.clock.current.getTime() + 61_000);
+    const later = await react(s.member);
+
+    for (const res of [blocked, edit, create, remove, resolve]) {
+      expect(res.status).toBe(429);
+      expect(await res.json()).toMatchObject({ error: 'rate_limited' });
+      expect(Number(res.headers.get('retry-after'))).toBeGreaterThanOrEqual(1);
+      expect(res.headers.get('cache-control')).toBe('no-store');
+    }
+    expect(other.status).toBe(201);
+    expect(read.status).toBe(200);
+    expect(((await read.json()) as { comments: CommentBody[] }).comments).toHaveLength(2);
+    expect(later.status).toBe(200);
+  });
+
   it('GET lists the comments of the issue, oldest first, as { comments }', async () => {
     const s = await setup();
     const one = await add(s, 'one');
