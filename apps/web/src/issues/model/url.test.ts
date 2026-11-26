@@ -1,6 +1,6 @@
 import { DEFAULT_DISPLAY, type ViewDisplay, type ViewFilter } from '@torch/shared/views';
 import { describe, expect, it } from 'vitest';
-import { decodeView, encodeView } from './url.ts';
+import { decodeView, encodeView, withView } from './url.ts';
 
 const G1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const G2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -79,5 +79,24 @@ describe('view URL codec', () => {
       filter: {},
       display: DEFAULT_DISPLAY,
     });
+  });
+
+  it('withView swaps the view parameters of an address and keeps every other one', () => {
+    const next = withView(
+      '?peek=ENG-1&state=old&layout=board&x=1',
+      { priority: [1] },
+      { group: 'assignee' },
+    );
+    const params = new URLSearchParams(next);
+    expect(params.get('peek')).toBe('ENG-1');
+    expect(params.get('x')).toBe('1');
+    expect(params.get('priority')).toBe('1');
+    expect(params.get('group')).toBe('assignee');
+    expect(params.has('state')).toBe(false);
+    expect(params.has('layout')).toBe(false);
+  });
+
+  it('withView gives an empty string when nothing is left', () => {
+    expect(withView('?state=a&layout=list', {}, {})).toBe('');
   });
 });

@@ -123,3 +123,42 @@ export function decodeView(params: URLSearchParams): {
   if (showArchived !== undefined) display.showArchived = showArchived;
   return { filter, display };
 }
+
+/** The query parameters a view owns; every other parameter of an address (the peek, the tab) is left alone. */
+const VIEW_PARAMS = [
+  ...encodeView(
+    {
+      state: ['x'],
+      stateType: ['started'],
+      assignee: ['me'],
+      creator: ['me'],
+      priority: [1],
+      label: ['x'],
+      due: ['week'],
+      text: 'x',
+    },
+    {
+      layout: 'list',
+      group: 'state',
+      order: 'manual',
+      direction: 'asc',
+      subIssues: true,
+      properties: [],
+      showEmptyGroups: true,
+      showArchived: true,
+    },
+  ).keys(),
+];
+
+/** The query string (with its `?`, or empty) of `search` with its view parameters replaced by these. */
+export function withView(
+  search: string,
+  filter: ViewFilter,
+  display: Partial<ViewDisplay>,
+): string {
+  const params = new URLSearchParams(search);
+  for (const name of VIEW_PARAMS) params.delete(name);
+  for (const [name, value] of encodeView(filter, display)) params.set(name, value);
+  const text = params.toString();
+  return text ? `?${text}` : '';
+}

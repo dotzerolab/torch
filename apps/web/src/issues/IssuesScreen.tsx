@@ -1,7 +1,6 @@
 import type { Locale } from '@torch/shared/i18n';
 import { t } from '@torch/shared/i18n';
 import type { IssueUpdateInput } from '@torch/shared/mutations/issue';
-import { DEFAULT_DISPLAY } from '@torch/shared/views';
 import { useCallback, useMemo, useState } from 'react';
 import { mutationErrorMessage } from '../errors.ts';
 import { useLocation } from '../navigation.ts';
@@ -10,11 +9,11 @@ import { useShell } from '../shell/ShellContext.ts';
 import type { SyncedTeam } from '../sync/collections.ts';
 import { useShape } from '../sync/shapes.ts';
 import { useIssueRows, useTeamData } from './data.ts';
-import { IssueList } from './IssueList.tsx';
+import { IssuesView } from './IssuesView.tsx';
 import { localDay } from './model/day.ts';
-import { buildSections, type IssueRow } from './model/engine.ts';
+import type { IssueRow } from './model/engine.ts';
 import { updateIssue } from './mutate.ts';
-import { SelectionProvider } from './SelectionContext.tsx';
+import { useViewState } from './useViewState.ts';
 
 /** The issues of one team: its rows, grouped and ordered, in the list. */
 function TeamIssues({
@@ -33,12 +32,7 @@ function TeamIssues({
   const { rows, ready } = useIssueRows(workspaceId, team);
   const [error, setError] = useState<string | null>(null);
   const today = useMemo(() => localDay(), []);
-  const display = DEFAULT_DISPLAY;
-
-  const sections = useMemo(
-    () => buildSections(rows, {}, display, { meId: memberId, today, states: data.statesById }),
-    [rows, memberId, today, data.statesById],
-  );
+  const view = useViewState(team.id);
 
   const update = useCallback(
     (row: IssueRow, patch: IssueUpdateInput) => {
@@ -61,30 +55,19 @@ function TeamIssues({
     );
   }
   return (
-    <section className="issues" aria-label={team.name}>
-      {error && (
-        <p className="issues__error" role="alert" data-testid="mutation-error">
-          {error}
-        </p>
-      )}
-      {rows.length === 0 ? (
-        <p className="issues__note">{t(locale, 'workspace.noIssues')}</p>
-      ) : (
-        <SelectionProvider>
-          <IssueList
-            sections={sections}
-            display={display}
-            data={data}
-            meId={memberId}
-            today={today}
-            teamKey={team.key}
-            onOpen={open}
-            onRename={rename}
-            onUpdate={update}
-          />
-        </SelectionProvider>
-      )}
-    </section>
+    <IssuesView
+      rows={rows}
+      data={data}
+      meId={memberId}
+      today={today}
+      teamKey={team.key}
+      teamName={team.name}
+      view={view}
+      error={error}
+      onOpen={open}
+      onRename={rename}
+      onUpdate={update}
+    />
   );
 }
 
