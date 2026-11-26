@@ -40,6 +40,9 @@ export function IssueList({
   initialRect,
   revealId,
   onOpen,
+  onPeek,
+  peekOpen,
+  onClosePeek,
   onRename,
   onUpdate,
 }: {
@@ -56,6 +59,11 @@ export function IssueList({
   /** Scrolls to this issue and focuses it whenever the id changes. */
   revealId?: string;
   onOpen: (row: Row) => void;
+  /** A click or Space previews the issue; without it a click opens it. */
+  onPeek?: (row: Row) => void;
+  /** The preview is open: Escape closes it before it clears the selection. */
+  peekOpen?: boolean;
+  onClosePeek?: () => void;
   onRename: (row: Row, title: string) => void;
   onUpdate: (row: Row, patch: IssueUpdateInput) => void;
 }) {
@@ -171,7 +179,7 @@ export function IssueList({
         else if (event.metaKey || event.ctrlKey) selection.toggle(row.id);
         else {
           selection.only(row.id);
-          onOpen(row);
+          (onPeek ?? onOpen)(row);
         }
         setActiveId(row.id);
       },
@@ -190,7 +198,7 @@ export function IssueList({
       },
       onUpdate,
     }),
-    [selection, rowIds, onOpen, onRename, onUpdate],
+    [selection, rowIds, onOpen, onPeek, onRename, onUpdate],
   );
 
   // The keys belong to the list only while no picker or rename has the keyboard.
@@ -204,7 +212,12 @@ export function IssueList({
       next: () => moveBy(1),
       prev: () => moveBy(-1),
       select: () => currentRow && selection.toggle(currentRow.id),
+      peek: () => currentRow && onPeek?.(currentRow),
       clear: () => {
+        if (peekOpen) {
+          onClosePeek?.();
+          return;
+        }
         if (inList() && selection.ids.size > 0) selection.clear();
       },
       rename: () => currentRow && setRenamingId(currentRow.id),

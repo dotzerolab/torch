@@ -55,3 +55,11 @@ export function routeTeamKey(route: Route): string | null {
       return null;
   }
 }
+
+/** `ENG-12` as its team key and number; the key itself may hold dashes. Null for anything else. */
+export function splitIdentifier(identifier: string): { key: string; number: number } | null {
+  const match = /^(.+)-(\d+)$/.exec(identifier);
+  if (!match) return null;
+  const number = Number(match[2]);
+  return Number.isSafeInteger(number) && number > 0 ? { key: match[1] as string, number } : null;
+}

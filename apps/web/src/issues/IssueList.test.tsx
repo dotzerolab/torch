@@ -79,6 +79,9 @@ function Harness({
   rows: IssueRow[];
   display?: ViewDisplay;
   onOpen?: (row: IssueRow) => void;
+  onPeek?: (row: IssueRow) => void;
+  peekOpen?: boolean;
+  onClosePeek?: () => void;
   onRename?: (row: IssueRow, title: string) => void;
   revealId?: string;
 }) {
@@ -96,6 +99,9 @@ function Harness({
           teamKey="ENG"
           initialRect={{ width: 900, height: 600 }}
           onOpen={props.onOpen ?? (() => {})}
+          onPeek={props.onPeek}
+          peekOpen={props.peekOpen}
+          onClosePeek={props.onClosePeek}
           onRename={props.onRename ?? (() => {})}
           onUpdate={() => {}}
           revealId={props.revealId}
@@ -322,5 +328,29 @@ describe('IssueList', () => {
     await userEvent.keyboard('j');
     expect(screen.getByRole('status')).toHaveTextContent('ENG-1');
     await act(async () => {});
+  });
+
+  it('a click and Space preview the issue, Enter opens it', async () => {
+    const onOpen = vi.fn();
+    const onPeek = vi.fn();
+    render(<Harness rows={many(4)} onOpen={onOpen} onPeek={onPeek} />);
+    await userEvent.click(screen.getByTestId('issue-1'));
+    expect(onPeek).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'i1' }));
+    await userEvent.keyboard('j');
+    await userEvent.keyboard('{ }');
+    expect(onPeek).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'i3' }));
+    await userEvent.keyboard('{Enter}');
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: 'i3' }));
+    expect(onPeek).toHaveBeenCalledTimes(2);
+  });
+
+  it('Escape closes the preview before it clears the selection', async () => {
+    const onClosePeek = vi.fn();
+    render(<Harness rows={many(3)} peekOpen onClosePeek={onClosePeek} onPeek={() => {}} />);
+    await userEvent.click(screen.getByTestId('issue-1'));
+    expect(screen.getByTestId('selected')).toHaveTextContent('i1');
+    await userEvent.keyboard('{Escape}');
+    expect(onClosePeek).toHaveBeenCalledOnce();
+    expect(screen.getByTestId('selected')).toHaveTextContent('i1');
   });
 });

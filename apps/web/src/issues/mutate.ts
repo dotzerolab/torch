@@ -87,3 +87,70 @@ export async function updateIssue(
   }
   await Promise.all(jobs);
 }
+
+// ---- writes of the issue panel: they go through the outbox (they survive a reload and replay with their key) ----
+
+type SnapshotKind = 'issueDetail' | 'issueSubscribers';
+
+export type DetailDeps = {
+  enqueue: (write: OutboxWrite) => Promise<{ txid: number }>;
+  /** Read the held snapshots of these kinds again: the write changed what they hold. */
+  refresh: (workspaceId: string, teamId: string, kinds: SnapshotKind[]) => void;
+};
+
+const detailDeps: DetailDeps = {
+  enqueue: enqueueWrite,
+  refresh: (workspaceId, teamId, kinds) => snapshotWatch.ownWrite({ workspaceId, teamId, kinds }),
+};
+
+type IssueRef = Pick<SyncedIssue, 'id' | 'workspace_id' | 'team_id'>;
+
+const issuePath = (issue: IssueRef) => `/api/w/${issue.workspace_id}/issues/${issue.id}`;
+
+/** The description is not in the list shape: it is a PATCH, and the opened issue's snapshot is read again. */
+export async function saveDescription(
+  issue: IssueRef,
+  description: string,
+  deps: DetailDeps = detailDeps,
+): Promise<void> {
+  await deps.enqueue({
+    workspaceId: issue.workspace_id,
+    teamId: issue.team_id,
+    method: 'PATCH',
+    path: issuePath(issue),
+    body: { description },
+    idempotencyKey: crypto.randomUUID(),
+  });
+  deps.refresh(issue.workspace_id, issue.team_id, ['issueDetail']);
+}
+
+export async function setSubscribed(
+  issue: IssueRef,
+  memberId: string,
+  subscribed: boolean,
+  deps: DetailDeps = detailDeps,
+): Promise<void> {
+  await deps.enqueue({
+    workspaceId: issue.workspace_id,
+    teamId: issue.team_id,
+    method: subscribed ? 'PUT' : 'DELETE',
+    path: `${issuePath(issue)}/subscribers/${memberId}`,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  deps.refresh(issue.workspace_id, issue.team_id, ['issueSubscribers']);
+}
+
+/** The issues shape carries `archived_at` back by itself; nothing else needs reading again. */
+export async function setArchived(
+  issue: IssueRef,
+  archived: boolean,
+  deps: Pick<DetailDeps, 'enqueue'> = detailDeps,
+): Promise<void> {
+  await deps.enqueue({
+    workspaceId: issue.workspace_id,
+    teamId: issue.team_id,
+    method: 'POST',
+    path: `${issuePath(issue)}/${archived ? 'archive' : 'unarchive'}`,
+    idempotencyKey: crypto.randomUUID(),
+  });
+}

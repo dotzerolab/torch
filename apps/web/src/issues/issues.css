@@ -518,3 +518,143 @@
     flex-basis: 85%;
   }
 }
+
+/* The issue preview: beside the list, over its right edge, so the list does not move when it opens. */
+.issues__stage {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.issue-peek {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  width: min(30rem, 100%);
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-popover);
+}
+.issue-panel {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+.issue-panel--page {
+  max-width: 48rem;
+  margin: 0 auto;
+}
+.issue-panel__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.issue-panel__crumbs {
+  display: flex;
+  gap: var(--space-2);
+  color: var(--fg-muted);
+}
+.issue-panel__spacer {
+  flex: 1;
+}
+.issue-panel__banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+}
+.issue-panel__title {
+  width: 100%;
+  padding: var(--space-1) 0;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  background: transparent;
+  color: var(--fg);
+  font: var(--title-font);
+}
+.issue-panel__title:focus-visible {
+  border-bottom-color: var(--border-strong);
+  outline: none;
+}
+.issue-panel__properties {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.issue-panel__properties legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+.issue-panel__property {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.issue-panel__property:hover:not(:disabled),
+.issue-panel__property:focus-visible {
+  background: var(--bg-hover);
+}
+.issue-panel__property:disabled {
+  cursor: default;
+}
+.issue-panel__property-name {
+  flex: 0 0 6.5rem;
+  color: var(--fg-subtle);
+  font-size: var(--text-sm);
+}
+.issue-panel__property-value {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.issue-panel__description,
+.issue-panel__add {
+  display: block;
+  width: 100%;
+  padding: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+}
+button.issue-panel__description,
+.issue-panel__add {
+  cursor: text;
+}
+.issue-panel__add {
+  color: var(--fg-subtle);
+}
+.issue-panel__actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+@media (max-width: 767px) {
+  .issue-peek {
+    width: 100%;
+  }
+}

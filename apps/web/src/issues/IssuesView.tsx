@@ -2,7 +2,7 @@
 // The rows and the reference data come from the screen (a team, My Issues); the view state is the address and the device.
 import type { IssueUpdateInput } from '@torch/shared/mutations/issue';
 import { GROUPS, type ViewDisplay } from '@torch/shared/views';
-import { useEffect, useMemo, useRef } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef } from 'react';
 import { Button } from '../design/components/Button.tsx';
 import { useT } from '../design/locale.tsx';
 import { DisplayMenu } from './DisplayMenu.tsx';
@@ -32,7 +32,11 @@ export function IssuesView({
   error,
   initialRect,
   revealId,
+  aside,
+  peekOpen,
   onOpen,
+  onPeek,
+  onClosePeek,
   onRename,
   onUpdate,
 }: {
@@ -50,7 +54,12 @@ export function IssuesView({
   error: string | null;
   initialRect?: { width: number; height: number };
   revealId?: string;
+  /** A side panel drawn beside the list (the issue preview). */
+  aside?: ReactNode;
+  peekOpen?: boolean;
   onOpen: (row: IssueRow) => void;
+  onPeek?: (row: IssueRow) => void;
+  onClosePeek?: () => void;
   onRename: (row: IssueRow, title: string) => void;
   onUpdate: (row: IssueRow, patch: IssueUpdateInput) => void;
 }) {
@@ -128,56 +137,65 @@ export function IssuesView({
           {error}
         </p>
       )}
-      {shown === 0 ? (
-        <div className="issues__note">
-          {filtering ? (
-            <>
-              <p>{t('issues.noMatch')}</p>
-              <Button size="sm" onClick={() => view.setFilter({})}>
-                {t('filter.clear')}
-              </Button>
-            </>
-          ) : (
-            <p>{t('workspace.noIssues')}</p>
-          )}
-        </div>
-      ) : (
-        <div ref={host} className="issues__body">
-          <SelectionProvider>
-            {board ? (
-              <IssueBoard
-                sections={sections}
-                display={display}
-                data={data}
-                meId={meId}
-                today={today}
-                teamKey={teamKey}
-                names={groupNames}
-                initialRect={initialRect}
-                revealId={revealId}
-                onOpen={onOpen}
-                onRename={onRename}
-                onUpdate={onUpdate}
-              />
+      <div className="issues__stage">
+        {shown === 0 ? (
+          <div className="issues__note">
+            {filtering ? (
+              <>
+                <p>{t('issues.noMatch')}</p>
+                <Button size="sm" onClick={() => view.setFilter({})}>
+                  {t('filter.clear')}
+                </Button>
+              </>
             ) : (
-              <IssueList
-                sections={sections}
-                display={display}
-                data={data}
-                meId={meId}
-                today={today}
-                teamKey={teamKey}
-                names={groupNames}
-                initialRect={initialRect}
-                revealId={revealId}
-                onOpen={onOpen}
-                onRename={onRename}
-                onUpdate={onUpdate}
-              />
+              <p>{t('workspace.noIssues')}</p>
             )}
-          </SelectionProvider>
-        </div>
-      )}
+          </div>
+        ) : (
+          <div ref={host} className="issues__body">
+            <SelectionProvider>
+              {board ? (
+                <IssueBoard
+                  sections={sections}
+                  display={display}
+                  data={data}
+                  meId={meId}
+                  today={today}
+                  teamKey={teamKey}
+                  names={groupNames}
+                  initialRect={initialRect}
+                  revealId={revealId}
+                  onOpen={onOpen}
+                  onPeek={onPeek}
+                  peekOpen={peekOpen}
+                  onClosePeek={onClosePeek}
+                  onRename={onRename}
+                  onUpdate={onUpdate}
+                />
+              ) : (
+                <IssueList
+                  sections={sections}
+                  display={display}
+                  data={data}
+                  meId={meId}
+                  today={today}
+                  teamKey={teamKey}
+                  names={groupNames}
+                  initialRect={initialRect}
+                  revealId={revealId}
+                  onOpen={onOpen}
+                  onPeek={onPeek}
+                  peekOpen={peekOpen}
+                  onClosePeek={onClosePeek}
+                  onRename={onRename}
+                  onUpdate={onUpdate}
+                />
+              )}
+            </SelectionProvider>
+          </div>
+        )}
+        {aside}
+      </div>
     </section>
   );
 }

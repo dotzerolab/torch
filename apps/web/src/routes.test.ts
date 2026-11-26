@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseRoute, routeTeamKey } from './routes.ts';
+import { parseRoute, routeTeamKey, splitIdentifier } from './routes.ts';
 
 const GUID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
@@ -67,5 +67,18 @@ describe('routeTeamKey', () => {
     expect(routeTeamKey(parseRoute('/'))).toBeNull();
     expect(routeTeamKey(parseRoute('/my-issues'))).toBeNull();
     expect(routeTeamKey(parseRoute('/settings/profile'))).toBeNull();
+  });
+});
+
+describe('splitIdentifier', () => {
+  it('splits a team key and a number, the key may hold dashes', () => {
+    expect(splitIdentifier('ENG-12')).toEqual({ key: 'ENG', number: 12 });
+    expect(splitIdentifier('MY-TEAM-3')).toEqual({ key: 'MY-TEAM', number: 3 });
+  });
+
+  it('refuses what is not an identifier', () => {
+    for (const bad of ['ENG', 'ENG-', 'ENG-0', '-5', 'ENG-1x', 'ENG-99999999999999999999']) {
+      expect(splitIdentifier(bad)).toBeNull();
+    }
   });
 });

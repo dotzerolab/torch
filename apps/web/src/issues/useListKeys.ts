@@ -11,6 +11,8 @@ export type ListActions = {
   clear: () => void;
   rename: () => void;
   picker: (kind: PickerKind) => void;
+  /** Space: preview the current issue in the side panel. */
+  peek?: () => void;
 };
 
 /** `enabled` is false while something else owns the keys (a picker or a dialog is open). */
@@ -39,6 +41,11 @@ export function useListKeys(actions: ListActions, enabled = true): void {
   useShortcut(
     { id: 'issues.rename', keys: 'f2', labelKey: 'shortcuts.issues.rename' },
     actions.rename,
+    on,
+  );
+  useShortcut(
+    { id: 'issues.peek', keys: 'space', labelKey: 'shortcuts.issues.peek' },
+    () => actions.peek?.(),
     on,
   );
   useShortcut(

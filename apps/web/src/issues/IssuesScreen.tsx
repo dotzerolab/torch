@@ -3,12 +3,14 @@ import { t } from '@torch/shared/i18n';
 import type { IssueUpdateInput } from '@torch/shared/mutations/issue';
 import { useCallback, useMemo, useState } from 'react';
 import { mutationErrorMessage } from '../errors.ts';
-import { useLocation } from '../navigation.ts';
+import { navigate, useLocation } from '../navigation.ts';
 import { parseRoute } from '../routes.ts';
 import { useShell } from '../shell/ShellContext.ts';
 import type { SyncedTeam } from '../sync/collections.ts';
 import { useShape } from '../sync/shapes.ts';
 import { useIssueRows, useTeamData } from './data.ts';
+import { IssueDetail } from './IssueDetail.tsx';
+import { IssuePeek } from './IssuePeek.tsx';
 import { IssuesView } from './IssuesView.tsx';
 import { localDay } from './model/day.ts';
 import type { IssueRow } from './model/engine.ts';
@@ -45,7 +47,27 @@ function TeamIssues({
     [issues, locale],
   );
   const rename = useCallback((row: IssueRow, title: string) => update(row, { title }), [update]);
-  const open = useCallback(() => {}, []);
+  const { pathname, search } = useLocation();
+  const peeked = new URLSearchParams(search).get('peek');
+  const peek = useCallback(
+    (row: IssueRow) => {
+      if (!row.identifier) return;
+      const params = new URLSearchParams(window.location.search);
+      params.set('peek', row.identifier);
+      navigate(`${pathname}?${params.toString()}`);
+    },
+    [pathname],
+  );
+  const closePeek = useCallback(() => {
+    const params = new URLSearchParams(window.location.search);
+    params.delete('peek');
+    const rest = params.toString();
+    navigate(rest ? `${pathname}?${rest}` : pathname, { replace: true });
+  }, [pathname]);
+  // Enter opens the page of the issue; a queued issue has no number to open yet.
+  const open = useCallback((row: IssueRow) => {
+    if (row.identifier) navigate(`/issues/${row.identifier}`);
+  }, []);
 
   if (!ready || !data.statesReady) {
     return (
@@ -65,6 +87,19 @@ function TeamIssues({
       view={view}
       error={error}
       onOpen={open}
+      onPeek={peek}
+      peekOpen={peeked !== null}
+      onClosePeek={closePeek}
+      aside={
+        peeked ? (
+          <IssuePeek
+            workspaceId={workspaceId}
+            team={team}
+            identifier={peeked}
+            onClose={closePeek}
+          />
+        ) : null
+      }
       onRename={rename}
       onUpdate={update}
     />
@@ -76,6 +111,16 @@ export function IssuesScreen({ locale }: { locale: Locale }) {
   const { pathname } = useLocation();
   const route = parseRoute(pathname);
   const { workspace, team, teams, teamsReady } = useShell();
+  if (route.name === 'issue') {
+    return (
+      <IssueDetail
+        workspaceId={workspace.id}
+        teams={teams}
+        teamsReady={teamsReady}
+        identifier={route.identifier}
+      />
+    );
+  }
   if (route.name === 'myIssues') {
     return <p className="issues__note">{t(locale, 'shell.myIssues')}</p>;
   }

@@ -35,6 +35,9 @@ export function IssueBoard({
   revealId,
   renderHeaderAction,
   onOpen,
+  onPeek,
+  peekOpen,
+  onClosePeek,
   onRename,
   onUpdate,
 }: {
@@ -50,6 +53,11 @@ export function IssueBoard({
   /** The "+" of a column (creating an issue in it) arrives with the create flow. */
   renderHeaderAction?: (section: Section) => ReactNode;
   onOpen: (row: Row) => void;
+  /** A click or Space previews the issue; without it a click opens it. */
+  onPeek?: (row: Row) => void;
+  /** The preview is open: Escape closes it before it clears the selection. */
+  peekOpen?: boolean;
+  onClosePeek?: () => void;
   onRename: (row: Row, title: string) => void;
   onUpdate: (row: Row, patch: IssueUpdateInput) => void;
 }) {
@@ -165,7 +173,7 @@ export function IssueBoard({
         else if (event.metaKey || event.ctrlKey) selection.toggle(row.id);
         else {
           selection.only(row.id);
-          onOpen(row);
+          (onPeek ?? onOpen)(row);
         }
         setActiveId(row.id);
       },
@@ -184,7 +192,7 @@ export function IssueBoard({
       },
       onUpdate,
     }),
-    [selection, rowIds, onOpen, onRename, onUpdate],
+    [selection, rowIds, onOpen, onPeek, onRename, onUpdate],
   );
 
   const host = useRef<HTMLDivElement>(null);
@@ -198,7 +206,12 @@ export function IssueBoard({
       next: () => moveBy(1),
       prev: () => moveBy(-1),
       select: () => currentRow && selection.toggle(currentRow.id),
+      peek: () => currentRow && onPeek?.(currentRow),
       clear: () => {
+        if (peekOpen) {
+          onClosePeek?.();
+          return;
+        }
         if (inBoard() && selection.ids.size > 0) selection.clear();
       },
       rename: () => currentRow && setRenamingId(currentRow.id),
